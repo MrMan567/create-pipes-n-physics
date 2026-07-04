@@ -3,9 +3,8 @@ package de.devin.pipesnphysics;
 import net.neoforged.neoforge.common.ModConfigSpec;
 
 /**
- * Server + client config for the v1 engine. Most knobs from the v0 build are
- * gone with the old engine; only the surviving features (Sable tank mass,
- * tilted/wave fluid rendering) and the master enable flag remain.
+ * Server + client config for the v2 hydraulic engine (see CLAUDE.md). Sim-affecting knobs live on
+ * the SERVER spec (synced to clients); rendering toggles live on the CLIENT spec.
  */
 public class PipesNPhysicsConfig {
     public static final ModConfigSpec SERVER_SPEC;
@@ -20,9 +19,11 @@ public class PipesNPhysicsConfig {
     public static final ModConfigSpec.DoubleValue SUCTION_LIMIT;
     public static final ModConfigSpec.BooleanValue ENABLE_OPEN_END_INTAKE;
     public static final ModConfigSpec.IntValue OPEN_END_INTAKE_COOLDOWN_TICKS;
+    public static final ModConfigSpec.BooleanValue ENABLE_VALVE_THROTTLE;
     public static final ModConfigSpec.BooleanValue ENABLE_DYNAMIC_TANK_MASS;
     public static final ModConfigSpec.BooleanValue EXPERIMENTAL_TANK_COG;
     public static final ModConfigSpec.BooleanValue ENABLE_OPEN_END_WORLD_PLACEMENT;
+    public static final ModConfigSpec.BooleanValue ENABLE_SUBLEVEL_CONNECTION_REFRESH;
     public static final ModConfigSpec.DoubleValue FLUID_MASS_PER_BUCKET;
 
     // Client
@@ -30,6 +31,10 @@ public class PipesNPhysicsConfig {
     public static final ModConfigSpec.BooleanValue SHOW_PUMP_RANGE_ARROWS;
     public static final ModConfigSpec.BooleanValue PRESERVE_PUMP_RANGE;
     public static final ModConfigSpec.IntValue PUMP_RANGE_PRESERVE_SECONDS;
+    public static final ModConfigSpec.BooleanValue ENABLE_PIPE_SWAP;
+    public static final ModConfigSpec.BooleanValue PIPE_LEVEL_RENDER;
+    public static final ModConfigSpec.DoubleValue PIPE_LEVEL_FLOW_SPEED;
+    public static final ModConfigSpec.BooleanValue PIPE_FLOW_PARTIAL_FILL;
     public static final ModConfigSpec.BooleanValue FLUID_TILT_ENABLED;
     public static final ModConfigSpec.BooleanValue FLUID_WAVE_MESH;
     public static final ModConfigSpec.IntValue FLUID_SURFACE_RESOLUTION;
@@ -75,6 +80,12 @@ public class PipesNPhysicsConfig {
                         "may pull a finite source again (the anti-reclaim window). Lakes and cauldrons",
                         "ignore this. Larger = safer against flicker on networks that both push and pull.")
                 .defineInRange("openEndIntakeCooldownTicks", 20, 0, 200);
+        ENABLE_VALVE_THROTTLE = server
+                .comment("Let a fluid valve throttle its flow by a 0-90 degree angle set with the scroll",
+                        "value (the box on its side faces). The shaft still opens and closes the valve;",
+                        "the angle only caps how much flows while it is open (90 = fully open). When",
+                        "false, valves stay plain on/off.")
+                .define("enableValveThrottle", true);
         server.pop();
 
         server.push("sableCompat");
@@ -82,6 +93,13 @@ public class PipesNPhysicsConfig {
                 .comment("When an open-ended pipe on a Sable sub-level spills fluid,",
                         "place the fluid block in the real world at the projected position.")
                 .define("enableOpenEndWorldPlacement", true);
+        ENABLE_SUBLEVEL_CONNECTION_REFRESH = server
+                .comment("Recompute pipe connection state on Sable sub-levels. Sable assembles a",
+                        "contraption with raw setBlockState (no neighbour update), so a pipe's",
+                        "connection shape can stay stale and drop real edges — the network then",
+                        "solves 'no flow' until a manual pipe edit fixes it. This refreshes each",
+                        "sub-level pipe once so pumps/networks work without the manual poke.")
+                .define("enableSubLevelConnectionRefresh", true);
         server.pop();
 
         server.push("tankMass");
@@ -118,7 +136,39 @@ public class PipesNPhysicsConfig {
                 .comment("How many seconds the pump range indicator lingers after looking away.")
                 .defineInRange("pumpRangePreserveSeconds", 5, 1, 60);
         client.pop();
-        client.push("fluidPhysics");
+        client.push("controls");
+        ENABLE_PIPE_SWAP = client
+                .comment("Shift + right-click a pipe element (pump, valve, smart fluid pipe, pipe) held in",
+                        "hand onto another pipe element to replace it in place — the old block's drops are",
+                        "refunded and one held block is consumed. Handy for editing a run without breaking it",
+                        "first. (Read on the client, so it only takes effect in singleplayer / on your own",
+                        "integrated server; a dedicated server always allows the swap.)")
+                .define("enablePipeSwap", true);
+        client.pop();
+        client.push("pipeRendering");
+        PIPE_LEVEL_RENDER = client
+                .comment("Draw fluid inside pipes at its actual waterline (a partial fill at the solved",
+                        "surface) instead of Create's binary full-or-empty fill. Resting fluid in straight",
+                        "glass pipes only. The per-cell waterline is computed server-side onto the synced pipe",
+                        "flow; in singleplayer the integrated server reads this client flag directly, so it",
+                        "works without a per-world server-config edit. (The server-side encode is gated on the",
+                        "CLIENT being present, so it takes effect in singleplayer only for now.) When false,",
+                        "pipes render exactly as stock Create.")
+                .define("pipeLevelRender", true);
+        PIPE_LEVEL_FLOW_SPEED = client
+                .comment("Speed multiplier for the in-pipe fluid scroll animation (the level renderer above).",
+                        "1.0 = default; lower it to calm a fast flow, raise it to make it livelier. Only the",
+                        "animation speed changes, not the actual fluid transfer.")
+                .defineInRange("pipeLevelFlowSpeed", 1.0, 0.0, 10.0);
+        PIPE_FLOW_PARTIAL_FILL = client
+                .comment("Needs the level renderer above: draw a FLOWING horizontal pipe at its head WATERLINE",
+                        "(like a resting pipe), so the fill rises as the head rises instead of always brimming",
+                        "the tube. A display metric, not physics (a pressurised pipe is really full); pump",
+                        "risers / crests pressurised above the line stay full, and vertical runs fill their bore.",
+                        "When false, a flowing pipe fills the whole tube as before.")
+                .define("pipeFlowPartialFill", true);
+        client.pop();
+        client.push("sableFluidPhysics");
         FLUID_TILT_ENABLED = client
                 .comment("Enable tilted fluid rendering in tanks on Sable sub-levels.")
                 .define("fluidTiltEnabled", true);

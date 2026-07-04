@@ -6,12 +6,21 @@
   "refmap": "pipesnphysics.refmap.json",
   "mixins": [
     "PumpBlockEntityMixin",
+    "FluidValveBlockEntityMixin",
+    "ValveHandleBlockEntityMixin",
     "GravityFlowMixin",
     "FluidTankAccessor",
     "OpenEndedPipeMixin",
     "OpenEndedPipeAccessor",
     "PipeConnectionAccessor",
+    "FluidTransportBehaviourMixin",
+    "HosePulleyBlockEntityMixin",
+    "FluidDrainingBehaviourAccessor",
     "PipeGoggleInfoMixin"
+  ],
+  "client": [
+    "GlassPipeVisualMixin",
+    "TransparentStraightPipeRendererMixin"
   ],
   "injectors": {
     "defaultRequire": 1

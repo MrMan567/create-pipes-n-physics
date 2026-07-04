@@ -2,6 +2,7 @@ package de.devin.pipesnphysics.engine;
 
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.compat.CreatePipeRendering;
+import de.devin.pipesnphysics.compat.SableCompat;
 import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.level.ServerLevel;
@@ -74,6 +75,12 @@ public final class EngineTickHandler {
         URGENT.computeIfAbsent(level.dimension(), k -> new HashSet<>()).add(pos.immutable());
     }
 
+    /** Whether pos is queued for an URGENT (wake) re-check this tick. Test/diagnostic hook. */
+    public static boolean hasPendingUrgent(Level level, BlockPos pos) {
+        Set<BlockPos> urgent = URGENT.get(level.dimension());
+        return urgent != null && urgent.contains(pos);
+    }
+
     /** Discard all pending work — called on server stop. */
     public static void clear() {
         DIRTY.clear();
@@ -83,6 +90,13 @@ public final class EngineTickHandler {
 
     @SubscribeEvent
     public static void onServerTick(ServerTickEvent.Post event) {
+        if (!PipesNPhysicsConfig.ENABLE_ENGINE.get()) return;
+        // Sable contraptions are assembled with no place event and their dry pipes never
+        // self-tick, so the engine never wakes on a sub-level. Seed every sub-level pipe cell
+        // each tick (the QUIET sleep still throttles re-solves); a no-op without full Sable.
+        for (ServerLevel level : event.getServer().getAllLevels()) {
+            SableCompat.seedSubLevels(level, EngineTickHandler::markDirty);
+        }
         if (DIRTY.isEmpty() && URGENT.isEmpty()) return;
         event.getServer().getAllLevels().forEach(EngineTickHandler::tickLevel);
     }
@@ -111,6 +125,15 @@ public final class EngineTickHandler {
     private static void tickNetwork(ServerLevel level, BlockPos pos, Set<BlockPos> covered,
                                     Map<BlockPos, Long> quiet, long now, boolean wake) {
         if (!level.isLoaded(pos)) return;
+        // Fast path: every pipe self-marks each tick, and a pipe IS a coverage/quiet cell, so check the
+        // RAW pos before resolving findSeed (a chunk BE lookup plus up to six neighbour lookups). Both
+        // maps are keyed by every coverage cell, so a hit means this pos is an already-solved or still-
+        // sleeping pipe — skip it. Non-pipe marks (a pump face, a tank wall) miss and fall through.
+        if (covered.contains(pos)) return;
+        if (!wake) {
+            Long sleepUntil = quiet.get(pos);
+            if (sleepUntil != null && sleepUntil > now) return;
+        }
         BlockPos seed = GraphBuilder.findSeed(level, pos);
         if (seed == null || covered.contains(seed)) return;
         if (!wake) {
