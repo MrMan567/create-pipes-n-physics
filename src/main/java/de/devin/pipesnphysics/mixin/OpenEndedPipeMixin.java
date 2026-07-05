@@ -128,18 +128,40 @@ public class OpenEndedPipeMixin {
     @Inject(method = "removeFluidFromSpace", at = @At("HEAD"), cancellable = true)
     private void pipesnphysics$removeFluidFromWorld(boolean simulate,
                                                     CallbackInfoReturnable<FluidStack> cir) {
-        BlockPos worldBlockPos = pipesnphysics$getWorldOutputPos();
-        if (worldBlockPos == null) return; // off a sub-level: Create's stock reads/consumes outputPos
-        if (world == null) {
-            cir.setReturnValue(FluidStack.EMPTY);
-            return;
-        }
-        // On a sub-level the source may be a block ON the contraption (the raw plot-coords outputPos)
+        if (world == null || outputPos == null) return;
+        BlockPos worldBlockPos = pipesnphysics$getWorldOutputPos(); // null off a sub-level
+
+        // Sub-level mouth: the source may be a block ON the contraption (the raw plot-coords outputPos)
         // OR a block in the host world under the projected mouth — mirroring spill, which goes to the
         // world. Try the sub-level block first, then the world.
-        FluidStack drained = pipesnphysics$drainSourceAt(outputPos, simulate);
-        if (drained.isEmpty()) drained = pipesnphysics$drainSourceAt(worldBlockPos, simulate);
-        cir.setReturnValue(drained);
+        if (worldBlockPos != null) {
+            FluidStack drained = pipesnphysics$drainSourceAt(outputPos, simulate);
+            if (drained.isEmpty()) drained = pipesnphysics$drainSourceAt(worldBlockPos, simulate);
+            if (!drained.isEmpty()) {
+                cir.setReturnValue(drained);
+                return;
+            }
+        }
+
+        // Cross-level piping: consume from another Sable level whose bounds overlap this mouth. This
+        // must run even for a MAIN-LEVEL mouth (worldBlockPos == null) that a contraption passes over —
+        // else the solver reads a source there but the drain moves nothing. Kept in step with the read
+        // side (BoundaryColumn.intakeFluid), which visits the same overlapping blocks in the same order.
+        if (PipesNPhysicsConfig.ENABLE_CROSS_LEVEL_PIPING.get()) {
+            FluidStack other = SableCompat.atOverlappingContraptions(world, outputPos, (l, p) -> {
+                FluidStack found = pipesnphysics$drainSourceAt(p, simulate);
+                return found.isEmpty() ? null : found; // null keeps Sable's traversal searching
+            });
+            if (other != null) {
+                cir.setReturnValue(other);
+                return;
+            }
+        }
+
+        // A sub-level mouth with nothing to drink anywhere: cancel with EMPTY, since we own its placement
+        // (letting Create's stock method run would consume the raw plot outputPos). A main-level mouth
+        // with no overlapping contraption falls through untouched to Create's stock behaviour.
+        if (worldBlockPos != null) cir.setReturnValue(FluidStack.EMPTY);
     }
 
     /**

@@ -1,6 +1,8 @@
 {
   "replace": false,
   "values": [
-    { "id": "createpropulsion:liquid_burner", "required": false }
+    { "id": "createpropulsion:liquid_burner", "required": false },
+    { "id": "simulated:docking_connector", "required": false },
+    { "id": "simulated:paired_docking_connector", "required": false }
   ]
 }

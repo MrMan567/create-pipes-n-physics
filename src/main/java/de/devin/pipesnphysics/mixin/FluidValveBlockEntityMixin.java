@@ -93,7 +93,8 @@ public abstract class FluidValveBlockEntityMixin extends KineticBlockEntity impl
     @Override
     public float pipesnphysics$valveThrottle() {
         if (pipesnphysics$throttle == null || !PipesNPhysicsConfig.ENABLE_VALVE_THROTTLE.get()) return 1f;
-        return pipesnphysics$throttle.getValue() / (float) FULL_OPEN_DEGREES;
+        double open = pipesnphysics$throttle.getValue() / (double) FULL_OPEN_DEGREES;
+        return (float) PipesNPhysicsConfig.VALVE_CHARACTERISTIC.get().factor(open);
     }
 
     @Override
@@ -152,15 +153,17 @@ public abstract class FluidValveBlockEntityMixin extends KineticBlockEntity impl
 
         GoggleText.lang("gui.goggles.valve_stats").style(ChatFormatting.WHITE).forGoggles(tooltip);
 
-        // The opening bar is the share the valve passes — only meaningful when it actually
-        // passes; a closed (0-degree) valve shows just the reason, never a green "all good" bar.
+        // The opening bar is the share of flow the valve passes — the characteristic-curved factor,
+        // NOT the raw angle, so a nonlinear curve reads honestly (the degrees show on the scroll box).
+        // Only meaningful when it actually passes; a closed (0-degree) valve shows just the reason.
         if (angle > 0) {
-            int percent = Math.round(100f * angle / FULL_OPEN_DEGREES);
+            float share = pipesnphysics$valveThrottle();
+            int percent = Math.round(100f * share);
             LangBuilder opening = GoggleText.lang("gui.goggles.valve_opening")
                     .style(ChatFormatting.GRAY)
                     .add(GoggleText.text(percent + "%").style(ChatFormatting.WHITE))
                     .add(GoggleText.text("  ").style(ChatFormatting.DARK_GRAY));
-            GoggleText.appendBars(opening, Math.round(10f * angle / FULL_OPEN_DEGREES), 10);
+            GoggleText.appendBars(opening, Math.round(10f * share), 10);
             opening.forGoggles(tooltip, 1);
         }
 

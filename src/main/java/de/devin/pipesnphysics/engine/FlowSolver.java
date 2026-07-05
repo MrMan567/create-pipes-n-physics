@@ -681,6 +681,47 @@ public final class FlowSolver {
             crestPos = statics.crestPos();
         }
 
+        // The DUAL of the empty→receive-only rule: a FULL finite reservoir can only GIVE, never
+        // receive. Walling inflow into it lets a backed-up run fill an UPSTREAM reservoir that still
+        // has room, instead of the one-shot solve routing a through-current to a full TERMINAL and
+        // zeroing the whole series line (the "goofy_network" freeze: a pump-fed tank starved because
+        // the spout past it was full). Applied LAST and only ever TIGHTENING a valid sign (skip on
+        // contradiction, never a fresh MIN_VALUE drop) so a submerged pipe into a full tank keeps its
+        // resting-fluid render — it must not fall out of the solve. Gated to plain runs (emf == 0): a
+        // pump dead-heading a full sink on its push side keeps its SINK_FULL stall and backed-up render.
+        if (emf == 0) {
+            int preFullSign = allowedSign; // the lip/valve constraint before the full walls
+            boolean fullDeadlock = false;
+            if (columnA != null && columnA.isFull()) {
+                int c = combineSign(allowedSign, +1);
+                if (c == Integer.MIN_VALUE) fullDeadlock = true; else allowedSign = c;
+            }
+            if (columnB != null && columnB.isFull()) {
+                int c = combineSign(allowedSign, -1);
+                if (c == Integer.MIN_VALUE) fullDeadlock = true; else allowedSign = c;
+            }
+            // The give-only wall CONTRADICTS the existing sign (a full tank with an UPWARD opening: it
+            // can neither receive — full — nor give upward — lip; or two full tanks facing each other).
+            // The pipe must carry NO flow either way, but stay in the solve so it still renders. Kill its
+            // conductance — a dead conduit, NOT a pass-through that would starve an upstream reservoir
+            // with room (the drained header above a full tank not refilling).
+            if (fullDeadlock) {
+                conductance = 0;
+                // preFullSign != 0 ⟺ the wall contradicts a PRE-EXISTING lip constraint ⟺ the pipe
+                // RISES above the full tank's waterline (that lip is exactly "the tank can't give
+                // upward"). It is a continuous column pressed against the full tank and must render
+                // FULL regardless of the header's own level — mark it SINK_FULL so the render fills all
+                // its cells (the min-waterline flatten would leave its upper cell dry: the "one pipe
+                // empty, worse once the top tank fills" report). preFullSign == 0 ⟺ two full ends facing
+                // each other with the pipe BELOW both (a U-pipe): its cells are already submerged, it
+                // settles correctly, and its goggle must read "settled" not "sink full".
+                if (preFullSign != 0) {
+                    results.stalledEdges.add(edge.index());
+                    results.edgeReasons.putIfAbsent(edge.index(), Solution.Reason.SINK_FULL);
+                }
+            }
+        }
+
         // The throttle is NOT baked into the conductance here. Scaling conductance only limits
         // the flow when the valve's own run is the binding resistor — in series with a strong
         // pump (whose tiny internal conductance dominates the loop) halving a fat pipe's

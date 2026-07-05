@@ -218,9 +218,13 @@ public final class BoundaryColumn {
      * The fluid an open mouth may draw IN, or EMPTY to keep it a one-way spill outlet. Checks the
      * block the pipe faces on its OWN level FIRST — a main-level source, or one placed on a Sable
      * sub-level (at its plot coords) — then, for a contraption mouth hovering over the host world, the
-     * PROJECTED world block (mirroring spill, which goes to the world). Residual already pulled into
-     * the pipe's buffer short-circuits both. Finite intake now works on sub-levels too: the drain
-     * (OpenEndedPipeMixin) consumes a finite source and leaves a lake, so it can no longer mint fluid.
+     * PROJECTED world block (mirroring spill, which goes to the world); and finally, when
+     * {@code ENABLE_CROSS_LEVEL_PIPING} is on, the corresponding block on any OTHER Sable level
+     * whose bounds overlap the mouth (ship A drinking a source on ship B, or a contraption over the
+     * dimension, or the dimension over a contraption). Residual already
+     * pulled into the pipe's buffer short-circuits everything. Finite intake works on sub-levels and
+     * across contraptions too: the drain (OpenEndedPipeMixin) consumes a finite source and leaves a
+     * lake, so it can no longer mint fluid.
      */
     private static FluidStack intakeFluid(Level level, BlockPos space, boolean networkSpilled) {
         if (!PipesNPhysicsConfig.ENABLE_OPEN_END_INTAKE.get()) return FluidStack.EMPTY;
@@ -229,7 +233,18 @@ public final class BoundaryColumn {
         FluidStack local = drinkableSource(level, space, networkSpilled);
         if (!local.isEmpty()) return local;
         BlockPos out = worldOutputPos(level, space);
-        return out.equals(space) ? FluidStack.EMPTY : drinkableSource(level, out, networkSpilled);
+        if (!out.equals(space)) {
+            FluidStack world = drinkableSource(level, out, networkSpilled);
+            if (!world.isEmpty()) return world;
+        }
+        if (PipesNPhysicsConfig.ENABLE_CROSS_LEVEL_PIPING.get()) {
+            FluidStack other = SableCompat.atOverlappingContraptions(level, space, (l, p) -> {
+                FluidStack found = drinkableSource(l, p, networkSpilled);
+                return found.isEmpty() ? null : found; // null keeps Sable's traversal searching
+            });
+            if (other != null) return other;
+        }
+        return FluidStack.EMPTY;
     }
 
     /**
@@ -337,6 +352,16 @@ public final class BoundaryColumn {
     public List<Integer> memberNodes() { return memberNodes; }
 
     public boolean isEmpty() { return contents.isEmpty() || contentMb <= 0; }
+
+    /**
+     * A finite reservoir at capacity: it can GIVE but cannot RECEIVE — the dual of {@link #isEmpty}.
+     * Open ends (an atmospheric boundary) and infinite sources are excluded; they carry their own
+     * one-way rules. Used to wall inflow into a full sink so a backed-up run fills an upstream
+     * reservoir with room instead of freezing the whole line.
+     */
+    public boolean isFull() {
+        return !isOpenEnd() && !infiniteSource && capacityMb > 0 && contentMb >= capacityMb;
+    }
 
     public double fillFraction() {
         return capacityMb > 0 ? (double) contentMb / capacityMb : 0;

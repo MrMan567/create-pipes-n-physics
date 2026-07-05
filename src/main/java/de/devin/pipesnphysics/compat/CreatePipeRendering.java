@@ -592,7 +592,14 @@ public final class CreatePipeRendering {
                     int stored = holder.pipesnphysics$getFrontData();
                     if (stored != 0) front = new CellFront(1, frontFlowDir(stored), 0);
                     else if (hasFluid(pipe)) front = FULL_STILL;
-                    else continue;
+                    // A SINK_FULL run is a pressurized-FULL column, so stamp it full even if it was
+                    // never charged — a DEAD CONDUIT into a full tank (zero conductance, never flowed)
+                    // has no stored front and no Create fluid, yet is genuinely full (the "one pipe
+                    // empty" report). NO_HEAD/held runs can be legitimately dry, so they still bail.
+                    else if (solution.stalledEdges().contains(index)
+                            && solution.edgeReasons().get(index) == Solution.Reason.SINK_FULL) {
+                        front = FULL_STILL;
+                    } else continue;
                 } else {
                     if (!filled.contains(cell)) continue;
                     front = FULL_STILL;

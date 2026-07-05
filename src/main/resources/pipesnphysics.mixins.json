@@ -15,6 +15,7 @@
     "PipeConnectionAccessor",
     "FluidTransportBehaviourMixin",
     "HosePulleyBlockEntityMixin",
+    "PortableStorageInterfaceBlockEntityMixin",
     "FluidDrainingBehaviourAccessor",
     "PipeGoggleInfoMixin"
   ],

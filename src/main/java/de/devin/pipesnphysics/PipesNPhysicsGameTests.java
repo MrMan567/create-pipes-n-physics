@@ -3538,6 +3538,159 @@ public class PipesNPhysicsGameTests {
         return null;
     }
 
+    /**
+     * The "goofy_network" freeze: a pump chain lifts water from a source up a series line
+     * source → header → BIG TANK → spout, where the terminal spout is FULL. The big tank has room,
+     * so the pump-lifted water must back up and fill it (toward 100%). It currently freezes at 92%:
+     * the one-shot solve routes a through-current to the full spout, the intermediate big tank reads
+     * as a pass-through (net ~0), and {@code planTransfers} zeroes the whole line on the full
+     * terminal — so a reservoir with room is starved by a full downstream sink. Reproduces the
+     * user's "every pump says no room ahead"; draining the spout (their spout-pump fix) unfreezes it.
+     */
+    @GameTest(template = "goofy_network", templateNamespace = PipesNPhysics.ID, timeoutTicks = 300)
+    public static void pumpFillsIntermediateTankDespiteFullTerminal(GameTestHelper helper) {
+        int[] before = {-1};
+        helper.runAfterDelay(40, () -> { // spin pumps up, then reproduce the screenshot's stuck fill state
+            IFluidHandler big = pipesnphysics$goofyHandler(helper, 32000);
+            IFluidHandler header = pipesnphysics$goofyHandler(helper, 8000, /*wantEmpty*/true);
+            IFluidHandler spout = pipesnphysics$goofyHandler(helper, 1000);
+            if (big == null || header == null) { System.out.println("GOOFY: could not find tanks"); return; }
+            big.drain(Integer.MAX_VALUE, IFluidHandler.FluidAction.EXECUTE);
+            big.fill(new FluidStack(Fluids.WATER, 29558), IFluidHandler.FluidAction.EXECUTE); // 92%, as reported
+            header.drain(Integer.MAX_VALUE, IFluidHandler.FluidAction.EXECUTE);
+            header.fill(new FluidStack(Fluids.WATER, 36), IFluidHandler.FluidAction.EXECUTE);
+            if (spout != null) spout.fill(new FluidStack(Fluids.WATER, 1000), IFluidHandler.FluidAction.EXECUTE);
+            before[0] = big.getFluidInTank(0).getAmount();
+        });
+        helper.runAfterDelay(250, () -> {
+            IFluidHandler big = pipesnphysics$goofyHandler(helper, 32000);
+            int after = big == null ? -1 : big.getFluidInTank(0).getAmount();
+            // The pump keeps lifting source water; the spout is full so it can't leave — the big tank
+            // (which has room) MUST fill toward 100%. It currently freezes at 92% because a full
+            // terminal sink zeroes the whole series line (the intermediate reservoir is starved).
+            if (after <= before[0] + 100) {
+                pipesnphysics$dumpGoofy(helper, "FAIL: intermediate tank starved by a full terminal");
+                helper.fail("pump-fed intermediate tank starved by a full downstream sink: "
+                        + before[0] + " -> " + after + " mB (expected it to fill toward 32000)");
+                return;
+            }
+            // Force the big tank full and drain the HEADER (the single tank above). With the tank below
+            // full, the header is the intermediate reservoir with room — the pump must still refill it.
+            big.fill(new FluidStack(Fluids.WATER, 32000), IFluidHandler.FluidAction.EXECUTE);
+            IFluidHandler header = pipesnphysics$goofyHandler(helper, 8000, true);
+            if (header != null) header.drain(Integer.MAX_VALUE, IFluidHandler.FluidAction.EXECUTE);
+        });
+        int[] hdr = {-1};
+        helper.runAfterDelay(256, () -> {
+            IFluidHandler header = pipesnphysics$goofyHandler(helper, 8000, true);
+            hdr[0] = header == null ? -1 : header.getFluidInTank(0).getAmount();
+        });
+        helper.runAfterDelay(300, () -> {
+            IFluidHandler header = pipesnphysics$goofyHandler(helper, 8000, true);
+            int now = header == null ? -1 : header.getFluidInTank(0).getAmount();
+            if (now <= hdr[0] + 100) {
+                pipesnphysics$dumpGoofy(helper, "FAIL: header above a full tank did not refill");
+                helper.fail("the single tank above a FULL tank did not refill: " + hdr[0]
+                        + " -> " + now + " mB (the pump must still fill the intermediate reservoir)");
+                return;
+            }
+            helper.succeed();
+        });
+    }
+
+    private static IFluidHandler pipesnphysics$goofyHandler(GameTestHelper helper, int capacity) {
+        return pipesnphysics$goofyHandler(helper, capacity, false);
+    }
+
+    /** Find a graph HANDLER whose total capacity matches; wantEmpty picks the highest-Y match (header vs source). */
+    private static IFluidHandler pipesnphysics$goofyHandler(GameTestHelper helper, int capacity, boolean topmost) {
+        Level level = helper.getLevel();
+        BlockPos seed = null;
+        for (int x = 0; x < 6 && seed == null; x++)
+            for (int y = 0; y < 7 && seed == null; y++)
+                for (int z = 0; z < 2 && seed == null; z++) {
+                    BlockPos rel = new BlockPos(x, y, z);
+                    if (FluidPropagator.getPipe(level, helper.absolutePos(rel)) != null) seed = rel;
+                }
+        if (seed == null) return null;
+        Graph g = GraphBuilder.build(level, helper.absolutePos(seed));
+        IFluidHandler best = null;
+        int bestY = Integer.MIN_VALUE;
+        for (Node n : g.nodes()) {
+            if (n.kind() != Node.Kind.HANDLER) continue;
+            IFluidHandler h = pipesnphysics$sideFallback(level, n.pos());
+            if (h == null) continue;
+            int cap = 0;
+            for (int i = 0; i < h.getTanks(); i++) cap += h.getTankCapacity(i);
+            if (cap != capacity) continue;
+            if (!topmost) return h;
+            if (n.pos().getY() > bestY) { bestY = n.pos().getY(); best = h; }
+        }
+        return best;
+    }
+
+    private static IFluidHandler pipesnphysics$sideFallback(Level level, BlockPos pos) {
+        IFluidHandler h = level.getCapability(Capabilities.FluidHandler.BLOCK, pos, null);
+        if (h != null) return h;
+        for (Direction d : Direction.values()) {
+            h = level.getCapability(Capabilities.FluidHandler.BLOCK, pos, d);
+            if (h != null) return h;
+        }
+        return null;
+    }
+
+    /** Print the full goofy_network solve to stdout (fail messages truncate at 1024). */
+    private static void pipesnphysics$dumpGoofy(GameTestHelper helper, String label) {
+        Level level = helper.getLevel();
+        BlockPos seed = null;
+        for (int x = 0; x < 6 && seed == null; x++)
+            for (int y = 0; y < 7 && seed == null; y++)
+                for (int z = 0; z < 2 && seed == null; z++) {
+                    BlockPos rel = new BlockPos(x, y, z);
+                    if (FluidPropagator.getPipe(level, helper.absolutePos(rel)) != null) seed = rel;
+                }
+        if (seed == null) { System.out.println("GOOFY: no pipe found"); return; }
+        Graph g = GraphBuilder.build(level, helper.absolutePos(seed));
+        Solution sol = FlowSolver.solve(level, g);
+        StringBuilder sb = new StringBuilder("\nGOOFY === " + label + " ===\n");
+        sb.append("GOOFY pumps=").append(g.pumps().size())
+                .append(" runningPump=").append(EngineTickHandler.hasRunningPump(helper.getLevel(), g))
+                .append(" active=").append(sol.active())
+                .append(" transfers=").append(sol.transfers().size()).append("\n");
+        for (Node n : g.nodes())
+            sb.append(String.format("GOOFY  N%-2d %-8s head=%.3f ceil=%.3f%s%n",
+                    n.index(), n.kind(), sol.nodeHeads().getOrDefault(n.index(), 0.0),
+                    sol.nodeCeilings().getOrDefault(n.index(), 0.0), pipesnphysics$roomAt(level, n.pos())));
+        for (Edge e : g.edges()) {
+            String tag = sol.blockedEdges().contains(e.index()) ? " BLOCKED"
+                    : sol.stalledEdges().contains(e.index()) ? " STALLED"
+                    : sol.noHeadEdges().contains(e.index()) ? " NOHEAD" : "";
+            Solution.Reason r = sol.edgeReasons().get(e.index());
+            boolean rest = !sol.restFluids().getOrDefault(e.index(), FluidStack.EMPTY).isEmpty();
+            boolean ef = !sol.edgeFluids().getOrDefault(e.index(), FluidStack.EMPTY).isEmpty();
+            sb.append(String.format("GOOFY  E%-2d %d-%d len%d dir=%s%s%s rest=%b edgeFluid=%b%s%n",
+                    e.index(), e.a(), e.b(), e.length(),
+                    sol.edgeFlows().get(e.index()).direction(), tag, r == null ? "" : " (" + r + ")",
+                    rest, ef, sol.heldEdges().contains(e.index()) ? " HELD" : ""));
+        }
+        for (Solution.Transfer t : sol.transfers())
+            sb.append("GOOFY  T ").append(t.from().toShortString()).append(" -> ")
+                    .append(t.to().toShortString()).append(" ").append(t.fluid().getAmount()).append("\n");
+        System.out.println(sb);
+    }
+
+    /** " content/capacity mB (has room)" for a fluid handler at pos, or "" if none — for diagnostics. */
+    private static String pipesnphysics$roomAt(Level level, BlockPos pos) {
+        IFluidHandler h = level.getCapability(Capabilities.FluidHandler.BLOCK, pos, null);
+        if (h == null) return "";
+        int content = 0, capacity = 0;
+        for (int i = 0; i < h.getTanks(); i++) {
+            content += h.getFluidInTank(i).getAmount();
+            capacity += h.getTankCapacity(i);
+        }
+        return String.format("  %d/%d mB%s", content, capacity, content < capacity ? " (ROOM)" : " (full)");
+    }
+
     private static String dump(GameTestHelper helper) {
         return dump(helper, new BlockPos(2, 1, 1));
     }

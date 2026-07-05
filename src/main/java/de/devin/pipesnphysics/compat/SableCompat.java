@@ -8,6 +8,7 @@ import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.function.BiConsumer;
+import java.util.function.BiFunction;
 
 public class SableCompat {
 
@@ -53,6 +54,19 @@ public class SableCompat {
 
     public static boolean isSubLevelReady(Level level, BlockPos pos) {
         return PROVIDER.isSubLevelReady(level, pos);
+    }
+
+    /**
+     * First non-null result of reading the block on each OTHER Sable contraption whose physical
+     * bounds overlap the world position {@code origin} projects to — the mechanism behind
+     * cross-level piping (ship A's mouth drinking a fluid block on ship B where the two overlap, or a
+     * main-level mouth over a contraption). {@code origin} is the mouth's OWN-level (plot) position; the reader is invoked
+     * with the corresponding block position on each overlapping contraption. The host-world block
+     * under the mouth is NOT visited here (callers read it separately via the projected position);
+     * this adds only the other-contraption hits. Returns null off Sable or when nothing overlaps.
+     */
+    public static <T> T atOverlappingContraptions(Level level, BlockPos origin, BiFunction<Level, BlockPos, T> reader) {
+        return PROVIDER.atOverlappingContraptions(level, origin, reader);
     }
 
     public static double getWorldY(Level level, BlockPos pos) {
@@ -121,6 +135,11 @@ public class SableCompat {
     private static class NoOpProvider implements SableCompatProvider {
         @Override
         public void clearCaches() {
+        }
+
+        @Override
+        public <T> T atOverlappingContraptions(Level level, BlockPos origin, BiFunction<Level, BlockPos, T> reader) {
+            return null; // no sub-levels without Sable: nothing overlaps
         }
 
         @Override

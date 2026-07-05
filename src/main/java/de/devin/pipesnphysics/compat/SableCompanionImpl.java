@@ -16,6 +16,7 @@ import org.joml.Vector3d;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BiFunction;
 
 class SableCompanionImpl implements SableCompatProvider {
     private static final double NORMALIZE_EPSILON = 0.001;
@@ -24,6 +25,19 @@ class SableCompanionImpl implements SableCompatProvider {
     @Override
     public void clearCaches() {
         lastOrientations.clear();
+    }
+
+    @Override
+    public <T> T atOverlappingContraptions(Level level, BlockPos origin, BiFunction<Level, BlockPos, T> reader) {
+        // Sable's own traversal: project `origin` out to world space, then for every OTHER contraption
+        // whose bounds contain that point, inverse-project to its plot pos and hand the block to `reader`;
+        // it short-circuits on the first non-null result. `origin`'s own sub-level (subA, null on the main
+        // level) is passed so the traversal skips it. We reject the host-world hit (subB == null, already
+        // read by the caller) so only genuine other-contraption blocks reach `reader`.
+        SubLevelAccess subA = SableCompanion.INSTANCE.getContaining(level, origin);
+        Vec3 center = new Vec3(origin.getX() + 0.5, origin.getY() + 0.5, origin.getZ() + 0.5);
+        return SableCompanion.INSTANCE.runIncludingSubLevels(level, center, false, subA,
+                (SubLevelAccess subB, BlockPos plotPosB) -> subB == null ? null : reader.apply(level, plotPosB));
     }
 
     @Override
