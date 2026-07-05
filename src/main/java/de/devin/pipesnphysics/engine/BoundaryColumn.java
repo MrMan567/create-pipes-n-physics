@@ -63,12 +63,14 @@ public final class BoundaryColumn {
     private final int contentMb;
     private final Direction openFace;
     private final boolean infiniteSource;
+    private final boolean finiteReservoir;
     private final double fillScale;
     private final List<Integer> memberNodes = new ArrayList<>();
 
     private BoundaryColumn(BlockPos identity, BlockPos accessPos, double baseY,
                            int heightBlocks, int capacityMb, FluidStack contents, int contentMb,
-                           Direction openFace, boolean infiniteSource, double fillScale) {
+                           Direction openFace, boolean infiniteSource, boolean finiteReservoir,
+                           double fillScale) {
         this.identity = identity;
         this.accessPos = accessPos;
         this.baseY = baseY;
@@ -78,6 +80,7 @@ public final class BoundaryColumn {
         this.contentMb = contentMb;
         this.openFace = openFace;
         this.infiniteSource = infiniteSource;
+        this.finiteReservoir = finiteReservoir;
         this.fillScale = fillScale;
     }
 
@@ -115,7 +118,7 @@ public final class BoundaryColumn {
             return new BoundaryColumn(
                     controllerPos, pos,
                     SableCompat.getColumnBaseY(level, controllerPos, width, height),
-                    height, inventory.getCapacity(), fluid.copy(), fluid.getAmount(), null, false,
+                    height, inventory.getCapacity(), fluid.copy(), fluid.getAmount(), null, false, true,
                     SableCompat.getUpProjectionY(level, controllerPos));
         }
 
@@ -144,11 +147,11 @@ public final class BoundaryColumn {
                 return new BoundaryColumn(pos, pos,
                         SableCompat.getWorldY(level, pos) - 0.5, 1, PULLEY_CAPACITY_MB,
                         drainable.copyWithAmount(PULLEY_CAPACITY_MB),
-                        PULLEY_CAPACITY_MB, null, true, 1.0);
+                        PULLEY_CAPACITY_MB, null, true, false, 1.0);
             }
             return new BoundaryColumn(pos, pos,
                     SableCompat.getWorldY(level, pos) - 0.5, 1, PULLEY_CAPACITY_MB,
-                    FluidStack.EMPTY, 0, null, false, 1.0);
+                    FluidStack.EMPTY, 0, null, false, false, 1.0);
         }
 
         int capacity = 0;
@@ -168,7 +171,7 @@ public final class BoundaryColumn {
         if (capacity <= 0) return null;
 
         return new BoundaryColumn(pos, pos,
-                SableCompat.getColumnBaseY(level, pos, 1, 1), 1, capacity, found, amount, null, false,
+                SableCompat.getColumnBaseY(level, pos, 1, 1), 1, capacity, found, amount, null, false, true,
                 SableCompat.getUpProjectionY(level, pos));
     }
 
@@ -211,7 +214,7 @@ public final class BoundaryColumn {
         // over-reports a partial body, which would otherwise duplicate a few mB).
         return new BoundaryColumn(space, space, bottom, 1, OPEN_END_CAPACITY_MB,
                 canIntake ? intake : FluidStack.EMPTY,
-                canIntake ? intake.getAmount() : 0, openEndNode.openFace(), canIntake, 1.0);
+                canIntake ? intake.getAmount() : 0, openEndNode.openFace(), canIntake, false, 1.0);
     }
 
     /**
@@ -354,14 +357,13 @@ public final class BoundaryColumn {
     public boolean isEmpty() { return contents.isEmpty() || contentMb <= 0; }
 
     /**
-     * A finite reservoir at capacity: it can GIVE but cannot RECEIVE — the dual of {@link #isEmpty}.
-     * Open ends (an atmospheric boundary) and infinite sources are excluded; they carry their own
-     * one-way rules. Used to wall inflow into a full sink so a backed-up run fills an upstream
-     * reservoir with room instead of freezing the whole line.
+     * A real finite tank/basin/machine, as opposed to an atmospheric boundary (open end) or a
+     * world-body bridge (hose pulley). Only these carry a capacity CEILING that the solver saturates
+     * against, so a full one is clamped GIVE-ONLY (the box-constrained dual of the empty→receive-only
+     * wall). Boundaries keep their own one-way rules (infinite-source pin, empty→receive) and are
+     * left unbounded; they never sit "at capacity" as a finite reservoir does.
      */
-    public boolean isFull() {
-        return !isOpenEnd() && !infiniteSource && capacityMb > 0 && contentMb >= capacityMb;
-    }
+    public boolean isFiniteReservoir() { return finiteReservoir; }
 
     public double fillFraction() {
         return capacityMb > 0 ? (double) contentMb / capacityMb : 0;

@@ -3749,4 +3749,247 @@ public class PipesNPhysicsGameTests {
         if (handler == null) helper.fail("no fluid handler at " + relativePos);
         return handler;
     }
+
+    /**
+     * A run BACKED UP from the very first tick — never charged by a travelling front — must still
+     * render FULL, not empty. A pump reverse-blocking a full tank (its check valve stops that tank
+     * draining out through it) leaves the pipes between them a pressurized column: SINK_FULL /
+     * {@code isBackedUp}, yet no flow ever filled them. The renderer must STAMP such a run full, not
+     * merely preserve the (nonexistent) prior charge. Reproduces "a reverse pump renders the pipe
+     * empty instead of full". Uses long_pipe (tank - 5 pipes - pump - tank); coords shift at
+     * placement, so everything is found from the graph in absolute space.
+     */
+    @GameTest(template = "piping/long_pipe", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
+    public static void bornBackedUpRunRendersFull(GameTestHelper helper) {
+        Level level = helper.getLevel();
+        List<BlockPos> run = new ArrayList<>();
+        helper.runAfterDelay(10, () -> {
+            BlockPos seed = null;
+            for (int x = 0; x <= 8 && seed == null; x++) for (int y = 0; y <= 2 && seed == null; y++)
+                for (int z = 0; z <= 2 && seed == null; z++) {
+                    BlockPos abs = helper.absolutePos(new BlockPos(x, y, z));
+                    if (FluidPropagator.getPipe(level, abs) != null) seed = abs;
+                }
+            if (seed == null) { helper.fail("no pipe seed"); return; }
+            Graph g = GraphBuilder.build(level, seed);
+            BlockPos pump = null;
+            List<BlockPos> tanks = new ArrayList<>();
+            for (Node n : g.nodes()) { if (n.isPump()) pump = n.pos(); else if (n.isHandler()) tanks.add(n.pos()); }
+            if (pump == null || tanks.size() < 2) { helper.fail("layout not found: " + tanks); return; }
+            for (Edge e : g.edges()) run.addAll(e.pipes());
+            // The tank the pipe RUN reaches (far from the pump) is on the pump's push side — fill it
+            // full so the pump's check valve backs the run up against it; empty the pump's supply side.
+            BlockPos backedTank = tanks.get(0).distManhattan(pump) >= tanks.get(1).distManhattan(pump)
+                    ? tanks.get(0) : tanks.get(1);
+            BlockPos supply = backedTank.equals(tanks.get(0)) ? tanks.get(1) : tanks.get(0);
+            IFluidHandler bh = pipesnphysics$sideFallback(level, backedTank);
+            if (bh != null) bh.fill(new FluidStack(Fluids.WATER, 8000), IFluidHandler.FluidAction.EXECUTE);
+            IFluidHandler sh = pipesnphysics$sideFallback(level, supply);
+            if (sh != null) sh.drain(Integer.MAX_VALUE, IFluidHandler.FluidAction.EXECUTE);
+        });
+        helper.runAfterDelay(160, () -> {
+            if (run.isEmpty()) { helper.fail("no run cells captured"); return; }
+            for (BlockPos abs : run) {
+                if (!pipeCellRendersFluidAbs(level, abs)) {
+                    helper.fail("backed-up run cell rendered empty (never seeded) at " + helper.relativePos(abs));
+                    return;
+                }
+            }
+            helper.succeed();
+        });
+    }
+
+    private static boolean pipeCellRendersFluidAbs(Level level, BlockPos abs) {
+        FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, abs);
+        if (pipe == null) return false;
+        for (Direction dir : Direction.values()) {
+            if (pipe.getConnection(dir) instanceof PipeConnectionAccessor a) {
+                var flow = a.pipesnphysics$getFlow();
+                if (flow.isPresent() && flow.get().complete && !flow.get().fluid.isEmpty()) return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * A run BLOCKED by an unpowered pump, but connected to a tank that STILL HOLDS fluid, must render
+     * the settled water sitting in the pipe up to the pump — not blank. The pump-off branch never
+     * assembles, so the run gets no rest fluid or heads unless {@code settleBlockedRuns} supplies them
+     * from the filled reservoir. Reproduces "a pump on this line is unpowered, and the pipes render
+     * empty". The tank on the pump's FAR side is emptied and must stay dry (no phantom water past the
+     * block).
+     */
+    @GameTest(template = "piping/long_pipe", templateNamespace = PipesNPhysics.ID, timeoutTicks = 300)
+    public static void blockedRunFromFullTankRendersSettled(GameTestHelper helper) {
+        Level level = helper.getLevel();
+        List<BlockPos> runToFull = new ArrayList<>();
+        List<BlockPos> runToEmpty = new ArrayList<>();
+        helper.runAfterDelay(10, () -> {
+            BlockPos seed = null;
+            for (int x = 0; x <= 8 && seed == null; x++) for (int y = 0; y <= 2 && seed == null; y++)
+                for (int z = 0; z <= 2 && seed == null; z++) {
+                    BlockPos abs = helper.absolutePos(new BlockPos(x, y, z));
+                    if (FluidPropagator.getPipe(level, abs) != null) seed = abs;
+                }
+            if (seed == null) { helper.fail("no pipe seed"); return; }
+            Graph g = GraphBuilder.build(level, seed);
+            BlockPos pump = null;
+            List<BlockPos> tanks = new ArrayList<>();
+            for (Node n : g.nodes()) { if (n.isPump()) pump = n.pos(); else if (n.isHandler()) tanks.add(n.pos()); }
+            if (pump == null || tanks.size() < 2) { helper.fail("layout not found: " + tanks); return; }
+            BlockPos fullTank = tanks.get(0).distManhattan(pump) >= tanks.get(1).distManhattan(pump) ? tanks.get(0) : tanks.get(1);
+            BlockPos emptyTank = fullTank.equals(tanks.get(0)) ? tanks.get(1) : tanks.get(0);
+            for (Edge e : g.edges()) {
+                boolean touchesFull = g.node(e.a()).pos().equals(fullTank) || g.node(e.b()).pos().equals(fullTank);
+                (touchesFull ? runToFull : runToEmpty).addAll(e.pipes());
+            }
+            // Unpower the pump by clearing its kinetic neighbours (motor/cogwheel).
+            for (Direction d : Direction.values()) {
+                var st = level.getBlockState(pump.relative(d));
+                if (!st.is(AllBlocks.FLUID_PIPE.get()) && !st.is(AllBlocks.FLUID_TANK.get()) && !st.isAir()) {
+                    level.setBlockAndUpdate(pump.relative(d), Blocks.AIR.defaultBlockState());
+                }
+            }
+            IFluidHandler fh = pipesnphysics$sideFallback(level, fullTank);
+            if (fh != null) fh.fill(new FluidStack(Fluids.WATER, 8000), IFluidHandler.FluidAction.EXECUTE);
+            IFluidHandler eh = pipesnphysics$sideFallback(level, emptyTank);
+            if (eh != null) eh.drain(Integer.MAX_VALUE, IFluidHandler.FluidAction.EXECUTE);
+        });
+        helper.runAfterDelay(160, () -> {
+            if (runToFull.isEmpty()) { helper.fail("no run captured"); return; }
+            for (BlockPos abs : runToFull) {
+                if (!pipeCellRendersFluidAbs(level, abs)) {
+                    helper.fail("blocked run from the FULL tank rendered empty at " + helper.relativePos(abs));
+                    return;
+                }
+            }
+            // The far run (to the drained tank) must stay dry — no phantom water past the off pump.
+            for (BlockPos abs : runToEmpty) {
+                if (pipeCellRendersFluidAbs(level, abs)) {
+                    helper.fail("run to the EMPTY tank wrongly rendered water past the off pump at " + helper.relativePos(abs));
+                    return;
+                }
+            }
+            helper.succeed();
+        });
+    }
+
+    /**
+     * The dead-end fill: a pipe run capped by a solid block renders full because the client renderer,
+     * asking for the (pruned) block-facing flow, is handed a synthetic complete flow derived from the
+     * network side ({@code CreatePipeRendering.deadEndFillFlow}). The actual pixels are client-side and
+     * not GameTestable, but the SYNTH LOGIC runs server-side and is what decides whether the block half
+     * fills — assert it fires for a true solid dead end and stays null for the network side (which has
+     * a real flow) so it never double-fills.
+     */
+    @GameTest(template = "piping/long_pipe", templateNamespace = PipesNPhysics.ID, timeoutTicks = 300)
+    public static void deadEndFillFlowSynthesizesTheCappedHalf(GameTestHelper helper) {
+        Level level = helper.getLevel();
+        BlockPos[] junctionAndBlock = new BlockPos[2]; // [junction cell, block]
+        helper.runAfterDelay(10, () -> {
+            BlockPos seed = null;
+            for (int x = 0; x <= 8 && seed == null; x++) for (int y = 0; y <= 2 && seed == null; y++)
+                for (int z = 0; z <= 2 && seed == null; z++) {
+                    BlockPos abs = helper.absolutePos(new BlockPos(x, y, z));
+                    if (FluidPropagator.getPipe(level, abs) != null) seed = abs;
+                }
+            if (seed == null) { helper.fail("no pipe seed"); return; }
+            Graph g = GraphBuilder.build(level, seed);
+            BlockPos pump = null;
+            List<BlockPos> tanks = new ArrayList<>();
+            for (Node n : g.nodes()) { if (n.isPump()) pump = n.pos(); else if (n.isHandler()) tanks.add(n.pos()); }
+            if (pump == null || tanks.size() < 2) { helper.fail("layout not found: " + tanks); return; }
+            BlockPos near = tanks.get(0).distManhattan(pump) >= tanks.get(1).distManhattan(pump) ? tanks.get(0) : tanks.get(1);
+            BlockPos far = near.equals(tanks.get(0)) ? tanks.get(1) : tanks.get(0);
+            // The last pipe next to the pump spot becomes the dead-end junction once blocked.
+            junctionAndBlock[0] = pump.relative(net.minecraft.core.Direction.fromDelta(
+                    Integer.signum(near.getX() - pump.getX()), 0, Integer.signum(near.getZ() - pump.getZ())));
+            junctionAndBlock[1] = pump;
+            for (Direction d : Direction.values()) {
+                var st = level.getBlockState(pump.relative(d));
+                if (!st.is(AllBlocks.FLUID_PIPE.get()) && !st.isAir()) level.setBlockAndUpdate(pump.relative(d), Blocks.AIR.defaultBlockState());
+            }
+            level.setBlockAndUpdate(far, Blocks.AIR.defaultBlockState());
+            level.setBlockAndUpdate(pump, Blocks.STONE.defaultBlockState());
+            IFluidHandler h = pipesnphysics$sideFallback(level, near);
+            if (h != null) h.fill(new FluidStack(Fluids.WATER, 8000), IFluidHandler.FluidAction.EXECUTE);
+        });
+        helper.runAfterDelay(160, () -> {
+            BlockPos cell = junctionAndBlock[0], block = junctionAndBlock[1];
+            FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, cell);
+            if (pipe == null) { helper.fail("no junction pipe"); return; }
+            Direction toBlock = de.devin.pipesnphysics.engine.PipeGeometry.between(cell, block);
+            if (toBlock == null) { helper.fail("junction not adjacent to block"); return; }
+            var synth = CreatePipeRendering.deadEndFillFlow(pipe, toBlock);
+            if (synth == null || !synth.complete || synth.fluid.isEmpty()) {
+                helper.fail("deadEndFillFlow did not synthesize the capped half toward the block");
+                return;
+            }
+            // The network side has a REAL flow, so the synth must stay null there (no double-fill).
+            if (CreatePipeRendering.deadEndFillFlow(pipe, toBlock.getOpposite()) != null) {
+                helper.fail("deadEndFillFlow wrongly synthesized on the network side");
+                return;
+            }
+            helper.succeed();
+        });
+    }
+
+    /**
+     * With the CUSTOM in-pipe renderer ({@code PIPE_LEVEL_RENDER}) on, Create's fill is hidden and the
+     * renderer draws only from each cell's synced {@link PipeLevelData}. A dead-end junction cell sits
+     * in NO edge, so stampWaterlines never reaches it — it was left blank against the block (the real
+     * "block still broken" case, since the user runs the custom renderer). {@code fillDeadEndCell} now
+     * stamps it FULL. Drives {@code apply(..., levelRender=true)} and asserts the junction cell carries
+     * a full level marker. Batch {@code levelRender} (stamps the synced field).
+     */
+    @GameTest(template = "piping/long_pipe", templateNamespace = PipesNPhysics.ID, timeoutTicks = 300, batch = "levelRender")
+    public static void deadEndJunctionStampedFullForCustomRenderer(GameTestHelper helper) {
+        Level level = helper.getLevel();
+        BlockPos[] junctionHolder = new BlockPos[1];
+        helper.runAfterDelay(10, () -> {
+            BlockPos seed = null;
+            for (int x = 0; x <= 8 && seed == null; x++) for (int y = 0; y <= 2 && seed == null; y++)
+                for (int z = 0; z <= 2 && seed == null; z++) {
+                    BlockPos abs = helper.absolutePos(new BlockPos(x, y, z));
+                    if (FluidPropagator.getPipe(level, abs) != null) seed = abs;
+                }
+            if (seed == null) { helper.fail("no pipe seed"); return; }
+            Graph g = GraphBuilder.build(level, seed);
+            BlockPos pump = null;
+            List<BlockPos> tanks = new ArrayList<>();
+            for (Node n : g.nodes()) { if (n.isPump()) pump = n.pos(); else if (n.isHandler()) tanks.add(n.pos()); }
+            if (pump == null || tanks.size() < 2) { helper.fail("layout not found: " + tanks); return; }
+            BlockPos near = tanks.get(0).distManhattan(pump) >= tanks.get(1).distManhattan(pump) ? tanks.get(0) : tanks.get(1);
+            BlockPos far = near.equals(tanks.get(0)) ? tanks.get(1) : tanks.get(0);
+            junctionHolder[0] = pump.relative(net.minecraft.core.Direction.fromDelta(
+                    Integer.signum(near.getX() - pump.getX()), 0, Integer.signum(near.getZ() - pump.getZ())));
+            for (Direction d : Direction.values()) {
+                var st = level.getBlockState(pump.relative(d));
+                if (!st.is(AllBlocks.FLUID_PIPE.get()) && !st.isAir()) level.setBlockAndUpdate(pump.relative(d), Blocks.AIR.defaultBlockState());
+            }
+            level.setBlockAndUpdate(far, Blocks.AIR.defaultBlockState());
+            level.setBlockAndUpdate(pump, Blocks.STONE.defaultBlockState());
+            IFluidHandler h = pipesnphysics$sideFallback(level, near);
+            if (h != null) h.fill(new FluidStack(Fluids.WATER, 8000), IFluidHandler.FluidAction.EXECUTE);
+        });
+        helper.runAfterDelay(160, () -> {
+            BlockPos cell = junctionHolder[0];
+            FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, cell);
+            if (pipe == null) { helper.fail("no junction pipe"); return; }
+            Graph g = GraphBuilder.build(level, cell);
+            Solution sol = FlowSolver.solve(level, g);
+            CreatePipeRendering.apply(level, g, sol, true); // force the custom level-render path
+            Integer data = pipesnphysics$levelData(pipe);
+            if (data == null) {
+                helper.fail("dead-end junction cell got no level marker — the custom renderer would blank it");
+                return;
+            }
+            float frac = CreatePipeRendering.levelFraction(data);
+            if (frac < 0.98f) {
+                helper.fail("dead-end junction stamped only " + frac + " full (expected ~1.0 against the block)");
+                return;
+            }
+            helper.succeed();
+        });
+    }
 }
