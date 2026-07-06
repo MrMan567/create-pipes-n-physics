@@ -7,6 +7,7 @@ import com.simibubi.create.foundation.item.TooltipModifier;
 import de.devin.pipesnphysics.compat.SableCompat;
 import de.devin.pipesnphysics.engine.EngineTickHandler;
 import de.devin.pipesnphysics.engine.OpenEndPipes;
+import de.devin.pipesnphysics.engine.RelayDetector;
 import de.devin.pipesnphysics.engine.command.PipeGraphCommand;
 import de.devin.pipesnphysics.engine.net.EnginePackets;
 import de.devin.pipesnphysics.handler.NetworkEditHandler;
@@ -43,6 +44,10 @@ public class PipesNPhysics {
 
         modBus.addListener(this::onCommonSetup);
         modBus.addListener(EnginePackets::register);
+        // Dev/test-only: a side-specific fluid handler so the per-face endpoint path is GameTestable.
+        if (!net.neoforged.fml.loading.FMLEnvironment.production) {
+            modBus.addListener(TestSideHandlers::register);
+        }
 
         NeoForge.EVENT_BUS.register(EngineTickHandler.class);
         NeoForge.EVENT_BUS.register(PipeSwapHandler.class);
@@ -53,6 +58,8 @@ public class PipesNPhysics {
             SableCompat.clearCaches();
             EngineTickHandler.clear();
             OpenEndPipes.clear();
+            RelayDetector.clear();
+            TestSideHandlers.clear();
         });
     }
 

@@ -22,7 +22,10 @@ import de.devin.pipesnphysics.engine.EngineTickHandler;
 import de.devin.pipesnphysics.engine.FlowSolver;
 import de.devin.pipesnphysics.engine.Graph;
 import de.devin.pipesnphysics.engine.GraphBuilder;
+import de.devin.pipesnphysics.engine.HandlerRoles;
+import de.devin.pipesnphysics.engine.BoundaryColumn;
 import de.devin.pipesnphysics.engine.Node;
+import de.devin.pipesnphysics.engine.RelayDetector;
 import de.devin.pipesnphysics.engine.OpenEndPipes;
 import de.devin.pipesnphysics.engine.PipeProbe;
 import de.devin.pipesnphysics.engine.Solution;
@@ -3991,5 +3994,191 @@ public class PipesNPhysicsGameTests {
             }
             helper.succeed();
         });
+    }
+
+    // ---- automatic relay detection (CLAUDE.md §2, RelayDetector / HandlerRoles) ----
+    // These drive RelayDetector.observe directly on a placed block: a real relay (a docking connector,
+    // a VS hose) needs a second mod, but the learning is block-type + fluid-amount math the detector
+    // exposes. Each body runs synchronously (no runAfterDelay), so clearing the detector at the start
+    // fully isolates it from its batch siblings. Distinct block types keep the learned sets disjoint.
+
+    /**
+     * A handler whose stored fluid keeps GROWING on its own — with no fill from the engine — is the
+     * relay signature: learned as a relay and demoted to receive-only, so the solver stops draining and
+     * equalizing it as a tank.
+     */
+    @GameTest(template = "piping/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 100, batch = "relayDetector")
+    public static void relayDetectorLearnsSpontaneousGain(GameTestHelper helper) {
+        RelayDetector.clear();
+        Level level = helper.getLevel();
+        // Blocks.STONE stands in for an unknown mod's relay: non-exempt and untagged.
+        BlockPos rel = new BlockPos(1, 2, 1);
+        BlockPos pos = helper.absolutePos(rel);
+        helper.setBlock(rel, Blocks.STONE);
+        for (int amount = 100; amount <= 700; amount += 100) {
+            RelayDetector.observe(level, pos, Fluids.WATER, amount); // +100 each step, no fill from us
+        }
+        if (!RelayDetector.isRelay(Blocks.STONE)) {
+            helper.fail("a block that gained fluid on its own every tick was not learned as a relay");
+            return;
+        }
+        if (!HandlerRoles.isRelayEndpoint(level, pos)) {
+            helper.fail("a learned relay is not treated as a drain-priority relay endpoint");
+            return;
+        }
+        RelayDetector.clear();
+        helper.succeed();
+    }
+
+    /**
+     * A handler that spontaneously LOSES fluid is a consumer (a basin, a boiler), not a relay — it must
+     * keep receiving fluid and must never be demoted.
+     */
+    @GameTest(template = "piping/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 100, batch = "relayDetector")
+    public static void relayDetectorSparesConsumers(GameTestHelper helper) {
+        RelayDetector.clear();
+        Level level = helper.getLevel();
+        BlockPos rel = new BlockPos(1, 2, 1);
+        BlockPos pos = helper.absolutePos(rel);
+        helper.setBlock(rel, Blocks.DIRT);
+        for (int amount = 1000; amount >= 200; amount -= 100) {
+            RelayDetector.observe(level, pos, Fluids.WATER, amount); // spontaneously LOSING = a consumer
+        }
+        if (RelayDetector.isRelay(Blocks.DIRT)) {
+            helper.fail("a block that only lost fluid (a consumer) was wrongly demoted to a relay");
+            return;
+        }
+        RelayDetector.clear();
+        helper.succeed();
+    }
+
+    /**
+     * A relay_endpoint-tagged handler (the create-aeronautics docking connector, loaded from run/mods)
+     * resolves to a drain-priority BOTTOMLESS column, NOT a finite reservoir — so the solver never holds
+     * it "balanced" and refuses to drain it (the equalization stall that stopped fluid crossing a docked
+     * connector). Skips if the mod is absent.
+     */
+    @GameTest(template = "piping/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 100, batch = "relayDetector")
+    public static void relayEndpointResolvesBottomless(GameTestHelper helper) {
+        Level level = helper.getLevel();
+        Block connector = BuiltInRegistries.BLOCK.get(
+                ResourceLocation.fromNamespaceAndPath("simulated", "docking_connector"));
+        if (connector == Blocks.AIR) { helper.succeed(); return; } // aeronautics not installed
+        BlockPos rel = new BlockPos(1, 2, 1);
+        helper.setBlock(rel, connector);
+        BlockPos pos = helper.absolutePos(rel);
+        if (!HandlerRoles.isRelayEndpoint(level, pos)) {
+            helper.fail("docking connector is not classified as a relay endpoint (tag not applied)");
+            return;
+        }
+        BoundaryColumn column = BoundaryColumn.resolve(level,
+                new Node(0, pos, Node.Kind.HANDLER, pos.getY() + 0.5, null, null, null));
+        if (column == null) { helper.succeed(); return; } // no live cap on a lone connector — nothing to assert
+        if (column.isFiniteReservoir()) {
+            helper.fail("relay endpoint resolved as a finite reservoir — it would surface-equalize and stall");
+            return;
+        }
+        helper.succeed();
+    }
+
+    /**
+     * A SIDE-SPECIFIC handler (the dev-only {@link TestSideHandlers} on a sponge: a different tank per
+     * face, no null-side handler) resolves each face to ITS OWN fluid — the core of the per-face
+     * endpoint feature, and the thing no real pack block can exercise. NORTH holds water, SOUTH holds
+     * lava, and resolving through each face returns the matching fluid.
+     */
+    @GameTest(template = "piping/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 100, batch = "relayDetector")
+    public static void sideSpecificHandlerResolvesPerFace(GameTestHelper helper) {
+        TestSideHandlers.clear();
+        Level level = helper.getLevel();
+        BlockPos rel = new BlockPos(1, 2, 1);
+        BlockPos pos = helper.absolutePos(rel);
+        helper.setBlock(rel, Blocks.SPONGE);
+        TestSideHandlers.tankAt(pos, Direction.NORTH).fill(
+                new FluidStack(Fluids.WATER, 8000), IFluidHandler.FluidAction.EXECUTE);
+        TestSideHandlers.tankAt(pos, Direction.SOUTH).fill(
+                new FluidStack(Fluids.LAVA, 8000), IFluidHandler.FluidAction.EXECUTE);
+        if (level.getCapability(Capabilities.FluidHandler.BLOCK, pos, null) != null) {
+            helper.fail("test fixture is not side-specific (it exposes a null-side handler)");
+            return;
+        }
+        double y = pos.getY() + 0.5;
+        BoundaryColumn north = BoundaryColumn.resolve(level,
+                new Node(0, pos, Node.Kind.HANDLER, y, null, null, Direction.NORTH));
+        BoundaryColumn south = BoundaryColumn.resolve(level,
+                new Node(0, pos, Node.Kind.HANDLER, y, null, null, Direction.SOUTH));
+        if (north == null || north.contents().getFluid() != Fluids.WATER) {
+            helper.fail("NORTH face did not resolve to water: "
+                    + (north == null ? "null column" : north.contents().getFluid()));
+            return;
+        }
+        if (south == null || south.contents().getFluid() != Fluids.LAVA) {
+            helper.fail("SOUTH face did not resolve to lava — the access face is ignored in resolution");
+            return;
+        }
+        TestSideHandlers.clear();
+        helper.succeed();
+    }
+
+    /**
+     * A side-specific handler is NOT coupled across faces: the pipe on each face lands in its own
+     * network, reaching the block through its own face ({@link Node#accessFace}). Confirms the
+     * coupling-skip (the south pipe never leaks into the north network) and the recorded face.
+     */
+    @GameTest(template = "piping/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 100, batch = "relayDetector")
+    public static void sideSpecificHandlerSplitsNetworksPerFace(GameTestHelper helper) {
+        TestSideHandlers.clear();
+        Level level = helper.getLevel();
+        BlockPos spongeRel = new BlockPos(1, 2, 1);
+        BlockPos spongePos = helper.absolutePos(spongeRel);
+        helper.setBlock(spongeRel, Blocks.SPONGE);
+        TestSideHandlers.tankAt(spongePos, Direction.NORTH).fill(
+                new FluidStack(Fluids.WATER, 8000), IFluidHandler.FluidAction.EXECUTE);
+        TestSideHandlers.tankAt(spongePos, Direction.SOUTH).fill(
+                new FluidStack(Fluids.LAVA, 8000), IFluidHandler.FluidAction.EXECUTE);
+        helper.setBlock(spongeRel.north(), AllBlocks.FLUID_PIPE.get());
+        helper.setBlock(spongeRel.south(), AllBlocks.FLUID_PIPE.get());
+        BlockPos southPipe = helper.absolutePos(spongeRel.south());
+        Graph northGraph = GraphBuilder.build(level, helper.absolutePos(spongeRel.north()));
+        Node sponge = northGraph.nodes().stream()
+                .filter(n -> n.isHandler() && n.pos().equals(spongePos)).findFirst().orElse(null);
+        if (sponge == null) {
+            helper.fail("side-specific sponge was not discovered as a handler node from the north pipe");
+            return;
+        }
+        if (sponge.accessFace() != Direction.NORTH) {
+            helper.fail("sponge reached from the north pipe recorded accessFace " + sponge.accessFace()
+                    + " (expected NORTH)");
+            return;
+        }
+        if (northGraph.coverage().contains(southPipe)) {
+            helper.fail("side-specific handler coupled its faces — the south pipe leaked into the north network");
+            return;
+        }
+        TestSideHandlers.clear();
+        helper.succeed();
+    }
+
+    /**
+     * Create's own tanks are exempt: one legitimately fed by a second network from another side reads
+     * as an external gain, so the detector must never demote a real reservoir type.
+     */
+    @GameTest(template = "piping/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 100, batch = "relayDetector")
+    public static void relayDetectorExemptsCreateTanks(GameTestHelper helper) {
+        RelayDetector.clear();
+        Level level = helper.getLevel();
+        BlockPos rel = new BlockPos(1, 2, 1);
+        BlockPos pos = helper.absolutePos(rel);
+        helper.setBlock(rel, AllBlocks.FLUID_TANK.get());
+        Block tank = level.getBlockState(pos).getBlock();
+        for (int amount = 100; amount <= 900; amount += 100) {
+            RelayDetector.observe(level, pos, Fluids.WATER, amount); // gains, but a Create tank is exempt
+        }
+        if (RelayDetector.isRelay(tank)) {
+            helper.fail("a Create fluid tank was demoted to a relay despite the exemption");
+            return;
+        }
+        RelayDetector.clear();
+        helper.succeed();
     }
 }

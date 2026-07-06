@@ -66,6 +66,8 @@ public final class BoundaryColumn {
     private final boolean finiteReservoir;
     private final double fillScale;
     private final List<Integer> memberNodes = new ArrayList<>();
+    /** Face to resolve/transfer a SIDE-SPECIFIC handler through; null = side-agnostic (use {@code null} side). */
+    private Direction accessFace;
 
     private BoundaryColumn(BlockPos identity, BlockPos accessPos, double baseY,
                            int heightBlocks, int capacityMb, FluidStack contents, int contentMb,
@@ -85,17 +87,58 @@ public final class BoundaryColumn {
     }
 
     /**
-     * Find the fluid capability at a position, preferring the side-agnostic handler
-     * and falling back to any side a side-sensitive block exposes.
+     * Drain a SPECIFIC fluid, tolerant of handlers that only implement the amount-based drain.
+     * NeoForge's {@code IFluidHandler} has two drains: {@code drain(FluidStack)} (this exact fluid) and
+     * {@code drain(int)} (any fluid up to an amount). Some handlers override only the amount variant and
+     * leave {@code drain(FluidStack)} on the {@code FluidTank} template default, which reads an unrelated
+     * internal field and returns EMPTY — create-aeronautics' docking-connector wrapper does exactly this,
+     * so it reads drainable through the int API (and to Create) but not through the fluid API we use, and
+     * the solver saw it as an undrainable source (a SOURCE_DRY stall). Try the fluid variant first; if it
+     * gives nothing, fall back to the amount variant but accept the result ONLY when it is the fluid we
+     * asked for, so a different fluid is never drained. A correct handler never reaches the fallback.
+     */
+    public static FluidStack drainMatching(IFluidHandler handler, FluidStack wanted, FluidAction action) {
+        FluidStack drained = handler.drain(wanted, action);
+        if (!drained.isEmpty()) return drained;
+        FluidStack byAmount = handler.drain(wanted.getAmount(), action);
+        return FluidStack.isSameFluidSameComponents(byAmount, wanted) ? byAmount : FluidStack.EMPTY;
+    }
+
+    /**
+     * Find the fluid capability at a position: the side-agnostic ({@code null}) handler first, then —
+     * for a SIDE-SPECIFIC block that exposes no {@code null} handler — a face that a pipe/pump actually
+     * connects on, and only then any remaining face. Preferring a connecting face means a block that
+     * exposes DIFFERENT handlers per side (an input tank on one face, an output on another) is read
+     * through the face the network is plumbed into, not an arbitrary side. It is derived purely from
+     * world geometry, so the solve and the later {@code apply} resolve the SAME handler with nothing
+     * threaded between them. (This does NOT yet let one block serve two different fluids on two faces at
+     * once — that needs per-face endpoints; it only fixes reading through the wrong side.)
      */
     public static IFluidHandler findHandler(Level level, BlockPos pos) {
+        return findHandler(level, pos, null);
+    }
+
+    /**
+     * Find the fluid capability, resolving a SIDE-SPECIFIC handler through a specific {@code face} when
+     * given (the face the network connects on, from {@link Node#accessFace}). A handler that exposes a
+     * DIFFERENT tank per side is then read through the correct one. {@code face == null} is the ordinary
+     * side-agnostic resolution ({@code null} side, then a connecting face, then any).
+     */
+    public static IFluidHandler findHandler(Level level, BlockPos pos, Direction face) {
+        if (face != null) {
+            IFluidHandler sided = level.getCapability(Capabilities.FluidHandler.BLOCK, pos, face);
+            if (sided != null) return sided;
+        }
         IFluidHandler cap = level.getCapability(Capabilities.FluidHandler.BLOCK, pos, null);
         if (cap != null) return cap;
+        IFluidHandler anyFace = null;
         for (Direction side : Direction.values()) {
             cap = level.getCapability(Capabilities.FluidHandler.BLOCK, pos, side);
-            if (cap != null) return cap;
+            if (cap == null) continue;
+            if (FluidPropagator.getPipe(level, pos.relative(side)) != null) return cap; // a connecting face
+            if (anyFace == null) anyFace = cap;
         }
-        return null;
+        return anyFace;
     }
 
     /**
@@ -104,8 +147,16 @@ public final class BoundaryColumn {
      */
     public static BoundaryColumn resolve(Level level, Node handlerNode) {
         BlockPos pos = handlerNode.pos();
-        IFluidHandler cap = findHandler(level, pos);
+        Direction face = handlerNode.accessFace(); // side-specific handler face, or null
+        IFluidHandler cap = findHandler(level, pos, face);
         if (cap == null) return null;
+
+        // A relay endpoint (a docking connector, a hose) moves fluid through its own logic, so modelling
+        // its tiny buffer as a surface-elevation capacitor makes the solver call it "balanced" and refuse
+        // to drain it (the equalization stall). Resolve it drain-priority and bottomless instead — exactly
+        // like a hose pulley — so it is a one-way SOURCE while it holds fluid and a one-way SINK while
+        // empty. See HandlerRoles#isRelayEndpoint.
+        if (HandlerRoles.isRelayEndpoint(level, pos)) return relayEndpoint(level, pos, cap);
 
         if (level.getBlockEntity(pos) instanceof FluidTankBlockEntity tankBe) {
             FluidTankBlockEntity controller = tankBe.getControllerBE();
@@ -170,14 +221,35 @@ public final class BoundaryColumn {
         }
         if (capacity <= 0) return null;
 
+        // Only the generic path can be a side-specific handler (a tank/pulley/relay is side-agnostic),
+        // so this is where the access face rides onto the column for the later transfer.
         return new BoundaryColumn(pos, pos,
                 SableCompat.getColumnBaseY(level, pos, 1, 1), 1, capacity, found, amount, null, false, true,
-                SableCompat.getUpProjectionY(level, pos));
+                SableCompat.getUpProjectionY(level, pos)).accessFace(face);
     }
 
     /** A Create hose pulley block, whose handler drains/fills a world fluid body. */
     private static boolean isHosePulley(Level level, BlockPos pos) {
         return level.getBlockEntity(pos) instanceof HosePulleyBlockEntity;
+    }
+
+    /**
+     * A relay endpoint (docking connector, hose) as a drain-priority bottomless column at its own
+     * elevation — the hose-pulley model applied to any relay handler. When it can give fluid
+     * ({@code drain} SIMULATE) it is a brimming one-way SOURCE; otherwise a bottomless, one-way, empty
+     * SINK. Either way it is NOT a finite reservoir, so it never surface-equalizes or lip-gates — the
+     * engine drains a receiving connector and fills a sending one on demand, and the real per-tick
+     * volume is clamped later by the handler's own drain/fill (which enforces the mod's pairing gate).
+     */
+    private static BoundaryColumn relayEndpoint(Level level, BlockPos pos, IFluidHandler cap) {
+        double baseY = SableCompat.getWorldY(level, pos) - 0.5;
+        FluidStack drainable = cap.drain(Integer.MAX_VALUE, FluidAction.SIMULATE);
+        if (!drainable.isEmpty()) {
+            return new BoundaryColumn(pos, pos, baseY, 1, PULLEY_CAPACITY_MB,
+                    drainable.copyWithAmount(PULLEY_CAPACITY_MB), PULLEY_CAPACITY_MB, null, true, false, 1.0);
+        }
+        return new BoundaryColumn(pos, pos, baseY, 1, PULLEY_CAPACITY_MB,
+                FluidStack.EMPTY, 0, null, false, false, 1.0);
     }
 
     /**
@@ -310,12 +382,20 @@ public final class BoundaryColumn {
         return projected.equals(space) ? space : projected;
     }
 
-    /** The live handler that can give or take this column's fluid. */
+    /** The live handler that can give or take this column's fluid (through its side-specific face if any). */
     public IFluidHandler handler(Level level) {
         return isOpenEnd()
                 ? OpenEndPipes.handler(level, accessPos, openFace)
-                : findHandler(level, accessPos);
+                : findHandler(level, accessPos, accessFace);
     }
+
+    private BoundaryColumn accessFace(Direction face) {
+        this.accessFace = face;
+        return this;
+    }
+
+    /** The face a side-specific handler is resolved/transferred through, or null for side-agnostic. */
+    public Direction accessFace() { return accessFace; }
 
     public boolean isOpenEnd() { return openFace != null; }
 

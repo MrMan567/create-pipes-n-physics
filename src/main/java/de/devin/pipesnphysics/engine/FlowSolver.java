@@ -182,6 +182,12 @@ public final class FlowSolver {
                 BoundaryColumn resolved;
                 if (node.isHandler()) {
                     resolved = BoundaryColumn.resolve(level, node);
+                    // Feed the relay detector this handler's live contents so it can spot a block that
+                    // spontaneously gains fluid (a relay) versus one we merely fill (see RelayDetector).
+                    if (resolved != null) {
+                        RelayDetector.observe(level, resolved.accessPos(),
+                                resolved.contents().getFluid(), resolved.contentMb());
+                    }
                 } else if (node.isOpenEnd()) {
                     resolved = BoundaryColumn.forOpenEnd(level, node, networkSpilled);
                 } else {
@@ -551,7 +557,7 @@ public final class FlowSolver {
         }
         if (cap == null) return false;
         if (!column.isEmpty()) {
-            return !cap.drain(sample.copyWithAmount(1), FluidAction.SIMULATE).isEmpty()
+            return !BoundaryColumn.drainMatching(cap, sample.copyWithAmount(1), FluidAction.SIMULATE).isEmpty()
                     || cap.fill(sample.copyWithAmount(1), FluidAction.SIMULATE) > 0;
         }
         if (claimedEmpties.contains(column.identity())) return false;
@@ -716,6 +722,20 @@ public final class FlowSolver {
         // ordinary "nothing to move", not a fault worth flagging to the player.
         if (columnA != null && columnA.isEmpty()) allowedSign = combineSign(allowedSign, -1);
         if (columnB != null && columnB.isEmpty()) allowedSign = combineSign(allowedSign, +1);
+
+        // A receive-only handler (a sink_only tag or a detector-learned relay — a docking connector,
+        // a hose, a passthrough) may be filled but never drained or equalized: pin the branch to flow
+        // INTO it, exactly like an empty column. Its own logic sources/moves the fluid, so treating it
+        // as a two-way capacitor would fight it. Only finite reservoirs carry this role (open ends and
+        // pulleys keep their own one-way rules), which also skips the tag lookup for those.
+        if (columnA != null && columnA.isFiniteReservoir()
+                && HandlerRoles.isReceiveOnly(level, columnA.accessPos())) {
+            allowedSign = combineSign(allowedSign, -1);
+        }
+        if (columnB != null && columnB.isFiniteReservoir()
+                && HandlerRoles.isReceiveOnly(level, columnB.accessPos())) {
+            allowedSign = combineSign(allowedSign, +1);
+        }
 
         // An infinite SOURCE (a hose pulley over a body it can drain, an open-end intake
         // mouth) only ever supplies — pin the branch to flow OUT of it. A pulley in the
@@ -985,7 +1005,8 @@ public final class FlowSolver {
                     BoundaryColumn sink = sinks.get(snkIdx.get(j));
                     int amount = Math.min(srcShare[i], snkShare[j]);
                     transfers.add(new Solution.Transfer(
-                            source.accessPos(), sink.accessPos(), sample.copyWithAmount(amount)));
+                            source.accessPos(), source.accessFace(),
+                            sink.accessPos(), sink.accessFace(), sample.copyWithAmount(amount)));
                     if (sink.isEmpty()) claimedEmpties.add(sink.identity());
                     srcShare[i] -= amount;
                     snkShare[j] -= amount;
@@ -1048,7 +1069,7 @@ public final class FlowSolver {
             return column.isInfiniteSource() ? Math.min(amount, column.contentMb()) : 0;
         }
         return cap == null ? 0
-                : cap.drain(sample.copyWithAmount(amount), FluidAction.SIMULATE).getAmount();
+                : BoundaryColumn.drainMatching(cap, sample.copyWithAmount(amount), FluidAction.SIMULATE).getAmount();
     }
 
     /** What the handler will really accept this tick, probed without mutating it. */
