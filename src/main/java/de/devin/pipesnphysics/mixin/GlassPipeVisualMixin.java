@@ -38,6 +38,10 @@ public class GlassPipeVisualMixin {
     @Redirect(method = "beginFrame", at = @At(value = "INVOKE",
             target = "Lcom/simibubi/create/content/fluids/FluidTransportBehaviour;getFlow(Lnet/minecraft/core/Direction;)Lcom/simibubi/create/content/fluids/PipeConnection$Flow;"))
     private PipeConnection.Flow pipesnphysics$hideLevelFlow(FluidTransportBehaviour pipe, Direction side) {
-        return CreatePipeRendering.hidesFromCreate(pipe) ? null : pipe.getFlow(side);
+        if (CreatePipeRendering.hidesFromCreate(pipe)) return null;
+        PipeConnection.Flow flow = pipe.getFlow(side);
+        // A face capped by a solid block carries no flow; fill its half from the network side so the
+        // terminal cell of a run stopped by a placed block renders full, not half.
+        return flow != null ? flow : CreatePipeRendering.deadEndFillFlow(pipe, side);
     }
 }

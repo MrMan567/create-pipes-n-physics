@@ -22,7 +22,10 @@ import de.devin.pipesnphysics.engine.EngineTickHandler;
 import de.devin.pipesnphysics.engine.FlowSolver;
 import de.devin.pipesnphysics.engine.Graph;
 import de.devin.pipesnphysics.engine.GraphBuilder;
+import de.devin.pipesnphysics.engine.HandlerRoles;
+import de.devin.pipesnphysics.engine.BoundaryColumn;
 import de.devin.pipesnphysics.engine.Node;
+import de.devin.pipesnphysics.engine.RelayDetector;
 import de.devin.pipesnphysics.engine.OpenEndPipes;
 import de.devin.pipesnphysics.engine.PipeProbe;
 import de.devin.pipesnphysics.engine.Solution;
@@ -3538,6 +3541,159 @@ public class PipesNPhysicsGameTests {
         return null;
     }
 
+    /**
+     * The "goofy_network" freeze: a pump chain lifts water from a source up a series line
+     * source → header → BIG TANK → spout, where the terminal spout is FULL. The big tank has room,
+     * so the pump-lifted water must back up and fill it (toward 100%). It currently freezes at 92%:
+     * the one-shot solve routes a through-current to the full spout, the intermediate big tank reads
+     * as a pass-through (net ~0), and {@code planTransfers} zeroes the whole line on the full
+     * terminal — so a reservoir with room is starved by a full downstream sink. Reproduces the
+     * user's "every pump says no room ahead"; draining the spout (their spout-pump fix) unfreezes it.
+     */
+    @GameTest(template = "goofy_network", templateNamespace = PipesNPhysics.ID, timeoutTicks = 300)
+    public static void pumpFillsIntermediateTankDespiteFullTerminal(GameTestHelper helper) {
+        int[] before = {-1};
+        helper.runAfterDelay(40, () -> { // spin pumps up, then reproduce the screenshot's stuck fill state
+            IFluidHandler big = pipesnphysics$goofyHandler(helper, 32000);
+            IFluidHandler header = pipesnphysics$goofyHandler(helper, 8000, /*wantEmpty*/true);
+            IFluidHandler spout = pipesnphysics$goofyHandler(helper, 1000);
+            if (big == null || header == null) { System.out.println("GOOFY: could not find tanks"); return; }
+            big.drain(Integer.MAX_VALUE, IFluidHandler.FluidAction.EXECUTE);
+            big.fill(new FluidStack(Fluids.WATER, 29558), IFluidHandler.FluidAction.EXECUTE); // 92%, as reported
+            header.drain(Integer.MAX_VALUE, IFluidHandler.FluidAction.EXECUTE);
+            header.fill(new FluidStack(Fluids.WATER, 36), IFluidHandler.FluidAction.EXECUTE);
+            if (spout != null) spout.fill(new FluidStack(Fluids.WATER, 1000), IFluidHandler.FluidAction.EXECUTE);
+            before[0] = big.getFluidInTank(0).getAmount();
+        });
+        helper.runAfterDelay(250, () -> {
+            IFluidHandler big = pipesnphysics$goofyHandler(helper, 32000);
+            int after = big == null ? -1 : big.getFluidInTank(0).getAmount();
+            // The pump keeps lifting source water; the spout is full so it can't leave — the big tank
+            // (which has room) MUST fill toward 100%. It currently freezes at 92% because a full
+            // terminal sink zeroes the whole series line (the intermediate reservoir is starved).
+            if (after <= before[0] + 100) {
+                pipesnphysics$dumpGoofy(helper, "FAIL: intermediate tank starved by a full terminal");
+                helper.fail("pump-fed intermediate tank starved by a full downstream sink: "
+                        + before[0] + " -> " + after + " mB (expected it to fill toward 32000)");
+                return;
+            }
+            // Force the big tank full and drain the HEADER (the single tank above). With the tank below
+            // full, the header is the intermediate reservoir with room — the pump must still refill it.
+            big.fill(new FluidStack(Fluids.WATER, 32000), IFluidHandler.FluidAction.EXECUTE);
+            IFluidHandler header = pipesnphysics$goofyHandler(helper, 8000, true);
+            if (header != null) header.drain(Integer.MAX_VALUE, IFluidHandler.FluidAction.EXECUTE);
+        });
+        int[] hdr = {-1};
+        helper.runAfterDelay(256, () -> {
+            IFluidHandler header = pipesnphysics$goofyHandler(helper, 8000, true);
+            hdr[0] = header == null ? -1 : header.getFluidInTank(0).getAmount();
+        });
+        helper.runAfterDelay(300, () -> {
+            IFluidHandler header = pipesnphysics$goofyHandler(helper, 8000, true);
+            int now = header == null ? -1 : header.getFluidInTank(0).getAmount();
+            if (now <= hdr[0] + 100) {
+                pipesnphysics$dumpGoofy(helper, "FAIL: header above a full tank did not refill");
+                helper.fail("the single tank above a FULL tank did not refill: " + hdr[0]
+                        + " -> " + now + " mB (the pump must still fill the intermediate reservoir)");
+                return;
+            }
+            helper.succeed();
+        });
+    }
+
+    private static IFluidHandler pipesnphysics$goofyHandler(GameTestHelper helper, int capacity) {
+        return pipesnphysics$goofyHandler(helper, capacity, false);
+    }
+
+    /** Find a graph HANDLER whose total capacity matches; wantEmpty picks the highest-Y match (header vs source). */
+    private static IFluidHandler pipesnphysics$goofyHandler(GameTestHelper helper, int capacity, boolean topmost) {
+        Level level = helper.getLevel();
+        BlockPos seed = null;
+        for (int x = 0; x < 6 && seed == null; x++)
+            for (int y = 0; y < 7 && seed == null; y++)
+                for (int z = 0; z < 2 && seed == null; z++) {
+                    BlockPos rel = new BlockPos(x, y, z);
+                    if (FluidPropagator.getPipe(level, helper.absolutePos(rel)) != null) seed = rel;
+                }
+        if (seed == null) return null;
+        Graph g = GraphBuilder.build(level, helper.absolutePos(seed));
+        IFluidHandler best = null;
+        int bestY = Integer.MIN_VALUE;
+        for (Node n : g.nodes()) {
+            if (n.kind() != Node.Kind.HANDLER) continue;
+            IFluidHandler h = pipesnphysics$sideFallback(level, n.pos());
+            if (h == null) continue;
+            int cap = 0;
+            for (int i = 0; i < h.getTanks(); i++) cap += h.getTankCapacity(i);
+            if (cap != capacity) continue;
+            if (!topmost) return h;
+            if (n.pos().getY() > bestY) { bestY = n.pos().getY(); best = h; }
+        }
+        return best;
+    }
+
+    private static IFluidHandler pipesnphysics$sideFallback(Level level, BlockPos pos) {
+        IFluidHandler h = level.getCapability(Capabilities.FluidHandler.BLOCK, pos, null);
+        if (h != null) return h;
+        for (Direction d : Direction.values()) {
+            h = level.getCapability(Capabilities.FluidHandler.BLOCK, pos, d);
+            if (h != null) return h;
+        }
+        return null;
+    }
+
+    /** Print the full goofy_network solve to stdout (fail messages truncate at 1024). */
+    private static void pipesnphysics$dumpGoofy(GameTestHelper helper, String label) {
+        Level level = helper.getLevel();
+        BlockPos seed = null;
+        for (int x = 0; x < 6 && seed == null; x++)
+            for (int y = 0; y < 7 && seed == null; y++)
+                for (int z = 0; z < 2 && seed == null; z++) {
+                    BlockPos rel = new BlockPos(x, y, z);
+                    if (FluidPropagator.getPipe(level, helper.absolutePos(rel)) != null) seed = rel;
+                }
+        if (seed == null) { System.out.println("GOOFY: no pipe found"); return; }
+        Graph g = GraphBuilder.build(level, helper.absolutePos(seed));
+        Solution sol = FlowSolver.solve(level, g);
+        StringBuilder sb = new StringBuilder("\nGOOFY === " + label + " ===\n");
+        sb.append("GOOFY pumps=").append(g.pumps().size())
+                .append(" runningPump=").append(EngineTickHandler.hasRunningPump(helper.getLevel(), g))
+                .append(" active=").append(sol.active())
+                .append(" transfers=").append(sol.transfers().size()).append("\n");
+        for (Node n : g.nodes())
+            sb.append(String.format("GOOFY  N%-2d %-8s head=%.3f ceil=%.3f%s%n",
+                    n.index(), n.kind(), sol.nodeHeads().getOrDefault(n.index(), 0.0),
+                    sol.nodeCeilings().getOrDefault(n.index(), 0.0), pipesnphysics$roomAt(level, n.pos())));
+        for (Edge e : g.edges()) {
+            String tag = sol.blockedEdges().contains(e.index()) ? " BLOCKED"
+                    : sol.stalledEdges().contains(e.index()) ? " STALLED"
+                    : sol.noHeadEdges().contains(e.index()) ? " NOHEAD" : "";
+            Solution.Reason r = sol.edgeReasons().get(e.index());
+            boolean rest = !sol.restFluids().getOrDefault(e.index(), FluidStack.EMPTY).isEmpty();
+            boolean ef = !sol.edgeFluids().getOrDefault(e.index(), FluidStack.EMPTY).isEmpty();
+            sb.append(String.format("GOOFY  E%-2d %d-%d len%d dir=%s%s%s rest=%b edgeFluid=%b%s%n",
+                    e.index(), e.a(), e.b(), e.length(),
+                    sol.edgeFlows().get(e.index()).direction(), tag, r == null ? "" : " (" + r + ")",
+                    rest, ef, sol.heldEdges().contains(e.index()) ? " HELD" : ""));
+        }
+        for (Solution.Transfer t : sol.transfers())
+            sb.append("GOOFY  T ").append(t.from().toShortString()).append(" -> ")
+                    .append(t.to().toShortString()).append(" ").append(t.fluid().getAmount()).append("\n");
+        System.out.println(sb);
+    }
+
+    /** " content/capacity mB (has room)" for a fluid handler at pos, or "" if none — for diagnostics. */
+    private static String pipesnphysics$roomAt(Level level, BlockPos pos) {
+        IFluidHandler h = level.getCapability(Capabilities.FluidHandler.BLOCK, pos, null);
+        if (h == null) return "";
+        int content = 0, capacity = 0;
+        for (int i = 0; i < h.getTanks(); i++) {
+            content += h.getFluidInTank(i).getAmount();
+            capacity += h.getTankCapacity(i);
+        }
+        return String.format("  %d/%d mB%s", content, capacity, content < capacity ? " (ROOM)" : " (full)");
+    }
+
     private static String dump(GameTestHelper helper) {
         return dump(helper, new BlockPos(2, 1, 1));
     }
@@ -3595,5 +3751,434 @@ public class PipesNPhysicsGameTests {
                 Capabilities.FluidHandler.BLOCK, helper.absolutePos(relativePos), null);
         if (handler == null) helper.fail("no fluid handler at " + relativePos);
         return handler;
+    }
+
+    /**
+     * A run BACKED UP from the very first tick — never charged by a travelling front — must still
+     * render FULL, not empty. A pump reverse-blocking a full tank (its check valve stops that tank
+     * draining out through it) leaves the pipes between them a pressurized column: SINK_FULL /
+     * {@code isBackedUp}, yet no flow ever filled them. The renderer must STAMP such a run full, not
+     * merely preserve the (nonexistent) prior charge. Reproduces "a reverse pump renders the pipe
+     * empty instead of full". Uses long_pipe (tank - 5 pipes - pump - tank); coords shift at
+     * placement, so everything is found from the graph in absolute space.
+     */
+    @GameTest(template = "piping/long_pipe", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
+    public static void bornBackedUpRunRendersFull(GameTestHelper helper) {
+        Level level = helper.getLevel();
+        List<BlockPos> run = new ArrayList<>();
+        helper.runAfterDelay(10, () -> {
+            BlockPos seed = null;
+            for (int x = 0; x <= 8 && seed == null; x++) for (int y = 0; y <= 2 && seed == null; y++)
+                for (int z = 0; z <= 2 && seed == null; z++) {
+                    BlockPos abs = helper.absolutePos(new BlockPos(x, y, z));
+                    if (FluidPropagator.getPipe(level, abs) != null) seed = abs;
+                }
+            if (seed == null) { helper.fail("no pipe seed"); return; }
+            Graph g = GraphBuilder.build(level, seed);
+            BlockPos pump = null;
+            List<BlockPos> tanks = new ArrayList<>();
+            for (Node n : g.nodes()) { if (n.isPump()) pump = n.pos(); else if (n.isHandler()) tanks.add(n.pos()); }
+            if (pump == null || tanks.size() < 2) { helper.fail("layout not found: " + tanks); return; }
+            for (Edge e : g.edges()) run.addAll(e.pipes());
+            // The tank the pipe RUN reaches (far from the pump) is on the pump's push side — fill it
+            // full so the pump's check valve backs the run up against it; empty the pump's supply side.
+            BlockPos backedTank = tanks.get(0).distManhattan(pump) >= tanks.get(1).distManhattan(pump)
+                    ? tanks.get(0) : tanks.get(1);
+            BlockPos supply = backedTank.equals(tanks.get(0)) ? tanks.get(1) : tanks.get(0);
+            IFluidHandler bh = pipesnphysics$sideFallback(level, backedTank);
+            if (bh != null) bh.fill(new FluidStack(Fluids.WATER, 8000), IFluidHandler.FluidAction.EXECUTE);
+            IFluidHandler sh = pipesnphysics$sideFallback(level, supply);
+            if (sh != null) sh.drain(Integer.MAX_VALUE, IFluidHandler.FluidAction.EXECUTE);
+        });
+        helper.runAfterDelay(160, () -> {
+            if (run.isEmpty()) { helper.fail("no run cells captured"); return; }
+            for (BlockPos abs : run) {
+                if (!pipeCellRendersFluidAbs(level, abs)) {
+                    helper.fail("backed-up run cell rendered empty (never seeded) at " + helper.relativePos(abs));
+                    return;
+                }
+            }
+            helper.succeed();
+        });
+    }
+
+    private static boolean pipeCellRendersFluidAbs(Level level, BlockPos abs) {
+        FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, abs);
+        if (pipe == null) return false;
+        for (Direction dir : Direction.values()) {
+            if (pipe.getConnection(dir) instanceof PipeConnectionAccessor a) {
+                var flow = a.pipesnphysics$getFlow();
+                if (flow.isPresent() && flow.get().complete && !flow.get().fluid.isEmpty()) return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * A run BLOCKED by an unpowered pump, but connected to a tank that STILL HOLDS fluid, must render
+     * the settled water sitting in the pipe up to the pump — not blank. The pump-off branch never
+     * assembles, so the run gets no rest fluid or heads unless {@code settleBlockedRuns} supplies them
+     * from the filled reservoir. Reproduces "a pump on this line is unpowered, and the pipes render
+     * empty". The tank on the pump's FAR side is emptied and must stay dry (no phantom water past the
+     * block).
+     */
+    @GameTest(template = "piping/long_pipe", templateNamespace = PipesNPhysics.ID, timeoutTicks = 300)
+    public static void blockedRunFromFullTankRendersSettled(GameTestHelper helper) {
+        Level level = helper.getLevel();
+        List<BlockPos> runToFull = new ArrayList<>();
+        List<BlockPos> runToEmpty = new ArrayList<>();
+        helper.runAfterDelay(10, () -> {
+            BlockPos seed = null;
+            for (int x = 0; x <= 8 && seed == null; x++) for (int y = 0; y <= 2 && seed == null; y++)
+                for (int z = 0; z <= 2 && seed == null; z++) {
+                    BlockPos abs = helper.absolutePos(new BlockPos(x, y, z));
+                    if (FluidPropagator.getPipe(level, abs) != null) seed = abs;
+                }
+            if (seed == null) { helper.fail("no pipe seed"); return; }
+            Graph g = GraphBuilder.build(level, seed);
+            BlockPos pump = null;
+            List<BlockPos> tanks = new ArrayList<>();
+            for (Node n : g.nodes()) { if (n.isPump()) pump = n.pos(); else if (n.isHandler()) tanks.add(n.pos()); }
+            if (pump == null || tanks.size() < 2) { helper.fail("layout not found: " + tanks); return; }
+            BlockPos fullTank = tanks.get(0).distManhattan(pump) >= tanks.get(1).distManhattan(pump) ? tanks.get(0) : tanks.get(1);
+            BlockPos emptyTank = fullTank.equals(tanks.get(0)) ? tanks.get(1) : tanks.get(0);
+            for (Edge e : g.edges()) {
+                boolean touchesFull = g.node(e.a()).pos().equals(fullTank) || g.node(e.b()).pos().equals(fullTank);
+                (touchesFull ? runToFull : runToEmpty).addAll(e.pipes());
+            }
+            // Unpower the pump by clearing its kinetic neighbours (motor/cogwheel).
+            for (Direction d : Direction.values()) {
+                var st = level.getBlockState(pump.relative(d));
+                if (!st.is(AllBlocks.FLUID_PIPE.get()) && !st.is(AllBlocks.FLUID_TANK.get()) && !st.isAir()) {
+                    level.setBlockAndUpdate(pump.relative(d), Blocks.AIR.defaultBlockState());
+                }
+            }
+            IFluidHandler fh = pipesnphysics$sideFallback(level, fullTank);
+            if (fh != null) fh.fill(new FluidStack(Fluids.WATER, 8000), IFluidHandler.FluidAction.EXECUTE);
+            IFluidHandler eh = pipesnphysics$sideFallback(level, emptyTank);
+            if (eh != null) eh.drain(Integer.MAX_VALUE, IFluidHandler.FluidAction.EXECUTE);
+        });
+        helper.runAfterDelay(160, () -> {
+            if (runToFull.isEmpty()) { helper.fail("no run captured"); return; }
+            for (BlockPos abs : runToFull) {
+                if (!pipeCellRendersFluidAbs(level, abs)) {
+                    helper.fail("blocked run from the FULL tank rendered empty at " + helper.relativePos(abs));
+                    return;
+                }
+            }
+            // The far run (to the drained tank) must stay dry — no phantom water past the off pump.
+            for (BlockPos abs : runToEmpty) {
+                if (pipeCellRendersFluidAbs(level, abs)) {
+                    helper.fail("run to the EMPTY tank wrongly rendered water past the off pump at " + helper.relativePos(abs));
+                    return;
+                }
+            }
+            helper.succeed();
+        });
+    }
+
+    /**
+     * The dead-end fill: a pipe run capped by a solid block renders full because the client renderer,
+     * asking for the (pruned) block-facing flow, is handed a synthetic complete flow derived from the
+     * network side ({@code CreatePipeRendering.deadEndFillFlow}). The actual pixels are client-side and
+     * not GameTestable, but the SYNTH LOGIC runs server-side and is what decides whether the block half
+     * fills — assert it fires for a true solid dead end and stays null for the network side (which has
+     * a real flow) so it never double-fills.
+     */
+    @GameTest(template = "piping/long_pipe", templateNamespace = PipesNPhysics.ID, timeoutTicks = 300)
+    public static void deadEndFillFlowSynthesizesTheCappedHalf(GameTestHelper helper) {
+        Level level = helper.getLevel();
+        BlockPos[] junctionAndBlock = new BlockPos[2]; // [junction cell, block]
+        helper.runAfterDelay(10, () -> {
+            BlockPos seed = null;
+            for (int x = 0; x <= 8 && seed == null; x++) for (int y = 0; y <= 2 && seed == null; y++)
+                for (int z = 0; z <= 2 && seed == null; z++) {
+                    BlockPos abs = helper.absolutePos(new BlockPos(x, y, z));
+                    if (FluidPropagator.getPipe(level, abs) != null) seed = abs;
+                }
+            if (seed == null) { helper.fail("no pipe seed"); return; }
+            Graph g = GraphBuilder.build(level, seed);
+            BlockPos pump = null;
+            List<BlockPos> tanks = new ArrayList<>();
+            for (Node n : g.nodes()) { if (n.isPump()) pump = n.pos(); else if (n.isHandler()) tanks.add(n.pos()); }
+            if (pump == null || tanks.size() < 2) { helper.fail("layout not found: " + tanks); return; }
+            BlockPos near = tanks.get(0).distManhattan(pump) >= tanks.get(1).distManhattan(pump) ? tanks.get(0) : tanks.get(1);
+            BlockPos far = near.equals(tanks.get(0)) ? tanks.get(1) : tanks.get(0);
+            // The last pipe next to the pump spot becomes the dead-end junction once blocked.
+            junctionAndBlock[0] = pump.relative(net.minecraft.core.Direction.fromDelta(
+                    Integer.signum(near.getX() - pump.getX()), 0, Integer.signum(near.getZ() - pump.getZ())));
+            junctionAndBlock[1] = pump;
+            for (Direction d : Direction.values()) {
+                var st = level.getBlockState(pump.relative(d));
+                if (!st.is(AllBlocks.FLUID_PIPE.get()) && !st.isAir()) level.setBlockAndUpdate(pump.relative(d), Blocks.AIR.defaultBlockState());
+            }
+            level.setBlockAndUpdate(far, Blocks.AIR.defaultBlockState());
+            level.setBlockAndUpdate(pump, Blocks.STONE.defaultBlockState());
+            IFluidHandler h = pipesnphysics$sideFallback(level, near);
+            if (h != null) h.fill(new FluidStack(Fluids.WATER, 8000), IFluidHandler.FluidAction.EXECUTE);
+        });
+        helper.runAfterDelay(160, () -> {
+            BlockPos cell = junctionAndBlock[0], block = junctionAndBlock[1];
+            FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, cell);
+            if (pipe == null) { helper.fail("no junction pipe"); return; }
+            Direction toBlock = de.devin.pipesnphysics.engine.PipeGeometry.between(cell, block);
+            if (toBlock == null) { helper.fail("junction not adjacent to block"); return; }
+            var synth = CreatePipeRendering.deadEndFillFlow(pipe, toBlock);
+            if (synth == null || !synth.complete || synth.fluid.isEmpty()) {
+                helper.fail("deadEndFillFlow did not synthesize the capped half toward the block");
+                return;
+            }
+            // The network side has a REAL flow, so the synth must stay null there (no double-fill).
+            if (CreatePipeRendering.deadEndFillFlow(pipe, toBlock.getOpposite()) != null) {
+                helper.fail("deadEndFillFlow wrongly synthesized on the network side");
+                return;
+            }
+            helper.succeed();
+        });
+    }
+
+    /**
+     * With the CUSTOM in-pipe renderer ({@code PIPE_LEVEL_RENDER}) on, Create's fill is hidden and the
+     * renderer draws only from each cell's synced {@link PipeLevelData}. A dead-end junction cell sits
+     * in NO edge, so stampWaterlines never reaches it — it was left blank against the block (the real
+     * "block still broken" case, since the user runs the custom renderer). {@code fillDeadEndCell} now
+     * stamps it FULL. Drives {@code apply(..., levelRender=true)} and asserts the junction cell carries
+     * a full level marker. Batch {@code levelRender} (stamps the synced field).
+     */
+    @GameTest(template = "piping/long_pipe", templateNamespace = PipesNPhysics.ID, timeoutTicks = 300, batch = "levelRender")
+    public static void deadEndJunctionStampedFullForCustomRenderer(GameTestHelper helper) {
+        Level level = helper.getLevel();
+        BlockPos[] junctionHolder = new BlockPos[1];
+        helper.runAfterDelay(10, () -> {
+            BlockPos seed = null;
+            for (int x = 0; x <= 8 && seed == null; x++) for (int y = 0; y <= 2 && seed == null; y++)
+                for (int z = 0; z <= 2 && seed == null; z++) {
+                    BlockPos abs = helper.absolutePos(new BlockPos(x, y, z));
+                    if (FluidPropagator.getPipe(level, abs) != null) seed = abs;
+                }
+            if (seed == null) { helper.fail("no pipe seed"); return; }
+            Graph g = GraphBuilder.build(level, seed);
+            BlockPos pump = null;
+            List<BlockPos> tanks = new ArrayList<>();
+            for (Node n : g.nodes()) { if (n.isPump()) pump = n.pos(); else if (n.isHandler()) tanks.add(n.pos()); }
+            if (pump == null || tanks.size() < 2) { helper.fail("layout not found: " + tanks); return; }
+            BlockPos near = tanks.get(0).distManhattan(pump) >= tanks.get(1).distManhattan(pump) ? tanks.get(0) : tanks.get(1);
+            BlockPos far = near.equals(tanks.get(0)) ? tanks.get(1) : tanks.get(0);
+            junctionHolder[0] = pump.relative(net.minecraft.core.Direction.fromDelta(
+                    Integer.signum(near.getX() - pump.getX()), 0, Integer.signum(near.getZ() - pump.getZ())));
+            for (Direction d : Direction.values()) {
+                var st = level.getBlockState(pump.relative(d));
+                if (!st.is(AllBlocks.FLUID_PIPE.get()) && !st.isAir()) level.setBlockAndUpdate(pump.relative(d), Blocks.AIR.defaultBlockState());
+            }
+            level.setBlockAndUpdate(far, Blocks.AIR.defaultBlockState());
+            level.setBlockAndUpdate(pump, Blocks.STONE.defaultBlockState());
+            IFluidHandler h = pipesnphysics$sideFallback(level, near);
+            if (h != null) h.fill(new FluidStack(Fluids.WATER, 8000), IFluidHandler.FluidAction.EXECUTE);
+        });
+        helper.runAfterDelay(160, () -> {
+            BlockPos cell = junctionHolder[0];
+            FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, cell);
+            if (pipe == null) { helper.fail("no junction pipe"); return; }
+            Graph g = GraphBuilder.build(level, cell);
+            Solution sol = FlowSolver.solve(level, g);
+            CreatePipeRendering.apply(level, g, sol, true); // force the custom level-render path
+            Integer data = pipesnphysics$levelData(pipe);
+            if (data == null) {
+                helper.fail("dead-end junction cell got no level marker — the custom renderer would blank it");
+                return;
+            }
+            float frac = CreatePipeRendering.levelFraction(data);
+            if (frac < 0.98f) {
+                helper.fail("dead-end junction stamped only " + frac + " full (expected ~1.0 against the block)");
+                return;
+            }
+            helper.succeed();
+        });
+    }
+
+    // ---- automatic relay detection (CLAUDE.md §2, RelayDetector / HandlerRoles) ----
+    // These drive RelayDetector.observe directly on a placed block: a real relay (a docking connector,
+    // a VS hose) needs a second mod, but the learning is block-type + fluid-amount math the detector
+    // exposes. Each body runs synchronously (no runAfterDelay), so clearing the detector at the start
+    // fully isolates it from its batch siblings. Distinct block types keep the learned sets disjoint.
+
+    /**
+     * A handler whose stored fluid keeps GROWING on its own — with no fill from the engine — is the
+     * relay signature: learned as a relay and demoted to receive-only, so the solver stops draining and
+     * equalizing it as a tank.
+     */
+    @GameTest(template = "piping/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 100, batch = "relayDetector")
+    public static void relayDetectorLearnsSpontaneousGain(GameTestHelper helper) {
+        RelayDetector.clear();
+        Level level = helper.getLevel();
+        // Blocks.STONE stands in for an unknown mod's relay: non-exempt and untagged.
+        BlockPos rel = new BlockPos(1, 2, 1);
+        BlockPos pos = helper.absolutePos(rel);
+        helper.setBlock(rel, Blocks.STONE);
+        for (int amount = 100; amount <= 700; amount += 100) {
+            RelayDetector.observe(level, pos, Fluids.WATER, amount); // +100 each step, no fill from us
+        }
+        if (!RelayDetector.isRelay(Blocks.STONE)) {
+            helper.fail("a block that gained fluid on its own every tick was not learned as a relay");
+            return;
+        }
+        if (!HandlerRoles.isRelayEndpoint(level, pos)) {
+            helper.fail("a learned relay is not treated as a drain-priority relay endpoint");
+            return;
+        }
+        RelayDetector.clear();
+        helper.succeed();
+    }
+
+    /**
+     * A handler that spontaneously LOSES fluid is a consumer (a basin, a boiler), not a relay — it must
+     * keep receiving fluid and must never be demoted.
+     */
+    @GameTest(template = "piping/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 100, batch = "relayDetector")
+    public static void relayDetectorSparesConsumers(GameTestHelper helper) {
+        RelayDetector.clear();
+        Level level = helper.getLevel();
+        BlockPos rel = new BlockPos(1, 2, 1);
+        BlockPos pos = helper.absolutePos(rel);
+        helper.setBlock(rel, Blocks.DIRT);
+        for (int amount = 1000; amount >= 200; amount -= 100) {
+            RelayDetector.observe(level, pos, Fluids.WATER, amount); // spontaneously LOSING = a consumer
+        }
+        if (RelayDetector.isRelay(Blocks.DIRT)) {
+            helper.fail("a block that only lost fluid (a consumer) was wrongly demoted to a relay");
+            return;
+        }
+        RelayDetector.clear();
+        helper.succeed();
+    }
+
+    /**
+     * A relay_endpoint-tagged handler (the create-aeronautics docking connector, loaded from run/mods)
+     * resolves to a drain-priority BOTTOMLESS column, NOT a finite reservoir — so the solver never holds
+     * it "balanced" and refuses to drain it (the equalization stall that stopped fluid crossing a docked
+     * connector). Skips if the mod is absent.
+     */
+    @GameTest(template = "piping/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 100, batch = "relayDetector")
+    public static void relayEndpointResolvesBottomless(GameTestHelper helper) {
+        Level level = helper.getLevel();
+        Block connector = BuiltInRegistries.BLOCK.get(
+                ResourceLocation.fromNamespaceAndPath("simulated", "docking_connector"));
+        if (connector == Blocks.AIR) { helper.succeed(); return; } // aeronautics not installed
+        BlockPos rel = new BlockPos(1, 2, 1);
+        helper.setBlock(rel, connector);
+        BlockPos pos = helper.absolutePos(rel);
+        if (!HandlerRoles.isRelayEndpoint(level, pos)) {
+            helper.fail("docking connector is not classified as a relay endpoint (tag not applied)");
+            return;
+        }
+        BoundaryColumn column = BoundaryColumn.resolve(level,
+                new Node(0, pos, Node.Kind.HANDLER, pos.getY() + 0.5, null, null, null));
+        if (column == null) { helper.succeed(); return; } // no live cap on a lone connector — nothing to assert
+        if (column.isFiniteReservoir()) {
+            helper.fail("relay endpoint resolved as a finite reservoir — it would surface-equalize and stall");
+            return;
+        }
+        helper.succeed();
+    }
+
+    /**
+     * A SIDE-SPECIFIC handler (the dev-only {@link TestSideHandlers} on a sponge: a different tank per
+     * face, no null-side handler) resolves each face to ITS OWN fluid — the core of the per-face
+     * endpoint feature, and the thing no real pack block can exercise. NORTH holds water, SOUTH holds
+     * lava, and resolving through each face returns the matching fluid.
+     */
+    @GameTest(template = "piping/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 100, batch = "relayDetector")
+    public static void sideSpecificHandlerResolvesPerFace(GameTestHelper helper) {
+        TestSideHandlers.clear();
+        Level level = helper.getLevel();
+        BlockPos rel = new BlockPos(1, 2, 1);
+        BlockPos pos = helper.absolutePos(rel);
+        helper.setBlock(rel, Blocks.SPONGE);
+        TestSideHandlers.tankAt(pos, Direction.NORTH).fill(
+                new FluidStack(Fluids.WATER, 8000), IFluidHandler.FluidAction.EXECUTE);
+        TestSideHandlers.tankAt(pos, Direction.SOUTH).fill(
+                new FluidStack(Fluids.LAVA, 8000), IFluidHandler.FluidAction.EXECUTE);
+        if (level.getCapability(Capabilities.FluidHandler.BLOCK, pos, null) != null) {
+            helper.fail("test fixture is not side-specific (it exposes a null-side handler)");
+            return;
+        }
+        double y = pos.getY() + 0.5;
+        BoundaryColumn north = BoundaryColumn.resolve(level,
+                new Node(0, pos, Node.Kind.HANDLER, y, null, null, Direction.NORTH));
+        BoundaryColumn south = BoundaryColumn.resolve(level,
+                new Node(0, pos, Node.Kind.HANDLER, y, null, null, Direction.SOUTH));
+        if (north == null || north.contents().getFluid() != Fluids.WATER) {
+            helper.fail("NORTH face did not resolve to water: "
+                    + (north == null ? "null column" : north.contents().getFluid()));
+            return;
+        }
+        if (south == null || south.contents().getFluid() != Fluids.LAVA) {
+            helper.fail("SOUTH face did not resolve to lava — the access face is ignored in resolution");
+            return;
+        }
+        TestSideHandlers.clear();
+        helper.succeed();
+    }
+
+    /**
+     * A side-specific handler is NOT coupled across faces: the pipe on each face lands in its own
+     * network, reaching the block through its own face ({@link Node#accessFace}). Confirms the
+     * coupling-skip (the south pipe never leaks into the north network) and the recorded face.
+     */
+    @GameTest(template = "piping/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 100, batch = "relayDetector")
+    public static void sideSpecificHandlerSplitsNetworksPerFace(GameTestHelper helper) {
+        TestSideHandlers.clear();
+        Level level = helper.getLevel();
+        BlockPos spongeRel = new BlockPos(1, 2, 1);
+        BlockPos spongePos = helper.absolutePos(spongeRel);
+        helper.setBlock(spongeRel, Blocks.SPONGE);
+        TestSideHandlers.tankAt(spongePos, Direction.NORTH).fill(
+                new FluidStack(Fluids.WATER, 8000), IFluidHandler.FluidAction.EXECUTE);
+        TestSideHandlers.tankAt(spongePos, Direction.SOUTH).fill(
+                new FluidStack(Fluids.LAVA, 8000), IFluidHandler.FluidAction.EXECUTE);
+        helper.setBlock(spongeRel.north(), AllBlocks.FLUID_PIPE.get());
+        helper.setBlock(spongeRel.south(), AllBlocks.FLUID_PIPE.get());
+        BlockPos southPipe = helper.absolutePos(spongeRel.south());
+        Graph northGraph = GraphBuilder.build(level, helper.absolutePos(spongeRel.north()));
+        Node sponge = northGraph.nodes().stream()
+                .filter(n -> n.isHandler() && n.pos().equals(spongePos)).findFirst().orElse(null);
+        if (sponge == null) {
+            helper.fail("side-specific sponge was not discovered as a handler node from the north pipe");
+            return;
+        }
+        if (sponge.accessFace() != Direction.NORTH) {
+            helper.fail("sponge reached from the north pipe recorded accessFace " + sponge.accessFace()
+                    + " (expected NORTH)");
+            return;
+        }
+        if (northGraph.coverage().contains(southPipe)) {
+            helper.fail("side-specific handler coupled its faces — the south pipe leaked into the north network");
+            return;
+        }
+        TestSideHandlers.clear();
+        helper.succeed();
+    }
+
+    /**
+     * Create's own tanks are exempt: one legitimately fed by a second network from another side reads
+     * as an external gain, so the detector must never demote a real reservoir type.
+     */
+    @GameTest(template = "piping/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 100, batch = "relayDetector")
+    public static void relayDetectorExemptsCreateTanks(GameTestHelper helper) {
+        RelayDetector.clear();
+        Level level = helper.getLevel();
+        BlockPos rel = new BlockPos(1, 2, 1);
+        BlockPos pos = helper.absolutePos(rel);
+        helper.setBlock(rel, AllBlocks.FLUID_TANK.get());
+        Block tank = level.getBlockState(pos).getBlock();
+        for (int amount = 100; amount <= 900; amount += 100) {
+            RelayDetector.observe(level, pos, Fluids.WATER, amount); // gains, but a Create tank is exempt
+        }
+        if (RelayDetector.isRelay(tank)) {
+            helper.fail("a Create fluid tank was demoted to a relay despite the exemption");
+            return;
+        }
+        RelayDetector.clear();
+        helper.succeed();
     }
 }

@@ -531,4 +531,127 @@ class NetworkSolverTest {
         }
         assertTrue(previousSpread < 100, "the chain made progress toward equalization");
     }
+
+    // ---------------------------------------------------------------- capacity box (saturation)
+
+    /** A reservoir with explicit box limits on its end-of-tick head. */
+    private static NodeSpec bounded(double capacitance, double head, double floor, double ceiling) {
+        return new NodeSpec(capacitance, head, floor, ceiling);
+    }
+
+    /**
+     * The goofy_network core: a pump feeds an intermediate tank that STILL HAS ROOM, but the
+     * only run past it ends at a FULL terminal sink sitting above it. Without a capacity box the
+     * linear solve routes fictitious current into the full sink (a bare capacitor "accepts" any
+     * inflow within the step), draining the intermediate tank instead of filling it. The box
+     * clamps the full sink to give-only, so the pump's flow backs up into the tank with room.
+     */
+    @Test
+    void fullTerminalSinkBacksUpIntoAnIntermediateTankWithRoom() {
+        // node0 supply (source), node1 intermediate A (room), node2 spout S (full, above A).
+        // Branch 0→1 is the pump (emf 5, check valve). Branch 1→2 is the plain run A—S.
+        List<NodeSpec> boxed = List.of(
+                new NodeSpec(TANK_CAPACITANCE, 20),        // supply, unbounded → free to give
+                bounded(TANK_CAPACITANCE, 3, 0, 4),        // A: 75% full, 1 block of room
+                bounded(TANK_CAPACITANCE, 3, 2, 3));       // S: full at its ceiling, sitting above A
+        List<BranchSpec> branches = List.of(
+                new BranchSpec(0, 1, 4, 5, +1, Double.NaN, 0),
+                BranchSpec.passive(1, 2, 100));
+
+        Result result = step(boxed, branches);
+        assertEquals(+1, result.saturation()[2], "the full terminal sink is clamped to give-only");
+        assertTrue(result.flows()[0] > 0, "the pump keeps delivering from the supply");
+        assertEquals(0, result.flows()[1], 1e-9, "no flow leaks into the full terminal sink");
+        assertTrue(result.netInflow()[1] > 0, "the intermediate tank with room fills");
+        assertEquals(0, result.netInflow()[2], 1e-9, "the full sink gains nothing");
+
+        // Contrast: with the same topology unbounded, the full sink is a plain capacitor that
+        // "accepts" fictitious inflow, stealing it from the tank that should fill.
+        List<NodeSpec> unbounded = List.of(
+                new NodeSpec(TANK_CAPACITANCE, 20),
+                new NodeSpec(TANK_CAPACITANCE, 3),
+                new NodeSpec(TANK_CAPACITANCE, 3));
+        Result leak = step(unbounded, branches);
+        assertTrue(leak.netInflow()[2] > 1e-6, "without the box, fluid fictitiously enters the full sink");
+    }
+
+    /**
+     * The empty→receive-only half of the same box: an EMPTY tank sitting high must not be modelled
+     * as a source. node0 is an empty tank whose base is above node1's fluid surface; the plain
+     * linear solve would flow node0→node1 on the elevation difference, minting fluid from an empty
+     * reservoir. The box clamps the empty node to receive-only, blocking the fictitious drain.
+     */
+    @Test
+    void emptyElevatedTankIsNotAFictitiousSource() {
+        List<NodeSpec> boxed = List.of(
+                bounded(TANK_CAPACITANCE, 10, 10, 14),   // empty tank, base at y=10
+                bounded(TANK_CAPACITANCE, 5, 0, 8));      // lower tank with fluid, surface at y=5
+        List<BranchSpec> branches = List.of(BranchSpec.passive(0, 1, 100));
+
+        Result result = step(boxed, branches);
+        assertEquals(-1, result.saturation()[0], "the empty tank is clamped to receive-only");
+        assertEquals(0, result.flows()[0], 1e-9, "an empty reservoir gives nothing, even from a height");
+        assertEquals(0, result.netInflow()[1], 1e-9, "nothing is minted into the lower tank");
+    }
+
+    /**
+     * Two FULL tanks at different elevations connected by a pipe: neither can receive, so the run
+     * is a DEAD CONDUIT — no flow either way. Without the box the higher full tank would drain into
+     * the lower one, overfilling it past capacity.
+     */
+    @Test
+    void twoFullTanksFacingEachOtherFormADeadConduit() {
+        List<NodeSpec> boxed = List.of(
+                bounded(TANK_CAPACITANCE, 8, 4, 8),   // full, higher
+                bounded(TANK_CAPACITANCE, 4, 0, 4));  // full, lower
+        List<BranchSpec> branches = List.of(BranchSpec.passive(0, 1, 100));
+
+        Result result = step(boxed, branches);
+        assertEquals(+1, result.saturation()[0], "the higher tank reads full");
+        assertEquals(+1, result.saturation()[1], "the lower tank reads full");
+        assertEquals(0, result.flows()[0], 1e-9, "a dead conduit carries no flow either way");
+        assertEquals(0, result.netInflow()[0], 1e-9);
+        assertEquals(0, result.netInflow()[1], 1e-9);
+    }
+
+    /**
+     * A near-full tank is NOT walled: the solver decides DIRECTION (only truly saturated nodes are
+     * clamped), the transfer layer clamps MAGNITUDE to the real remaining room. A tank at 99% that a
+     * pump feeds must keep receiving — walling it on the solved single-step overshoot would freeze it
+     * short of full forever. This guards the start-of-tick (not solved-head) saturation criterion.
+     */
+    @Test
+    void nearFullTankStillFillsBecauseTheSolverOnlyDecidesDirection() {
+        List<NodeSpec> boxed = List.of(
+                new NodeSpec(TANK_CAPACITANCE, 20),      // supply
+                bounded(TANK_CAPACITANCE, 3.99, 0, 4));  // A: 99.75% full, a sliver of room
+        List<BranchSpec> branches = List.of(new BranchSpec(0, 1, 4, 5, +1, Double.NaN, 0));
+
+        Result result = step(boxed, branches);
+        assertEquals(0, result.saturation()[1], "a tank with room is never clamped, however small the room");
+        assertTrue(result.flows()[0] > 0, "the pump keeps delivering into the near-full tank");
+        assertTrue(result.netInflow()[1] > 0, "the near-full tank keeps filling");
+    }
+
+    /**
+     * The box changes nothing when no reservoir is saturated: an ordinary equalization between two
+     * tanks well inside their bounds solves identically to the unbounded case.
+     */
+    @Test
+    void boxIsInertWhenNoReservoirIsSaturated() {
+        List<NodeSpec> boxed = List.of(
+                bounded(TANK_CAPACITANCE, 10, 0, 16),
+                bounded(TANK_CAPACITANCE, 6, 0, 16));
+        List<NodeSpec> plain = List.of(
+                new NodeSpec(TANK_CAPACITANCE, 10),
+                new NodeSpec(TANK_CAPACITANCE, 6));
+        List<BranchSpec> branches = List.of(BranchSpec.passive(0, 1, 50));
+
+        Result boxedResult = step(boxed, branches);
+        Result plainResult = step(plain, branches);
+        assertEquals(plainResult.flows()[0], boxedResult.flows()[0], 1e-12,
+                "an unsaturated network is unaffected by its box bounds");
+        assertEquals(0, boxedResult.saturation()[0]);
+        assertEquals(0, boxedResult.saturation()[1]);
+    }
 }

@@ -1,6 +1,7 @@
 package de.devin.pipesnphysics.engine;
 
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.neoforged.neoforge.fluids.FluidStack;
 
 import java.util.ArrayList;
@@ -89,8 +90,16 @@ public record Solution(
     public record PumpLoad(double headSupplied, double headAgainst, double frictionFactor,
                            double drivingFlow) {}
 
-    /** One planned endpoint-to-endpoint movement; amount is the stack's amount in mB. */
-    public record Transfer(BlockPos from, BlockPos to, FluidStack fluid) {}
+    /**
+     * One planned endpoint-to-endpoint movement; amount is the stack's amount in mB. {@code fromFace}/
+     * {@code toFace} are the sides to drain/fill a SIDE-SPECIFIC handler through (see {@link
+     * BoundaryColumn#accessFace}); null means resolve side-agnostically.
+     */
+    public record Transfer(BlockPos from, Direction fromFace, BlockPos to, Direction toFace, FluidStack fluid) {
+        public Transfer(BlockPos from, BlockPos to, FluidStack fluid) {
+            this(from, null, to, null, fluid);
+        }
+    }
 
     public static Solution idle(Graph graph) {
         List<EdgeFlow> flows = new ArrayList<>(graph.edges().size());

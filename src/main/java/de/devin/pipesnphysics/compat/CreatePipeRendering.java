@@ -202,6 +202,43 @@ public final class CreatePipeRendering {
     }
 
     /**
+     * A synthetic OUTBOUND complete flow for a pipe face that DEAD-ENDS against a solid block, derived
+     * from the complete flow on the opposite (network) side. Create's renderers draw fluid per
+     * connection ({@code getFlow(side)} per direction); a pipe capped by a solid block carries no flow
+     * toward it — the client prunes that connection even though the run is full up to the block — so
+     * that half of the terminal cell renders empty (the "the pipe next to the block is empty" report).
+     * Both render paths (the Flywheel {@code GlassPipeVisual} and the BE {@code
+     * TransparentStraightPipeRenderer}) fetch flows through our {@code getFlow} redirect, so handing
+     * them this synthetic flow fills the block-facing half. Create still insets it a hair at the cap
+     * (no adjacent pipe BE), so there is no rim z-fight.
+     *
+     * <p>Returns null unless the run is genuinely full up to a SOLID dead end: the opposite side must
+     * carry a complete flow, and the face ahead must be a solid block — NOT air (an open end keeps its
+     * own mouth rendering), NOT another pipe (it continues), NOT a tank/handler (it renders its own side).
+     */
+    public static PipeConnection.Flow deadEndFillFlow(FluidTransportBehaviour pipe, Direction side) {
+        PipeConnection.Flow feed = pipe.getFlow(side.getOpposite());
+        if (feed == null || !feed.complete || feed.fluid.isEmpty()) return null;
+        PipeConnection network = pipe.getConnection(side.getOpposite());
+        if (network == null) return null;
+        // Only a STRAIGHT capped run: if the pipe carries any flow off this axis it is an elbow/tee,
+        // not a straight dead end, and a synthetic stream toward this face would poke fluid out its wall.
+        for (Direction face : Direction.values()) {
+            if (face.getAxis() != side.getAxis() && pipe.getFlow(face) != null) return null;
+        }
+        Level level = pipe.blockEntity.getLevel();
+        if (level == null) return null;
+        BlockPos ahead = pipe.blockEntity.getBlockPos().relative(side);
+        if (level.getBlockState(ahead).isAir()) return null;                 // open end
+        if (FluidPropagator.getPipe(level, ahead) != null) return null;      // continues into a pipe
+        if (FluidPropagator.hasFluidCapability(level, ahead, side.getOpposite())) return null; // tank/machine
+        PipeConnection.Flow synth = network.new Flow(false, feed.fluid.copy());
+        synth.progress.startWithValue(1);
+        synth.complete = true;
+        return synth;
+    }
+
+    /**
      * Whether the engine owns this cell's fill animation — the level render is on and the cell
      * carries level/front data. {@code GravityFlowMixin} skips Create's {@code tickFlowProgress}
      * for such cells: the owned front is integrated by {@link #advanceFront} from the solved flow
@@ -300,7 +337,21 @@ public final class CreatePipeRendering {
             // dead-heading a SHUT VALVE ({@code heldEdges} — the run SPLIT at the valve, so this
             // feed segment ends AT the valve and its cells ARE the held column up to it).
             if (isBackedUp(solution, edge) || solution.heldEdges().contains(edge.index())) {
-                filled.addAll(edge.pipes());
+                // Stamp the whole run FULL, not merely preserve prior charge: a run that was NEVER
+                // charged — a column born backed up (a pump reverse-blocking a full tank, or dead-
+                // heading a full sink it never flowed into) — has nothing to preserve and would
+                // render empty. A backed-up column is pressurized full to the stop regardless of any
+                // waterline, so fill every cell. Idempotent (seedComplete no-ops when already full),
+                // so an already-charged run is untouched. Gas pools at the top rather than pressing a
+                // column, so it keeps the preserve-only path.
+                FluidStack backed = solution.restFluids().getOrDefault(edge.index(), FluidStack.EMPTY);
+                if (backed.isEmpty()) backed = solution.edgeFluids().getOrDefault(edge.index(), FluidStack.EMPTY);
+                if (!backed.isEmpty() && !backed.getFluid().getFluidType().isLighterThanAir()) {
+                    stampEdgeFull(level, graph, edge, backed,
+                            solution.nodeHeads().get(edge.a()), solution.nodeHeads().get(edge.b()), filled);
+                } else {
+                    filled.addAll(edge.pipes());
+                }
                 continue;
             }
 
@@ -376,15 +427,18 @@ public final class CreatePipeRendering {
         // Closing this gap is also what stops the downstream from "despawning" on reopen — otherwise
         // the merged run's front stalls at the empty valve cell and the sweep wipes the settled
         // downstream before the front reaches it.
-        for (Node node : graph.nodes()) {
-            if (node.isClosedGate()) fillGateCell(level, graph, node, solution, filled);
-            else if (node.isJunction()) fillDeadEndCell(level, graph, node, solution, filled);
-        }
-
         // LEVEL render (spike): stamp every wet cell's solved waterline onto its pipe behaviour (see
         // PipeLevelData), so the custom renderer can draw a partial fill. One pass over all wet cells —
         // resting, FLOWING, held, backed-up alike — so the waterline shows whether or not fluid moves.
+        // Built BEFORE the node loop so fillDeadEndCell can claim its junction cell into it.
         Set<BlockPos> levelCells = levelRender ? new HashSet<>() : Set.of();
+
+        for (Node node : graph.nodes()) {
+            if (node.isClosedGate()) fillGateCell(level, graph, node, solution, filled);
+            else if (node.isJunction()) fillDeadEndCell(level, graph, node, solution, filled,
+                    levelRender ? levelCells : null);
+        }
+
         if (levelRender) stampWaterlines(level, graph, solution, standing, filled, fronts, levelCells);
 
         for (BlockPos cell : graph.coverage()) {
@@ -592,7 +646,14 @@ public final class CreatePipeRendering {
                     int stored = holder.pipesnphysics$getFrontData();
                     if (stored != 0) front = new CellFront(1, frontFlowDir(stored), 0);
                     else if (hasFluid(pipe)) front = FULL_STILL;
-                    else continue;
+                    // A SINK_FULL run is a pressurized-FULL column, so stamp it full even if it was
+                    // never charged — a DEAD CONDUIT into a full tank (zero conductance, never flowed)
+                    // has no stored front and no Create fluid, yet is genuinely full (the "one pipe
+                    // empty" report). NO_HEAD/held runs can be legitimately dry, so they still bail.
+                    else if (solution.stalledEdges().contains(index)
+                            && solution.edgeReasons().get(index) == Solution.Reason.SINK_FULL) {
+                        front = FULL_STILL;
+                    } else continue;
                 } else {
                     if (!filled.contains(cell)) continue;
                     front = FULL_STILL;
@@ -1093,6 +1154,34 @@ public final class CreatePipeRendering {
      * highest remaining cell is released on a slow heartbeat. Other no-flow cases
      * keep the instant behaviour (the sweep clears above-surface cells at once).
      *
+     * Stamp EVERY cell of a backed-up run FULL (a pressurized column pressed against a stop, with no
+     * waterline to taper it). Mirrors {@link #restEdge}'s per-cell seeding but skips the submersion
+     * test — the run is full to the blockage regardless of elevation. Orientation follows the head
+     * sign, defaulting to the reservoir (non-null head) end when the other is a headless dead-end.
+     */
+    private static void stampEdgeFull(Level level, Graph graph, Edge edge, FluidStack fluid,
+                                      Double headA, Double headB, Set<BlockPos> filled) {
+        List<BlockPos> pipes = edge.pipes();
+        BlockPos aEnd = graph.node(edge.a()).pos();
+        BlockPos bEnd = graph.node(edge.b()).pos();
+        boolean aInbound = headA != null && headB != null ? headA >= headB : headA != null;
+        for (int i = 0; i < pipes.size(); i++) {
+            BlockPos cell = pipes.get(i);
+            FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, cell);
+            if (pipe == null) continue;
+            BlockPos aSide = i == 0 ? aEnd : pipes.get(i - 1);
+            BlockPos bSide = i == pipes.size() - 1 ? bEnd : pipes.get(i + 1);
+            Direction towardA = PipeGeometry.between(cell, aSide);
+            Direction towardB = PipeGeometry.between(cell, bSide);
+            if (towardA == null || towardB == null) { filled.add(cell); continue; }
+            boolean changed = seedComplete(pipe.getConnection(towardA), aInbound, fluid);
+            changed |= seedComplete(pipe.getConnection(towardB), !aInbound, fluid);
+            if (changed) pipe.blockEntity.notifyUpdate();
+            filled.add(cell);
+        }
+    }
+
+    /**
      * @return true if a stranded column is still receding (keep the network awake)
      */
     private static boolean restEdge(Level level, Graph graph, Edge edge, FluidStack fluid,
@@ -1261,7 +1350,7 @@ public final class CreatePipeRendering {
      * so a dry or above-surface junction stays empty.
      */
     private static void fillDeadEndCell(Level level, Graph graph, Node junction, Solution solution,
-                                        Set<BlockPos> filled) {
+                                        Set<BlockPos> filled, Set<BlockPos> levelCells) {
         List<Edge> edges = graph.edgesOf(junction.index());
         if (edges.size() != 1) return;
         Edge edge = edges.get(0);
@@ -1283,8 +1372,34 @@ public final class CreatePipeRendering {
         }
         Direction dir = PipeGeometry.between(junction.pos(), adj);
         if (dir == null) return;
+        // Seed the network-facing connection complete. The block-facing HALF (the pipe is capped by a
+        // solid block, whose connection the client prunes) is filled at render time by
+        // deadEndFillFlow, which synthesizes it from this network flow — so the whole terminal cell
+        // reads full, not half.
         if (seedComplete(pipe.getConnection(dir), true, fluid)) pipe.blockEntity.notifyUpdate();
         filled.add(junction.pos());
+        // The CUSTOM level renderer draws only from PipeLevelData, and this cell sits in NO edge, so
+        // stampWaterlines never reaches it — stamp it FULL here (and claim it in levelCells so the
+        // sweep keeps it) or the custom renderer blanks the pipe against the block.
+        if (levelCells != null && pipe instanceof PipeLevelData holder) {
+            stampCellFull(pipe, holder, fluid, junction.pos(), levelCells);
+        }
+    }
+
+    /** Stamp a single cell FULL &amp; still into its {@link PipeLevelData} (the level renderer's only input). */
+    private static void stampCellFull(FluidTransportBehaviour pipe, PipeLevelData holder, FluidStack fluid,
+                                      BlockPos cell, Set<BlockPos> levelCells) {
+        if (fluid.getFluid().getFluidType().isLighterThanAir()) return; // gas has no waterline; leave to Create
+        levelCells.add(cell);
+        boolean changed = false;
+        int levelData = encodeLevel(1.0, -1);
+        if (holder.pipesnphysics$getLevelData() != levelData) { holder.pipesnphysics$setLevelData(levelData); changed = true; }
+        int frontData = encodeFront(1, -1, 0);
+        if (holder.pipesnphysics$getFrontData() != frontData) { holder.pipesnphysics$setFrontData(frontData); changed = true; }
+        if (!FluidStack.isSameFluidSameComponents(holder.pipesnphysics$getRenderFluid(), fluid)) {
+            holder.pipesnphysics$setRenderFluid(fluid.copyWithAmount(1)); changed = true;
+        }
+        if (changed) pipe.blockEntity.notifyUpdate();
     }
 
     /**

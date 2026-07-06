@@ -17,6 +17,7 @@ import de.devin.pipesnphysics.engine.net.GraphOverlayPayload;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
@@ -24,6 +25,7 @@ import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.neoforged.neoforge.fluids.FluidStack;
 import net.neoforged.neoforge.fluids.FluidType;
+import net.neoforged.neoforge.capabilities.Capabilities;
 import net.neoforged.neoforge.fluids.capability.IFluidHandler;
 import net.neoforged.neoforge.fluids.capability.IFluidHandler.FluidAction;
 import net.neoforged.neoforge.network.PacketDistributor;
@@ -77,6 +79,7 @@ public final class PipeGraphCommand {
     private static void sendText(ServerPlayer player, ServerLevel level, Graph g, Solution s) {
         send(player, "§e--- Pipe Graph ---");
         send(player, "§7Nodes: §f" + g.nodes().size() + "  §7Edges: §f" + g.edges().size());
+        FluidStack probeFluid = firstPresentFluid(level, g);
         for (Node n : g.nodes()) {
             Double head = s.nodeHeads().get(n.index());
             Double ceiling = s.nodeCeilings().get(n.index());
@@ -96,6 +99,10 @@ public final class PipeGraphCommand {
             }
             String pulley = pulleyDiagnostic(level, n);
             if (pulley != null) send(player, "      §c" + pulley);
+            String probe = handlerProbe(level, n, probeFluid);
+            if (probe != null) send(player, "      §d" + probe);
+            String dock = dockingDiagnostic(level, n);
+            if (dock != null) send(player, "      §6" + dock);
         }
         sendFluidStats(player, level, g);
         send(player, "§e--- Edges ---");
@@ -114,11 +121,13 @@ public final class PipeGraphCommand {
                 Double h = heldHead(s, e);
                 dir = h != null ? String.format("§dheld §7(stored §f%.2f§7)", h) : "§dheld§7";
             }
+            Solution.Reason reason = s.edgeReasons().get(e.index());
             Node a = g.node(e.a()), b = g.node(e.b());
-            send(player, String.format("  §e%s §f%s §7↔ §f%s §7len=%d §7%s §7%d mB/t",
+            send(player, String.format("  §e%s §f%s §7↔ §f%s §7len=%d §7%s §7solved=%d actual=%d mB/t%s",
                     GraphOverlayPayload.edgeLetter(e.index()),
                     a.pos().toShortString(), b.pos().toShortString(),
-                    e.length(), dir, rate));
+                    e.length(), dir, flow.mbPerTick(), rate,
+                    reason != null ? " §8[" + reason + "]" : ""));
         }
         if (s.hasTransfer()) {
             for (Solution.Transfer transfer : s.transfers()) {
@@ -237,6 +246,89 @@ public final class PipeGraphCommand {
                     + " but can't draw yet (still lowering / settling)";
         }
         return null; // it IS a source — the fluid line above reports it
+    }
+
+    /**
+     * What the LIVE handler behind a HANDLER node actually reports to the engine's probes, or null for
+     * non-handlers: how much it holds ({@code getFluidInTank(0)}), how much it will GIVE
+     * ({@code drain} SIMULATE), and how much of {@code probe} it will TAKE ({@code fill} SIMULATE). This
+     * is exactly what the solver keys participation on, so a handler that shows {@code give=0 take=0} is
+     * why a run past it moves nothing — the case for a paired device (a docking connector) whose
+     * capability is gated on its own state, which the fill/fraction summary above cannot reveal.
+     */
+    private static String handlerProbe(ServerLevel level, Node n, FluidStack probe) {
+        if (!n.isHandler()) return null;
+        IFluidHandler cap = BoundaryColumn.findHandler(level, n.pos());
+        if (cap == null) return "probe: no live fluid capability";
+        int holds = cap.getTanks() > 0 ? cap.getFluidInTank(0).getAmount() : 0;
+        int give = cap.drain(Integer.MAX_VALUE, FluidAction.SIMULATE).getAmount();
+        int take = probe.isEmpty() ? 0 : cap.fill(probe.copyWithAmount(1000), FluidAction.SIMULATE);
+        String line = String.format("probe: holds=%d give=%d take=%d%s", holds, give, take,
+                probe.isEmpty() ? "" : " (" + probe.getHoverName().getString() + ")");
+        // The null-side handler is what our engine actually uses. If a SPECIFIC face accepts/gives more
+        // (as Create's face-specific transport would see), the block is sided and our null resolution is
+        // the bug — surface the best face so we can point the engine at it.
+        String bestGive = "", bestTake = "";
+        int maxGive = give, maxTake = take;
+        for (Direction side : Direction.values()) {
+            IFluidHandler s = level.getCapability(Capabilities.FluidHandler.BLOCK, n.pos(), side);
+            if (s == null) continue;
+            int g = s.drain(Integer.MAX_VALUE, FluidAction.SIMULATE).getAmount();
+            int t = probe.isEmpty() ? 0 : s.fill(probe.copyWithAmount(1000), FluidAction.SIMULATE);
+            if (g > maxGive) { maxGive = g; bestGive = side.toString(); }
+            if (t > maxTake) { maxTake = t; bestTake = side.toString(); }
+        }
+        if (!bestGive.isEmpty()) line += " | face give=" + maxGive + "@" + bestGive;
+        if (!bestTake.isEmpty()) line += " | face take=" + maxTake + "@" + bestTake;
+        return line;
+    }
+
+    /**
+     * Reflective, mod-optional readout of an aeronautics docking connector's internal fluid state, or
+     * null for any other block. It answers WHY the connector's {@code insert()} returns 0: whether it is
+     * paired at all ({@code connectedPos}/{@code connectedTank}), whether its own {@code canInteract()}
+     * gate passes right now, and whether the PAIRED connector's buffer (on the other ship) is full. Uses
+     * reflection so the mod stays an optional dependency; field/method names match the decompiled
+     * {@code DockingConnectorTank}.
+     */
+    private static String dockingDiagnostic(ServerLevel level, Node n) {
+        Object be = level.getBlockEntity(n.pos());
+        if (be == null || !be.getClass().getSimpleName().equals("DockingConnectorBlockEntity")) return null;
+        try {
+            Object tank = be.getClass().getField("tank").get(be);
+            Object connectedPos = readField(tank, "connectedPos");
+            Object connectedTank = readField(tank, "connectedTank");
+            java.lang.reflect.Method canInteract = tank.getClass().getDeclaredMethod("canInteract");
+            canInteract.setAccessible(true);
+            Object interacts = canInteract.invoke(tank);
+            String pair = "";
+            if (connectedTank != null) {
+                Object amt = connectedTank.getClass().getField("amount").get(connectedTank);
+                Object cap = connectedTank.getClass().getField("capacity").get(connectedTank);
+                pair = " pairBuffer=" + amt + "/" + cap;
+            }
+            return String.format("dock: connectedPos=%s connectedTank=%s canInteract=%s%s",
+                    connectedPos, connectedTank != null, interacts, pair);
+        } catch (Throwable t) {
+            return "dock: reflect failed (" + t.getClass().getSimpleName() + ")";
+        }
+    }
+
+    private static Object readField(Object owner, String name) throws Exception {
+        java.lang.reflect.Field f = owner.getClass().getDeclaredField(name);
+        f.setAccessible(true);
+        return f.get(owner);
+    }
+
+    /** The first non-empty fluid found on any column of the network, used to probe what sinks will take. */
+    private static FluidStack firstPresentFluid(ServerLevel level, Graph g) {
+        for (Node n : g.nodes()) {
+            BoundaryColumn column = columnOf(level, n);
+            if (column != null && !column.contents().isEmpty() && column.contentMb() > 0) {
+                return column.contents();
+            }
+        }
+        return FluidStack.EMPTY;
     }
 
     /**

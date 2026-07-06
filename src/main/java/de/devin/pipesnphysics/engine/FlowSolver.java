@@ -88,6 +88,8 @@ public final class FlowSolver {
             active |= solveGroup(level, graph, columns, pumps, edgeStatics, sample, claimedEmpties, results);
         }
 
+        settleBlockedRuns(graph, columns, results);
+
         Set<Integer> stalled = new HashSet<>(results.stalledEdges);
         stalled.removeAll(results.movingEdges);
         Set<Integer> noHead = new HashSet<>(results.noHeadEdges);
@@ -126,6 +128,36 @@ public final class FlowSolver {
         }
     }
 
+    /**
+     * A BLOCKED run — an unpowered pump, a shut filter — that touches a reservoir STILL HOLDING fluid
+     * has that fluid sitting in the pipe up to the blockage: it must render as settled water, not
+     * blank. The blocked branch never assembled, so it got no rest fluid or heads; supply them here
+     * from the filled reservoir (flat at its surface, so {@code restEdge} fills the submerged cells).
+     * Gated on the endpoint reservoir being NON-EMPTY, so the downstream of a shut gate into an empty
+     * tank still renders DRY (the "no phantom water past a barrier" invariant). Moving edges are
+     * skipped — a later pass carried real flow across the same cut.
+     */
+    private static void settleBlockedRuns(Graph graph, Columns columns, GroupResults results) {
+        for (int edgeIndex : results.blockedEdges) {
+            if (results.movingEdges.contains(edgeIndex) || results.restFluids.containsKey(edgeIndex)) continue;
+            Edge edge = graph.edge(edgeIndex);
+            BoundaryColumn supply = filledReservoir(columns, edge.a());
+            if (supply == null) supply = filledReservoir(columns, edge.b());
+            if (supply == null) continue;
+            boolean gas = supply.contents().getFluid().getFluidType().isLighterThanAir();
+            double head = columnHead(supply, gas);
+            results.restFluids.put(edgeIndex, supply.contents().copyWithAmount(1));
+            results.nodeHeads.putIfAbsent(edge.a(), head);
+            results.nodeHeads.putIfAbsent(edge.b(), head);
+        }
+    }
+
+    /** The finite reservoir column at a graph node if it currently HOLDS fluid, else null. */
+    private static BoundaryColumn filledReservoir(Columns columns, int node) {
+        BoundaryColumn column = columns.byNode.get(node);
+        return column != null && column.isFiniteReservoir() && !column.isEmpty() ? column : null;
+    }
+
     // ------------------------------------------------------------------ columns
 
     private static final class Columns {
@@ -150,6 +182,12 @@ public final class FlowSolver {
                 BoundaryColumn resolved;
                 if (node.isHandler()) {
                     resolved = BoundaryColumn.resolve(level, node);
+                    // Feed the relay detector this handler's live contents so it can spot a block that
+                    // spontaneously gains fluid (a relay) versus one we merely fill (see RelayDetector).
+                    if (resolved != null) {
+                        RelayDetector.observe(level, resolved.accessPos(),
+                                resolved.contents().getFluid(), resolved.contentMb());
+                    }
                 } else if (node.isOpenEnd()) {
                     resolved = BoundaryColumn.forOpenEnd(level, node, networkSpilled);
                 } else {
@@ -264,7 +302,7 @@ public final class FlowSolver {
         for (BoundaryColumn column : columns.distinct) {
             if (!participates(level, column, sample, claimedEmpties)) continue;
             int index = nodeSpecs.size();
-            nodeSpecs.add(new NodeSpec(column.capacitance(), columnHead(column, gas)));
+            nodeSpecs.add(columnSpec(column, gas));
             canSupply.add(!column.isEmpty());
             participants.add(column);
             columnIndex.put(column, index);
@@ -364,6 +402,20 @@ public final class FlowSolver {
             }
             if (result.backflowBlocked()[b] && branches.get(b).emf() != 0) {
                 results.noHeadEdges.add(edgeIndex);
+            }
+            // A DEAD CONDUIT: the run's own one-way sign (a lip, a pump's check valve) contradicts a
+            // full endpoint's give-only clamp, so it carries no flow either way. When that pre-existing
+            // sign is non-zero the pipe is a continuous column pressed against the full tank (its
+            // opening rises above the waterline, or a pump dead-heads it) and must render FULL — mark
+            // it SINK_FULL. A bare contradiction with no prior sign (a U below two full tanks) is
+            // already submerged and settles, so it is left unmarked. Re-derived from the solved
+            // saturation, replacing the old assembly-time fullDeadlock/preFullSign block.
+            int preFullSign = branches.get(b).allowedSign();
+            if (preFullSign != 0 && deadConduitSign(preFullSign,
+                    result.saturation()[branches.get(b).a()],
+                    result.saturation()[branches.get(b).b()]) == Integer.MIN_VALUE) {
+                results.stalledEdges.add(edgeIndex);
+                results.edgeReasons.putIfAbsent(edgeIndex, Solution.Reason.SINK_FULL);
             }
             if (Math.abs(flow) > Math.max(ACTIVE_FLOW_EPS, results.strongestEdgeFlow[edgeIndex])) {
                 results.strongestEdgeFlow[edgeIndex] = Math.abs(flow);
@@ -505,7 +557,7 @@ public final class FlowSolver {
         }
         if (cap == null) return false;
         if (!column.isEmpty()) {
-            return !cap.drain(sample.copyWithAmount(1), FluidAction.SIMULATE).isEmpty()
+            return !BoundaryColumn.drainMatching(cap, sample.copyWithAmount(1), FluidAction.SIMULATE).isEmpty()
                     || cap.fill(sample.copyWithAmount(1), FluidAction.SIMULATE) > 0;
         }
         if (claimedEmpties.contains(column.identity())) return false;
@@ -533,6 +585,25 @@ public final class FlowSolver {
         // tank's surface is over-estimated and spills out an open end that is physically above it.
         double fillHeight = column.fillFraction() * column.heightBlocks() * column.fillScale();
         return NetworkSolver.surfaceHead(column.baseY(), fillHeight, gas);
+    }
+
+    /**
+     * The solver node for a column. A finite reservoir carries a capacity CEILING — its head when
+     * full (fill = height) — so the active set clamps it to GIVE-ONLY when full: the box-constrained
+     * dual of the empty→receive-only wall, replacing the old emf-gated fullDeadlock/preFullSign
+     * special-casing (see {@link NetworkSolver}). The EMPTY→receive-only side deliberately stays a
+     * static wall in assembleBranch (its lip-contradiction early-return is load-bearing for the
+     * drained-riser recede), so the floor is left unbounded. Boundaries (open ends, pulleys) keep
+     * their own one-way rules and are fully unbounded. The ceiling goes through {@link
+     * NetworkSolver#surfaceHead} with the same fill scale as {@code columnHead}, so a gas column
+     * (head rises with fill) still reads full at its top.
+     */
+    private static NodeSpec columnSpec(BoundaryColumn column, boolean gas) {
+        double head = columnHead(column, gas);
+        if (!column.isFiniteReservoir()) return new NodeSpec(column.capacitance(), head);
+        double span = column.heightBlocks() * column.fillScale();
+        double ceiling = NetworkSolver.surfaceHead(column.baseY(), span, gas);
+        return new NodeSpec(column.capacitance(), head, Double.NEGATIVE_INFINITY, ceiling);
     }
 
     /**
@@ -642,12 +713,29 @@ public final class FlowSolver {
         BoundaryColumn columnA = columns.byNode.get(edge.a());
         BoundaryColumn columnB = columns.byNode.get(edge.b());
 
-        // A column with nothing in it can only receive — without this, the solver
-        // would model an empty reservoir as a fluid source and distort the heads.
-        // A conflict here (both ends empty, or an empty end behind a pump) is an
+        // A column with nothing in it can only receive — without this, the solver would model an
+        // empty reservoir as a fluid source and distort the heads. This stays a STATIC wall (not the
+        // box) because its interaction with the lip rule is load-bearing: an empty end whose ONLY
+        // opening also can't draw from the far end contradicts here and RETURNS the branch unassembled
+        // (line below), which is what lets a drained tank-to-tank riser RECEDE instead of rendering as
+        // a pressurized column. A conflict here (both ends empty, an empty end behind a pump) is an
         // ordinary "nothing to move", not a fault worth flagging to the player.
         if (columnA != null && columnA.isEmpty()) allowedSign = combineSign(allowedSign, -1);
         if (columnB != null && columnB.isEmpty()) allowedSign = combineSign(allowedSign, +1);
+
+        // A receive-only handler (a sink_only tag or a detector-learned relay — a docking connector,
+        // a hose, a passthrough) may be filled but never drained or equalized: pin the branch to flow
+        // INTO it, exactly like an empty column. Its own logic sources/moves the fluid, so treating it
+        // as a two-way capacitor would fight it. Only finite reservoirs carry this role (open ends and
+        // pulleys keep their own one-way rules), which also skips the tag lookup for those.
+        if (columnA != null && columnA.isFiniteReservoir()
+                && HandlerRoles.isReceiveOnly(level, columnA.accessPos())) {
+            allowedSign = combineSign(allowedSign, -1);
+        }
+        if (columnB != null && columnB.isFiniteReservoir()
+                && HandlerRoles.isReceiveOnly(level, columnB.accessPos())) {
+            allowedSign = combineSign(allowedSign, +1);
+        }
 
         // An infinite SOURCE (a hose pulley over a body it can drain, an open-end intake
         // mouth) only ever supplies — pin the branch to flow OUT of it. A pulley in the
@@ -680,6 +768,15 @@ public final class FlowSolver {
             crestHeight = statics.crestHeight();
             crestPos = statics.crestPos();
         }
+
+        // The full→give-only DUAL of the empty rule (a full reservoir can only give, never receive)
+        // is now the solver's job: a finite reservoir carries a capacity box (see columnSpec), and the
+        // active set seeds it give-only when full, then walls the branch — so a backed-up run fills an
+        // UPSTREAM reservoir with room instead of routing a through-current into a full TERMINAL and
+        // zeroing the whole line (the "goofy_network" freeze). The dead-conduit case (a full end whose
+        // opening rises above its waterline, or two full ends facing each other) and its SINK_FULL
+        // render flag are re-derived from the solved saturation in solveGroup — a single uniform
+        // mechanism, replacing the old per-branch emf-gated fullDeadlock/preFullSign special-casing.
 
         // The throttle is NOT baked into the conductance here. Scaling conductance only limits
         // the flow when the valve's own run is the binding resistor — in series with a strong
@@ -802,6 +899,20 @@ public final class FlowSolver {
         return wanted;
     }
 
+    /**
+     * A branch's effective one-way sign after combining its static constraint with the saturation
+     * of each solver endpoint (mirroring {@code NetworkSolver}), or {@link Integer#MIN_VALUE} when
+     * they contradict — a dead conduit. A full node ({@code +1}) gives only (flow OUT); flow out of
+     * endpoint {@code a} is {@code a→b} ({@code +1}), out of {@code b} is {@code b→a} ({@code -1}),
+     * so the induced signs are {@code satA} and {@code -satB}.
+     */
+    private static int deadConduitSign(int staticSign, int satA, int satB) {
+        int sign = staticSign;
+        if (satA != 0) sign = combineSign(sign, satA);
+        if (sign != Integer.MIN_VALUE && satB != 0) sign = combineSign(sign, -satB);
+        return sign;
+    }
+
     // ------------------------------------------------------------------ transfer planning
 
     /** What a pass actually scheduled, and whether either side had anything to offer. */
@@ -894,7 +1005,8 @@ public final class FlowSolver {
                     BoundaryColumn sink = sinks.get(snkIdx.get(j));
                     int amount = Math.min(srcShare[i], snkShare[j]);
                     transfers.add(new Solution.Transfer(
-                            source.accessPos(), sink.accessPos(), sample.copyWithAmount(amount)));
+                            source.accessPos(), source.accessFace(),
+                            sink.accessPos(), sink.accessFace(), sample.copyWithAmount(amount)));
                     if (sink.isEmpty()) claimedEmpties.add(sink.identity());
                     srcShare[i] -= amount;
                     snkShare[j] -= amount;
@@ -934,7 +1046,16 @@ public final class FlowSolver {
     private static int[] islands(List<BranchSpec> branches, NetworkSolver.Result result) {
         UnionFind uf = new UnionFind(result.heads().length);
         for (int b = 0; b < branches.size(); b++) {
-            if (result.active()[b]) uf.union(branches.get(b).a(), branches.get(b).b());
+            if (!result.active()[b]) continue;
+            // A DEAD CONDUIT (a run whose own sign contradicts a full endpoint's give-only clamp)
+            // carries no flow either way — a barrier, exactly like a closed valve. It must SPLIT the
+            // islands so a source on one side cannot spill surplus into an open sink on the other.
+            // (The solver keeps it "active" with zeroed conductance; the old code dropped it to
+            // inactive, which is what made it split — reproduce that here.)
+            if (deadConduitSign(branches.get(b).allowedSign(),
+                    result.saturation()[branches.get(b).a()],
+                    result.saturation()[branches.get(b).b()]) == Integer.MIN_VALUE) continue;
+            uf.union(branches.get(b).a(), branches.get(b).b());
         }
         return uf.roots();
     }
@@ -948,7 +1069,7 @@ public final class FlowSolver {
             return column.isInfiniteSource() ? Math.min(amount, column.contentMb()) : 0;
         }
         return cap == null ? 0
-                : cap.drain(sample.copyWithAmount(amount), FluidAction.SIMULATE).getAmount();
+                : BoundaryColumn.drainMatching(cap, sample.copyWithAmount(amount), FluidAction.SIMULATE).getAmount();
     }
 
     /** What the handler will really accept this tick, probed without mutating it. */
@@ -1025,6 +1146,19 @@ public final class FlowSolver {
                                            Map<Integer, Double> nodeCeilings,
                                            Map<Integer, Double> nodeAnchors) {
         int n = nodeSpecs.size();
+
+        // The display/planning traversals below spread heads only along PERMITTED directions, which
+        // now include the capacity-box saturation the solver applied (a full column gives-only, an
+        // empty one receives-only) — those no longer live in branch.allowedSign(), so fold the solved
+        // saturation back in per branch. On a dead-conduit contradiction, keep the pre-full static sign
+        // (as the old fullDeadlock path did), so the render stays byte-for-byte what it was.
+        int[] sign = new int[branches.size()];
+        for (int b = 0; b < branches.size(); b++) {
+            int s = deadConduitSign(branches.get(b).allowedSign(),
+                    result.saturation()[branches.get(b).a()], result.saturation()[branches.get(b).b()]);
+            sign[b] = s == Integer.MIN_VALUE ? branches.get(b).allowedSign() : s;
+        }
+
         List<List<Integer>> incident = new ArrayList<>(n);
         for (int i = 0; i < n; i++) incident.add(new ArrayList<>());
         for (int b = 0; b < branches.size(); b++) {
@@ -1048,7 +1182,7 @@ public final class FlowSolver {
             for (int b : incident.get(current)) {
                 BranchSpec branch = branches.get(b);
                 boolean fromA = branch.a() == current;
-                if (branch.allowedSign() != 0 && branch.allowedSign() != (fromA ? +1 : -1)) continue;
+                if (sign[b] != 0 && sign[b] != (fromA ? +1 : -1)) continue;
                 int other = fromA ? branch.b() : branch.a();
                 if (known[other]) continue;
                 display[other] = Math.abs(result.flows()[b]) > FLOW_TOLERANCE
@@ -1093,7 +1227,7 @@ public final class FlowSolver {
             for (int b : planningIncident.get(current)) {
                 BranchSpec branch = branches.get(b);
                 boolean fromA = branch.a() == current;
-                if (branch.allowedSign() != 0 && branch.allowedSign() != (fromA ? +1 : -1)) continue;
+                if (sign[b] != 0 && sign[b] != (fromA ? +1 : -1)) continue;
                 int other = fromA ? branch.b() : branch.a();
                 if (ceilingKnown[other]) continue;
                 double boost = fromA ? Math.max(0, branch.emf()) : Math.max(0, -branch.emf());
@@ -1112,17 +1246,18 @@ public final class FlowSolver {
         double[] boostAhead = new double[n];
         for (int pass = 0; pass < 8; pass++) {
             boolean changed = false;
-            for (BranchSpec branch : branches) {
+            for (int b = 0; b < branches.size(); b++) {
+                BranchSpec branch = branches.get(b);
                 double forward = Math.max(0, branch.emf());
                 double backward = Math.max(0, -branch.emf());
-                if (branch.allowedSign() >= 0) {
+                if (sign[b] >= 0) {
                     double viaB = forward + boostAhead[branch.b()];
                     if (viaB > boostAhead[branch.a()] + 1e-9) {
                         boostAhead[branch.a()] = viaB;
                         changed = true;
                     }
                 }
-                if (branch.allowedSign() <= 0) {
+                if (sign[b] <= 0) {
                     double viaA = backward + boostAhead[branch.a()];
                     if (viaA > boostAhead[branch.b()] + 1e-9) {
                         boostAhead[branch.b()] = viaA;

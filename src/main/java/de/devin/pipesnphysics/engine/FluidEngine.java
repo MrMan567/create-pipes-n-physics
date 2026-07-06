@@ -3,6 +3,7 @@ package de.devin.pipesnphysics.engine;
 import com.simibubi.create.content.fluids.hosePulley.HosePulleyBlockEntity;
 import com.simibubi.create.content.fluids.pipes.VanillaFluidTargets;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
 import net.neoforged.neoforge.fluids.FluidStack;
 import net.neoforged.neoforge.fluids.capability.IFluidHandler;
@@ -56,20 +57,25 @@ public final class FluidEngine {
      */
     public static void apply(ServerLevel level, List<Solution.Transfer> transfers) {
         for (Solution.Transfer transfer : transfers) {
-            IFluidHandler source = handlerAt(level, transfer.from());
-            IFluidHandler sink = handlerAt(level, transfer.to());
+            IFluidHandler source = handlerAt(level, transfer.from(), transfer.fromFace());
+            IFluidHandler sink = handlerAt(level, transfer.to(), transfer.toFace());
             if (source == null || sink == null) continue;
 
-            FluidStack drained = source.drain(transfer.fluid().copy(), FluidAction.SIMULATE);
+            FluidStack drained = BoundaryColumn.drainMatching(source, transfer.fluid().copy(), FluidAction.SIMULATE);
             if (drained.isEmpty()) continue;
             int accepted = sink.fill(drained, FluidAction.SIMULATE);
             if (accepted <= 0) continue;
 
-            FluidStack moved = source.drain(
+            FluidStack moved = BoundaryColumn.drainMatching(source,
                     transfer.fluid().copyWithAmount(Math.min(accepted, drained.getAmount())),
                     FluidAction.EXECUTE);
             if (moved.isEmpty()) continue;
             sink.fill(moved, FluidAction.EXECUTE);
+
+            // Tell the relay detector how much WE moved, so next tick it can subtract our fill and see
+            // whether a handler gained fluid on its own (the relay signature).
+            RelayDetector.recordApplied(transfer.from(), -moved.getAmount());
+            RelayDetector.recordApplied(transfer.to(), moved.getAmount());
 
             // A transfer INTO an open end is a spill (intake has the open end as the
             // SOURCE). Stamp it so the network won't suck a finite source back in for a
@@ -93,9 +99,9 @@ public final class FluidEngine {
      * capability here would refuse every sub-1000 mB transfer and show flow while moving
      * nothing — the same hijack that misclassified the node, one layer down.
      */
-    private static IFluidHandler handlerAt(ServerLevel level, BlockPos pos) {
+    private static IFluidHandler handlerAt(ServerLevel level, BlockPos pos, Direction face) {
         if (!VanillaFluidTargets.canProvideFluidWithoutCapability(level.getBlockState(pos))) {
-            IFluidHandler handler = BoundaryColumn.findHandler(level, pos);
+            IFluidHandler handler = BoundaryColumn.findHandler(level, pos, face);
             if (handler != null) return handler;
         }
         return OpenEndPipes.existing(level, pos);

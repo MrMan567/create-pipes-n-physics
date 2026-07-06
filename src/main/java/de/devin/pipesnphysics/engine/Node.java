@@ -20,9 +20,14 @@ import net.minecraft.core.Direction;
  * Pipes with exactly two connections are pass-through and become part of an {@link Edge}
  * rather than a Node — UNLESS they are a closed gate, which is forced to a node so the run
  * splits there.
+ *
+ * {@code accessFace} is the face a HANDLER is reached through when it is SIDE-SPECIFIC (exposes no
+ * side-agnostic {@code null} capability): the network resolves and transfers the handler through that
+ * exact face, so a block with a different tank per side serves each side its own fluid. It is null for
+ * an ordinary side-agnostic handler (resolved through {@code null}) and for every non-handler node.
  */
 public record Node(int index, BlockPos pos, Kind kind, double worldY,
-                   Direction pumpFacing, Direction openFace) {
+                   Direction pumpFacing, Direction openFace, Direction accessFace) {
     public enum Kind { HANDLER, PUMP, JUNCTION, OPEN_END, CLOSED_GATE }
 
     public boolean isHandler() { return kind == Kind.HANDLER; }

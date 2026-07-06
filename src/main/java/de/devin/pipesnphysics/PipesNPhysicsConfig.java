@@ -1,5 +1,6 @@
 package de.devin.pipesnphysics;
 
+import de.devin.pipesnphysics.engine.ValveCharacteristic;
 import net.neoforged.neoforge.common.ModConfigSpec;
 
 /**
@@ -20,10 +21,13 @@ public class PipesNPhysicsConfig {
     public static final ModConfigSpec.BooleanValue ENABLE_OPEN_END_INTAKE;
     public static final ModConfigSpec.IntValue OPEN_END_INTAKE_COOLDOWN_TICKS;
     public static final ModConfigSpec.BooleanValue ENABLE_VALVE_THROTTLE;
+    public static final ModConfigSpec.EnumValue<ValveCharacteristic> VALVE_CHARACTERISTIC;
+    public static final ModConfigSpec.BooleanValue AUTO_DETECT_RELAY_HANDLERS;
     public static final ModConfigSpec.BooleanValue ENABLE_DYNAMIC_TANK_MASS;
     public static final ModConfigSpec.BooleanValue EXPERIMENTAL_TANK_COG;
     public static final ModConfigSpec.BooleanValue ENABLE_OPEN_END_WORLD_PLACEMENT;
     public static final ModConfigSpec.BooleanValue ENABLE_SUBLEVEL_CONNECTION_REFRESH;
+    public static final ModConfigSpec.BooleanValue ENABLE_CROSS_LEVEL_PIPING;
     public static final ModConfigSpec.DoubleValue FLUID_MASS_PER_BUCKET;
 
     // Client
@@ -86,6 +90,26 @@ public class PipesNPhysicsConfig {
                         "the angle only caps how much flows while it is open (90 = fully open). When",
                         "false, valves stay plain on/off.")
                 .define("enableValveThrottle", true);
+        VALVE_CHARACTERISTIC = server
+                .comment("The valve's opening curve — how its 0-90 degree angle maps to the share of flow",
+                        "it passes. LINEAR: angle = flow (45 deg passes half; predictable, matches the",
+                        "goggle %). QUICK_OPENING: reaches most flow early. EQUAL_PERCENTAGE: slow to open,",
+                        "rushes near full. BALL_VALVE: the lens-shaped bore overlap of a real ball valve",
+                        "(very restrictive until near open). Only reshapes the knob's feel; the engine's",
+                        "flow model stays linear.")
+                .defineEnum("valveCharacteristic", ValveCharacteristic.LINEAR);
+        AUTO_DETECT_RELAY_HANDLERS = server
+                .comment("Automatically detect fluid-handler blocks that are NOT passive tanks — relays",
+                        "like a docking connector or a flexible hose — and stop equalizing them as",
+                        "reservoirs. A real tank only changes fill by our transfers; a relay spontaneously",
+                        "GAINS fluid from its own pairing/cascade (a consumer only ever loses it). A block",
+                        "type seen gaining fluid on its own several times is treated as a drain-priority",
+                        "relay endpoint (a one-way source while it holds fluid, a one-way sink while empty),",
+                        "so it is drained/filled on demand instead of being wrongly held 'balanced'. Override",
+                        "with the block tags is_reservoir (force normal tank), relay_endpoint (force relay),",
+                        "sink_only (receive-only), or ignore_fluid_handler (skip); Create tanks and basins",
+                        "are never demoted.")
+                .define("autoDetectRelayHandlers", true);
         server.pop();
 
         server.push("sableCompat");
@@ -100,6 +124,14 @@ public class PipesNPhysicsConfig {
                         "solves 'no flow' until a manual pipe edit fixes it. This refreshes each",
                         "sub-level pipe once so pumps/networks work without the manual poke.")
                 .define("enableSubLevelConnectionRefresh", true);
+        ENABLE_CROSS_LEVEL_PIPING = server
+                .comment("Cross-level piping: let an open pipe end draw fluid IN from a block on ANY OTHER",
+                        "Sable level whose physical bounds overlap the pipe mouth — a contraption drinking",
+                        "a fluid block on another contraption where the two touch, OR a main-level (dimension)",
+                        "pipe drinking from a contraption passing over it, OR a contraption drinking the",
+                        "dimension it overlaps. Uses the same one-way vacuum intake and anti-reclaim guards",
+                        "as ordinary open-end intake, plus a spatial (broadphase) query per mouth.")
+                .define("enableCrossLevelPiping", true);
         server.pop();
 
         server.push("tankMass");

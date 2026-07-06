@@ -1,0 +1,7 @@
+{
+  "replace": false,
+  "values": [
+    { "id": "simulated:docking_connector", "required": false },
+    { "id": "simulated:paired_docking_connector", "required": false }
+  ]
+}

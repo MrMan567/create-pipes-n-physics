@@ -6,8 +6,11 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.phys.Vec3;
 
+import java.util.function.BiFunction;
+
 interface SableCompatProvider {
     void clearCaches();
+    <T> T atOverlappingContraptions(Level level, BlockPos origin, BiFunction<Level, BlockPos, T> reader);
     boolean isSubLevelReady(Level level, BlockPos pos);
     double getWorldY(Level level, BlockPos pos);
     Vec3 getWorldPos(Level level, BlockPos pos);
