@@ -7,7 +7,6 @@ import com.simibubi.create.content.fluids.tank.FluidTankBlockEntity;
 import com.simibubi.create.foundation.mixin.accessor.FlowingFluidAccessor;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.compat.SableCompat;
-import de.devin.pipesnphysics.mixin.FluidTankAccessor;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.world.level.Level;
@@ -162,13 +161,12 @@ public final class BoundaryColumn {
             FluidTankBlockEntity controller = tankBe.getControllerBE();
             if (controller == null) return null; // multiblock mid-assembly or controller unloaded
             FluidTank inventory = controller.getTankInventory();
-            int height = ((FluidTankAccessor) (Object) controller).pipesnphysics$getHeight();
-            int width = ((FluidTankAccessor) (Object) controller).pipesnphysics$getWidth();
+            int height = FluidTankGeometry.columnHeightBlocks(controller);
             BlockPos controllerPos = controller.getBlockPos();
             FluidStack fluid = inventory.getFluid();
             return new BoundaryColumn(
                     controllerPos, pos,
-                    SableCompat.getColumnBaseY(level, controllerPos, width, height),
+                    FluidTankGeometry.columnBaseY(level, controllerPos, controller),
                     height, inventory.getCapacity(), fluid.copy(), fluid.getAmount(), null, false, true,
                     SableCompat.getUpProjectionY(level, controllerPos));
         }

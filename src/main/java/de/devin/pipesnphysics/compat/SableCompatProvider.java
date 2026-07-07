@@ -16,6 +16,8 @@ interface SableCompatProvider {
     Vec3 getWorldPos(Level level, BlockPos pos);
     double getUpProjectionY(Level level, BlockPos pos);
     double getColumnBaseY(Level level, BlockPos pos, int width, int height);
+    double getColumnBaseYAtCenter(Level level, BlockPos pos, double halfX, double halfY, double halfZ,
+                                  int verticalBlocks);
     float getTiltAngle(Level level, BlockPos pos);
     float getTiltAngleClient(BlockEntity be);
     float getPipeElevation(Level level, BlockPos pos, Direction dir);

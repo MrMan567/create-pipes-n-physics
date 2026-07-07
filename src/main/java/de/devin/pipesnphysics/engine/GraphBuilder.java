@@ -4,8 +4,6 @@ import com.simibubi.create.content.fluids.FluidPropagator;
 import com.simibubi.create.content.fluids.FluidTransportBehaviour;
 import com.simibubi.create.content.fluids.pipes.VanillaFluidTargets;
 import com.simibubi.create.content.fluids.pump.PumpBlock;
-import com.simibubi.create.content.fluids.tank.FluidTankBlockEntity;
-import de.devin.pipesnphysics.mixin.FluidTankAccessor;
 import de.devin.pipesnphysics.compat.SableCompat;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -331,24 +329,7 @@ public final class GraphBuilder {
 
     /** The block(s) a handler occupies: a multiblock tank's whole footprint, or just the single block. */
     private static List<BlockPos> handlerExtent(Level level, BlockPos pos) {
-        if (level.getBlockEntity(pos) instanceof FluidTankBlockEntity tank) {
-            FluidTankBlockEntity controller = tank.getControllerBE();
-            if (controller != null) {
-                int width = ((FluidTankAccessor) (Object) controller).pipesnphysics$getWidth();
-                int height = ((FluidTankAccessor) (Object) controller).pipesnphysics$getHeight();
-                BlockPos base = controller.getBlockPos();
-                List<BlockPos> blocks = new ArrayList<>(width * width * height);
-                for (int dx = 0; dx < width; dx++) {
-                    for (int dy = 0; dy < height; dy++) {
-                        for (int dz = 0; dz < width; dz++) {
-                            blocks.add(base.offset(dx, dy, dz));
-                        }
-                    }
-                }
-                return blocks;
-            }
-        }
-        return List.of(pos);
+        return FluidTankGeometry.footprint(level, pos);
     }
 
     /**

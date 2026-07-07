@@ -4,8 +4,8 @@ import com.simibubi.create.content.fluids.FluidPropagator;
 import com.simibubi.create.content.fluids.tank.FluidTankBlockEntity;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.engine.EngineTickHandler;
+import de.devin.pipesnphysics.engine.FluidTankGeometry;
 import de.devin.pipesnphysics.engine.OpenEndPipes;
-import de.devin.pipesnphysics.mixin.FluidTankAccessor;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.world.level.Level;
@@ -80,18 +80,10 @@ public final class NetworkEditHandler {
         if (!(level.getBlockEntity(pos) instanceof FluidTankBlockEntity tank)) return;
         FluidTankBlockEntity controller = tank.getControllerBE();
         if (controller == null) return;
-        int width = ((FluidTankAccessor) (Object) controller).pipesnphysics$getWidth();
-        int height = ((FluidTankAccessor) (Object) controller).pipesnphysics$getHeight();
-        BlockPos base = controller.getBlockPos();
-        for (int dx = 0; dx < width; dx++) {
-            for (int dy = 0; dy < height; dy++) {
-                for (int dz = 0; dz < width; dz++) {
-                    BlockPos cell = base.offset(dx, dy, dz);
-                    for (Direction dir : Direction.values()) {
-                        BlockPos neighbor = cell.relative(dir);
-                        if (isPipe(level, neighbor)) EngineTickHandler.markChanged(level, neighbor);
-                    }
-                }
+        for (BlockPos cell : FluidTankGeometry.footprint(controller)) {
+            for (Direction dir : Direction.values()) {
+                BlockPos neighbor = cell.relative(dir);
+                if (isPipe(level, neighbor)) EngineTickHandler.markChanged(level, neighbor);
             }
         }
     }
