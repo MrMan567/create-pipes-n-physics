@@ -378,9 +378,13 @@ public final class GraphBuilder {
                 frontier.add(neighbor.immutable());
                 continue;
             }
-            if (FluidPropagator.getPipe(level, neighbor) != null) {
-                conns.add(neighbor.immutable());
-                frontier.add(neighbor.immutable());
+            var neighborPipe = FluidPropagator.getPipe(level, neighbor);
+            if (neighborPipe != null) {
+                BlockState nState = level.getBlockState(neighbor);
+                if (neighborPipe.canHaveFlowToward(nState, face.getOpposite())) {
+                    conns.add(neighbor.immutable());
+                    frontier.add(neighbor.immutable());
+                }
             }
         }
         d.connections.put(cur, conns);
