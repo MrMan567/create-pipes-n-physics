@@ -1,5 +1,12 @@
 # Create Pipes n Physics
 
+<a href="https://track.devinfritz.de/staticfx-mods/create-pipes-n-physics/roadmap">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://track.devinfritz.de/embed/staticfx-mods/create-pipes-n-physics/roadmap.svg?theme=dark">
+    <img alt="Pipes'n Physics Roadmap" src="https://track.devinfritz.de/embed/staticfx-mods/create-pipes-n-physics/roadmap.svg">
+  </picture>
+</a>
+
 A Create mod addon for pipes and physics. Built with **Java** and **NeoForge 1.21.1**.
 
 ## What's Included
