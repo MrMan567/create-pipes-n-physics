@@ -353,9 +353,11 @@ public final class GraphBuilder {
 
     /**
      * Explore a fluid-conduit block: a fluid-holding node the BFS traverses THROUGH,
-     * linking it to adjacent pumps, pipes, other conduits, and plain handlers on every
-     * face — so a row of conduits (e.g. chained liquid burners) becomes one connected
-     * network the solver equalizes, the way Create's transport used to feed them.
+     * linking it to adjacent pumps, pipes, and other conduits — so a row of conduits
+     * (e.g. chained liquid burners) becomes one connected network the solver equalizes,
+     * the way Create's transport used to feed them. Plain reservoirs (tanks, basins)
+     * are NOT auto-linked here; they join only through an actual pipe opening, so a
+     * tank stacked on a burner does not gravity-drain into it.
      */
     private static void discoverConduit(Level level, BlockPos cur, Discovery d, Queue<BlockPos> frontier) {
         d.handlers.add(cur);
@@ -370,11 +372,10 @@ public final class GraphBuilder {
                 frontier.add(neighbor.immutable());
                 continue;
             }
-            if (level.getCapability(Capabilities.FluidHandler.BLOCK, neighbor, face.getOpposite()) != null
-                    && !HandlerRoles.isIgnored(level, neighbor)) {
+            if (isConduit(level, neighbor)) {
                 d.handlers.add(neighbor.immutable());
                 conns.add(neighbor.immutable());
-                if (isConduit(level, neighbor)) frontier.add(neighbor.immutable());
+                frontier.add(neighbor.immutable());
                 continue;
             }
             if (FluidPropagator.getPipe(level, neighbor) != null) {
