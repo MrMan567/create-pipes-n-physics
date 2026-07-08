@@ -19,8 +19,7 @@ public class SablePhysicsCompat {
     private static final Map<String, Double> lastAppliedMass = new HashMap<>();
 
     public static void applyFluidWeight(ServerSubLevel subLevel, BlockPos controllerPos,
-                                        int width, int height, double fillFraction,
-                                        double massKg, double timeStep) {
+                                        double fillFraction, double massKg) {
         if (massKg <= 0) return;
 
         if (PipesNPhysicsConfig.EXPERIMENTAL_TANK_COG.get()) {
