@@ -1,4 +1,13 @@
 {
   "replace": false,
-  "values": []
+  "values": [
+    {
+      "id": "create_connected:fluid_vessel",
+      "required": false
+    },
+    {
+      "id": "create_connected:creative_fluid_vessel",
+      "required": false
+    }
+  ]
 }

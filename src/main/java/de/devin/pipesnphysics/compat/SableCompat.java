@@ -97,6 +97,15 @@ public class SableCompat {
         return PROVIDER.getColumnBaseY(level, pos, width, height);
     }
 
+    /**
+     * Like {@link #getColumnBaseY} but for a tank whose geometric center is not at
+     * {@code (width/2, height/2, width/2)} — horizontal fluid vessels lay out along X/Z.
+     */
+    public static double getColumnBaseYAtCenter(Level level, BlockPos pos, double halfX, double halfY,
+                                                double halfZ, int verticalBlocks) {
+        return PROVIDER.getColumnBaseYAtCenter(level, pos, halfX, halfY, halfZ, verticalBlocks);
+    }
+
     public static float getTiltAngle(Level level, BlockPos pos) {
         return PROVIDER.getTiltAngle(level, pos);
     }
@@ -165,6 +174,12 @@ public class SableCompat {
         @Override
         public double getColumnBaseY(Level level, BlockPos pos, int width, int height) {
             return pos.getY();
+        }
+
+        @Override
+        public double getColumnBaseYAtCenter(Level level, BlockPos pos, double halfX, double halfY,
+                                             double halfZ, int verticalBlocks) {
+            return pos.getY() + halfY - 0.5 * verticalBlocks;
         }
 
         @Override

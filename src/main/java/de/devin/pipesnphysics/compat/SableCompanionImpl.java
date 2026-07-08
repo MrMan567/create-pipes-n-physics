@@ -75,14 +75,20 @@ class SableCompanionImpl implements SableCompatProvider {
 
     @Override
     public double getColumnBaseY(Level level, BlockPos pos, int width, int height) {
+        return getColumnBaseYAtCenter(level, pos, width / 2.0, height / 2.0, width / 2.0, height);
+    }
+
+    @Override
+    public double getColumnBaseYAtCenter(Level level, BlockPos pos, double halfX, double halfY, double halfZ,
+                                         int verticalBlocks) {
         // Anchor at the box's projected geometric CENTER, not the bottom corner: on a tilt the
         // corner the controller sits at is not the lowest point, so baseY = getWorldY(controller)-0.5
         // skews the surface and spills a partial tank. The center projects exactly, and the surface
         // is then center + (fillFraction - 0.5)·height·cosTilt — i.e. baseY = center − 0.5·height·cosTilt.
         Vector3d center = SableCompanion.INSTANCE.projectOutOfSubLevel(level,
-                new Vector3d(pos.getX() + width / 2.0, pos.getY() + height / 2.0, pos.getZ() + width / 2.0),
+                new Vector3d(pos.getX() + halfX, pos.getY() + halfY, pos.getZ() + halfZ),
                 new Vector3d());
-        return center.y - 0.5 * height * getUpProjectionY(level, pos);
+        return center.y - 0.5 * verticalBlocks * getUpProjectionY(level, pos);
     }
 
     @Override

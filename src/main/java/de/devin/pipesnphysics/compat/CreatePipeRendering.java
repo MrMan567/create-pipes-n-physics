@@ -8,11 +8,11 @@ import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.engine.Edge;
 import de.devin.pipesnphysics.engine.EdgeFlow;
 import de.devin.pipesnphysics.engine.Graph;
+import de.devin.pipesnphysics.engine.FluidTankGeometry;
 import de.devin.pipesnphysics.engine.Node;
 import de.devin.pipesnphysics.engine.PipeGeometry;
 import de.devin.pipesnphysics.engine.PipeProbe;
 import de.devin.pipesnphysics.engine.Solution;
-import de.devin.pipesnphysics.mixin.FluidTankAccessor;
 import de.devin.pipesnphysics.mixin.PipeConnectionAccessor;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -123,8 +123,8 @@ public final class CreatePipeRendering {
         if (!(level.getBlockEntity(pos) instanceof FluidTankBlockEntity tank)) return head;
         FluidTankBlockEntity controller = tank.getControllerBE();
         if (controller == null) return head;
-        int height = ((FluidTankAccessor) (Object) controller).pipesnphysics$getHeight();
-        double controllerBottom = SableCompat.getWorldY(level, controller.getBlockPos()) - 0.5;
+        int height = FluidTankGeometry.columnHeightBlocks(controller);
+        double controllerBottom = FluidTankGeometry.columnBaseY(level, controller.getBlockPos(), controller);
         double fill = Math.clamp((head - controllerBottom) / height, 0.0, 1.0);
         return controllerBottom + (TANK_CAP + TANK_PUDDLE) + fill * (height - 2 * TANK_CAP - TANK_PUDDLE);
     }
@@ -1467,11 +1467,11 @@ public final class CreatePipeRendering {
         }
     }
 
-    /** Block height of a reservoir column at {@code pos} (a multiblock tank's controller height), 1 otherwise. */
+    /** Block height of a reservoir column at {@code pos} (a multiblock tank's vertical extent), 1 otherwise. */
     private static int columnHeight(Level level, BlockPos pos) {
         if (level.getBlockEntity(pos) instanceof FluidTankBlockEntity tank) {
             FluidTankBlockEntity controller = tank.getControllerBE();
-            if (controller != null) return ((FluidTankAccessor) (Object) controller).pipesnphysics$getHeight();
+            if (controller != null) return FluidTankGeometry.columnHeightBlocks(controller);
         }
         return 1;
     }
