@@ -30,8 +30,20 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * the call also skips its client cosmetics (the idle rim drip particles) on those cells —
  * acceptable, the renderer owns them. Stock-rendered cells (flag off, gas, junctions) keep
  * the tick unchanged.
+ *
+ * The high {@code priority} is load-bearing for cross-mod compat. Another Create addon may ALSO
+ * hijack {@code tick()} with its own {@code @At("HEAD") cancellable} injector that calls
+ * {@code ci.cancel()} — CROWNS does exactly this ({@code FluidTransportBehaviourMixin} reimplements
+ * the tick to mix real-gas state). Two HEAD-cancellable injectors race: whichever executes first
+ * cancels, and the other's callback is skipped by the injected cancellation return. If theirs wins,
+ * OUR {@link EngineTickHandler#markDirty} never fires and the engine's per-tick heartbeat dies — the
+ * network never wakes and the whole engine looks broken. A higher-priority mixin is applied later, so
+ * its HEAD callback is woven in FRONT and runs first: this makes us cancel before any lower-priority
+ * addon (CROWNS ships priority 900). Under our engine we own pipe transport anyway, so suppressing a
+ * reimplemented Create tick is correct; CROWNS's per-endpoint gas-state mixing still runs through
+ * {@code FluidTank.fill}, which our IFluidHandler transfers hit.
  */
-@Mixin(value = FluidTransportBehaviour.class, remap = false)
+@Mixin(value = FluidTransportBehaviour.class, remap = false, priority = 1500)
 public abstract class GravityFlowMixin extends BlockEntityBehaviour {
     private GravityFlowMixin() { super(null); }
 

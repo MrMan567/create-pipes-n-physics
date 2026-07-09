@@ -1,6 +1,8 @@
 {
   "itemGroup.pipesnphysics": "Create Pipes n Physics",
 
+  "pipesnphysics.gui.swap.hint": "[%s] to replace",
+
   "pipesnphysics.gui.goggles.pipe_stats": "Pipe",
   "pipesnphysics.gui.goggles.not_connected": "No Flow: not connected to a network",
   "pipesnphysics.gui.goggles.no_flow_dry": "No Flow: pipe is dry, nothing reaching it",

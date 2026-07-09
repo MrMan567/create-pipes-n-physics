@@ -63,6 +63,22 @@ public class OpenEndedPipeMixin {
     private void pipesnphysics$provideFluidToWorld(FluidStack fluid, boolean simulate,
                                                    CallbackInfoReturnable<Boolean> cir) {
         BlockPos worldBlockPos = pipesnphysics$getWorldOutputPos();
+
+        // Force-output: keep draining OUT even when the mouth already faces a fluid SOURCE block (its
+        // own earlier spill, or a natural pool). Create normally returns false there and the network
+        // backs up; when enabled we accept and DISCARD the fluid (the space is already full, so nothing
+        // is placed). Runs on both the main level (outputPos is the real block) and a sub-level (the
+        // projected world block), since Create's fill drives this method on either.
+        if (PipesNPhysicsConfig.FORCE_OPEN_END_OUTPUT.get() && world != null
+                && !fluid.isEmpty() && fluid.getFluid() instanceof FlowingFluid) {
+            BlockPos occupied = worldBlockPos != null ? worldBlockPos : outputPos;
+            if (occupied != null && world.isLoaded(occupied)
+                    && world.getBlockState(occupied).getFluidState().isSource()) {
+                cir.setReturnValue(true);
+                return;
+            }
+        }
+
         if (worldBlockPos == null) return;
 
         if (world == null || !world.isLoaded(worldBlockPos)) {

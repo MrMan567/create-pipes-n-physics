@@ -51,17 +51,11 @@ public class PipeSwapHandler {
         if (level.isClientSide()) return;
 
         ItemStack held = player.getItemInHand(event.getHand());
-        if (!(held.getItem() instanceof BlockItem bi)) return;
-        Block heldBlock = bi.getBlock();
-        if (!isPipingBlock(heldBlock)) return;
-
         BlockPos pos = event.getPos();
-        BlockState targetState = level.getBlockState(pos);
-        // Only replace another pipe element, and never with the same block (a no-op that would eat the item).
-        if (!isPipingBlock(targetState.getBlock()) || targetState.is(heldBlock)) return;
-
-        BlockState placed = placementState(heldBlock, level, pos, targetState, player, event.getUseOnContext());
+        BlockState placed = swapResultState(level, pos, held, player, event.getUseOnContext());
         if (placed == null) return;
+
+        BlockState targetState = level.getBlockState(pos);
 
         // Refund the old block's REAL loot (an encased pipe's casing, a smart pipe's filter) straight into
         // the player's inventory — a synthesized asItem() stack is AIR for an encased pipe. Skipped in
@@ -83,6 +77,23 @@ public class PipeSwapHandler {
         EngineTickHandler.markChanged(level, pos);
 
         event.cancelWithResult(ItemInteractionResult.SUCCESS);
+    }
+
+    /**
+     * The block state a shift-swap would place at {@code pos}, or null when the held item can't swap the
+     * block there. Single-sources the eligibility gate and orientation so the client ghost preview
+     * ({@link de.devin.pipesnphysics.client.PipeSwapGhost}) and the swap itself never diverge.
+     */
+    public static BlockState swapResultState(Level level, BlockPos pos, ItemStack held, Player player, UseOnContext useOn) {
+        if (!(held.getItem() instanceof BlockItem bi)) return null;
+        Block heldBlock = bi.getBlock();
+        if (!isPipingBlock(heldBlock)) return null;
+
+        BlockState targetState = level.getBlockState(pos);
+        // Only replace another pipe element, and never with the same block (a no-op that would eat the item).
+        if (!isPipingBlock(targetState.getBlock()) || targetState.is(heldBlock)) return null;
+
+        return placementState(heldBlock, level, pos, targetState, player, useOn);
     }
 
     /** Every block that is a fluid-network element: pumps, valves, smart pipes, glass/encased/plain pipes. */

@@ -20,6 +20,7 @@ public class PipesNPhysicsConfig {
     public static final ModConfigSpec.DoubleValue SUCTION_LIMIT;
     public static final ModConfigSpec.BooleanValue ENABLE_OPEN_END_INTAKE;
     public static final ModConfigSpec.IntValue OPEN_END_INTAKE_COOLDOWN_TICKS;
+    public static final ModConfigSpec.BooleanValue FORCE_OPEN_END_OUTPUT;
     public static final ModConfigSpec.BooleanValue ENABLE_VALVE_THROTTLE;
     public static final ModConfigSpec.EnumValue<ValveCharacteristic> VALVE_CHARACTERISTIC;
     public static final ModConfigSpec.BooleanValue AUTO_DETECT_RELAY_HANDLERS;
@@ -84,6 +85,13 @@ public class PipesNPhysicsConfig {
                         "may pull a finite source again (the anti-reclaim window). Lakes and cauldrons",
                         "ignore this. Larger = safer against flicker on networks that both push and pull.")
                 .defineInRange("openEndIntakeCooldownTicks", 20, 0, 200);
+        FORCE_OPEN_END_OUTPUT = server
+                .comment("Let an open-ended pipe keep draining fluid OUT even when the space it faces is",
+                        "already filled by a fluid source block (its own earlier spill, or a natural pool),",
+                        "instead of backing the network up. The space is already full, so the extra fluid",
+                        "is DISCARDED. Off by default because it destroys fluid; turn it on for an open end",
+                        "used as an overflow/drain into a body of fluid.")
+                .define("forceOpenEndOutput", false);
         ENABLE_VALVE_THROTTLE = server
                 .comment("Let a fluid valve throttle its flow by a 0-90 degree angle set with the scroll",
                         "value (the box on its side faces). The shaft still opens and closes the valve;",
