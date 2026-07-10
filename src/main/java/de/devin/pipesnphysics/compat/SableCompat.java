@@ -1,5 +1,7 @@
 package de.devin.pipesnphysics.compat;
 
+import de.devin.pipesnphysics.engine.CentrifugeField;
+import de.devin.pipesnphysics.engine.SublevelSpinProbe;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
@@ -46,6 +48,8 @@ public class SableCompat {
 
     public static void clearCaches() {
         PROVIDER.clearCaches();
+        SublevelSpinProbe.clear();
+        CentrifugeField.clear();
         if (SUBLEVELS_PRESENT) {
             SableSubLevelDriver.clear();
             SablePhysicsCompat.clear();

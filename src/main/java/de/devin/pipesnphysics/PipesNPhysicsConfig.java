@@ -26,6 +26,12 @@ public class PipesNPhysicsConfig {
     public static final ModConfigSpec.BooleanValue AUTO_DETECT_RELAY_HANDLERS;
     public static final ModConfigSpec.BooleanValue ENABLE_DYNAMIC_TANK_MASS;
     public static final ModConfigSpec.BooleanValue EXPERIMENTAL_TANK_COG;
+    public static final ModConfigSpec.BooleanValue ENABLE_CENTRIFUGE;
+    public static final ModConfigSpec.DoubleValue CENTRIFUGE_STRENGTH;
+    public static final ModConfigSpec.BooleanValue ENABLE_CENTRIFUGE_UNMIX;
+    public static final ModConfigSpec.IntValue CENTRIFUGE_UNMIX_RATE;
+    public static final ModConfigSpec.DoubleValue CENTRIFUGE_UNMIX_MIN_SPEED;
+    public static final ModConfigSpec.BooleanValue DEBUG_SUBLEVEL_SPIN;
     public static final ModConfigSpec.BooleanValue ENABLE_OPEN_END_WORLD_PLACEMENT;
     public static final ModConfigSpec.BooleanValue ENABLE_SUBLEVEL_CONNECTION_REFRESH;
     public static final ModConfigSpec.BooleanValue ENABLE_CROSS_LEVEL_PIPING;
@@ -153,6 +159,39 @@ public class PipesNPhysicsConfig {
         EXPERIMENTAL_TANK_COG = server
                 .comment("EXPERIMENTAL: shift center of gravity based on fluid fill level.")
                 .define("experimentalTankCenterOfGravity", true);
+        server.pop();
+
+        server.push("centrifuge");
+        ENABLE_CENTRIFUGE = server
+                .comment("Fling fluid outward on a spinning Sable contraption: a cell's orbital speed adds",
+                        "a centrifugal term to its effective elevation, so fluid collects in the faster-moving",
+                        "(outer) tanks and drains back when the spin stops. Inert on anything not rotating.")
+                .define("enableCentrifuge", true);
+        CENTRIFUGE_STRENGTH = server
+                .comment("Multiplier on the centrifugal pull. 1.0 is physically scaled (½v²/g); raise it to",
+                        "make the outward push more aggressive, lower it to soften.")
+                .defineInRange("centrifugeStrength", 1.0, 0.0, 100.0);
+        ENABLE_CENTRIFUGE_UNMIX = server
+                .comment("Reverse-mix separation: a fast-enough spinning tank holding a fluid a centrifuging",
+                        "recipe accepts is consumed and its component fluids pushed into the other tanks on",
+                        "the network (which then fling outward). Recipes live in data/<ns>/centrifuging/.")
+                .define("enableCentrifugeUnmix", true);
+        CENTRIFUGE_UNMIX_RATE = server
+                .comment("Max input fluid (mB) a spinning tank un-mixes per tick.")
+                .defineInRange("centrifugeUnmixRate", 100, 1, 100000);
+        CENTRIFUGE_UNMIX_MIN_SPEED = server
+                .comment("Minimum orbital speed (m/s) a tank must be moving at before it un-mixes — mount it",
+                        "off the spin axis and spin fast enough to clear this.")
+                .defineInRange("centrifugeUnmixMinSpeed", 4.0, 0.0, 1000.0);
+        server.pop();
+
+        server.push("debug");
+        DEBUG_SUBLEVEL_SPIN = server
+                .comment("DEBUG SPIKE: read a Sable sub-level's rigid-body angular velocity server-side",
+                        "and action-bar the spin rate (rad/s + RPM), axis, and linear speed to players in",
+                        "the level. Needs a fluid tank on the contraption (it rides the tank physics tick).",
+                        "Off by default; a throwaway probe for the centrifuge-recipe investigation.")
+                .define("debugSubLevelSpin", false);
         server.pop();
 
         SERVER_SPEC = server.build();

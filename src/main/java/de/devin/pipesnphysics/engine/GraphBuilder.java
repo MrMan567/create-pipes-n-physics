@@ -45,7 +45,7 @@ public final class GraphBuilder {
     private GraphBuilder() {}
 
     private static boolean isConduit(Level level, BlockPos pos) {
-        return level.getBlockState(pos).is(HandlerRoles.FLUID_CONDUITS);
+        return HandlerRoles.isConduit(level, pos);
     }
 
     /**

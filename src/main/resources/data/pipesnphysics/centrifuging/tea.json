@@ -1,0 +1,7 @@
+{
+  "input": { "id": "create:tea", "amount": 20 },
+  "outputs": [
+    { "id": "minecraft:water", "amount": 10 },
+    { "id": "minecraft:milk", "amount": 10 }
+  ]
+}

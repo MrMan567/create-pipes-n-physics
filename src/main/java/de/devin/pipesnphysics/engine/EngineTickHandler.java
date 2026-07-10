@@ -97,6 +97,9 @@ public final class EngineTickHandler {
         for (ServerLevel level : event.getServer().getAllLevels()) {
             SableCompat.seedSubLevels(level, EngineTickHandler::markDirty);
         }
+        if (PipesNPhysicsConfig.DEBUG_SUBLEVEL_SPIN.get()) {
+            SublevelSpinProbe.tick(event.getServer());
+        }
         if (DIRTY.isEmpty() && URGENT.isEmpty()) return;
         event.getServer().getAllLevels().forEach(EngineTickHandler::tickLevel);
     }
@@ -161,6 +164,7 @@ public final class EngineTickHandler {
             }
         }
         FluidEngine.apply(level, ready);
+        CentrifugeProcessor.process(level, graph, now);
 
         if (solution.active() || solution.hasTransfer() || draining) {
             graph.coverage().forEach(quiet::remove);

@@ -88,13 +88,9 @@ public final class RelayDetector {
         if (lastSample.containsKey(pos)) appliedSince.merge(pos, delta, Integer::sum);
     }
 
-    /** Blocks that are never demoted: already-classified handlers and Create's own tanks/basins. */
+    /** Blocks that are never demoted: already-classified handlers (tag or code) and Create's tanks/basins. */
     private static boolean isExempt(Level level, BlockPos pos, BlockState state) {
-        if (state.is(HandlerRoles.IS_RESERVOIR) || state.is(HandlerRoles.FLUID_CONDUITS)
-                || state.is(HandlerRoles.SINK_ONLY) || state.is(HandlerRoles.IGNORE)
-                || state.is(HandlerRoles.RELAY_ENDPOINT)) {
-            return true;
-        }
+        if (HandlerRoles.hasExplicitRole(state)) return true;
         return level.getBlockEntity(pos) instanceof FluidTankBlockEntity
                 || level.getBlockEntity(pos) instanceof BasinBlockEntity;
     }

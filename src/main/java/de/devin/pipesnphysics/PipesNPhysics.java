@@ -12,6 +12,7 @@ import de.devin.pipesnphysics.engine.command.PipeGraphCommand;
 import de.devin.pipesnphysics.engine.net.EnginePackets;
 import de.devin.pipesnphysics.handler.NetworkEditHandler;
 import de.devin.pipesnphysics.handler.PipeSwapHandler;
+import de.devin.pipesnphysics.recipe.CentrifugeRecipes;
 import net.createmod.catnip.lang.FontHelper;
 import net.minecraft.resources.ResourceLocation;
 import net.neoforged.bus.api.IEventBus;
@@ -20,6 +21,7 @@ import net.neoforged.fml.common.Mod;
 import net.neoforged.fml.config.ModConfig;
 import net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent;
 import net.neoforged.neoforge.common.NeoForge;
+import net.neoforged.neoforge.event.AddReloadListenerEvent;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
 import net.neoforged.neoforge.event.server.ServerStoppedEvent;
 import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
@@ -54,6 +56,8 @@ public class PipesNPhysics {
         NeoForge.EVENT_BUS.register(NetworkEditHandler.class);
         NeoForge.EVENT_BUS.addListener((RegisterCommandsEvent event) ->
                 PipeGraphCommand.register(event.getDispatcher()));
+        NeoForge.EVENT_BUS.addListener((AddReloadListenerEvent event) ->
+                event.addListener(new CentrifugeRecipes()));
         NeoForge.EVENT_BUS.addListener((ServerStoppedEvent event) -> {
             SableCompat.clearCaches();
             EngineTickHandler.clear();

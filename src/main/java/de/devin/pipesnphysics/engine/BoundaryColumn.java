@@ -164,9 +164,11 @@ public final class BoundaryColumn {
             int height = FluidTankGeometry.columnHeightBlocks(controller);
             BlockPos controllerPos = controller.getBlockPos();
             FluidStack fluid = inventory.getFluid();
+            double baseY = FluidTankGeometry.columnBaseY(level, controllerPos, controller)
+                    - CentrifugeField.headOffset(level, controllerPos, level.getGameTime());
             return new BoundaryColumn(
                     controllerPos, pos,
-                    FluidTankGeometry.columnBaseY(level, controllerPos, controller),
+                    baseY,
                     height, inventory.getCapacity(), fluid.copy(), fluid.getAmount(), null, false, true,
                     SableCompat.getUpProjectionY(level, controllerPos));
         }
@@ -221,8 +223,10 @@ public final class BoundaryColumn {
 
         // Only the generic path can be a side-specific handler (a tank/pulley/relay is side-agnostic),
         // so this is where the access face rides onto the column for the later transfer.
+        double baseY = SableCompat.getColumnBaseY(level, pos, 1, 1)
+                - CentrifugeField.headOffset(level, pos, level.getGameTime());
         return new BoundaryColumn(pos, pos,
-                SableCompat.getColumnBaseY(level, pos, 1, 1), 1, capacity, found, amount, null, false, true,
+                baseY, 1, capacity, found, amount, null, false, true,
                 SableCompat.getUpProjectionY(level, pos)).accessFace(face);
     }
 

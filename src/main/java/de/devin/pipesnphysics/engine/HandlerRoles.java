@@ -2,6 +2,8 @@ package de.devin.pipesnphysics.engine;
 
 import de.devin.pipesnphysics.PipesNPhysics;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
+import de.devin.pipesnphysics.api.FluidHandlerApi;
+import de.devin.pipesnphysics.api.FluidHandlerRole;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.ResourceLocation;
@@ -47,12 +49,38 @@ public final class HandlerRoles {
     }
 
     /**
+     * The block's explicitly-assigned role: a matching role TAG (in the precedence order above), else a
+     * code role registered through {@link FluidHandlerApi}, else null (no explicit role — a plain
+     * capacitor, subject to the learned relay detector). Tags win over code so a pack can override.
+     */
+    public static FluidHandlerRole explicitRole(BlockState state) {
+        if (state.is(IS_RESERVOIR)) return FluidHandlerRole.RESERVOIR;
+        if (state.is(FLUID_CONDUITS)) return FluidHandlerRole.CONDUIT;
+        if (state.is(IGNORE)) return FluidHandlerRole.IGNORE;
+        if (state.is(RELAY_ENDPOINT)) return FluidHandlerRole.RELAY;
+        if (state.is(SINK_ONLY)) return FluidHandlerRole.SINK_ONLY;
+        return FluidHandlerApi.role(state.getBlock());
+    }
+
+    /** Whether the block carries any explicit role (tag or code), so the relay detector leaves it alone. */
+    public static boolean hasExplicitRole(BlockState state) {
+        return explicitRole(state) != null;
+    }
+
+    /**
      * Whether the block at {@code pos} should be skipped as a fluid target: the pipe treats it as if
-     * it had no handler (a dead end / open face). The is_reservoir tag vetoes ignore.
+     * it had no handler (a dead end / open face). The is_reservoir role vetoes ignore.
      */
     public static boolean isIgnored(Level level, BlockPos pos) {
-        BlockState state = level.getBlockState(pos);
-        return state.is(IGNORE) && !state.is(IS_RESERVOIR);
+        return explicitRole(level.getBlockState(pos)) == FluidHandlerRole.IGNORE;
+    }
+
+    /**
+     * Whether the block at {@code pos} is a passthrough conduit — chained to its neighbours and
+     * equalized with them as one shared buffer (see {@link GraphBuilder}). is_reservoir vetoes it.
+     */
+    public static boolean isConduit(Level level, BlockPos pos) {
+        return explicitRole(level.getBlockState(pos)) == FluidHandlerRole.CONDUIT;
     }
 
     /**
@@ -62,25 +90,22 @@ public final class HandlerRoles {
      * (like a hose pulley): a one-way SOURCE while they hold fluid, a one-way SINK while empty — so the
      * engine always drains a receiving connector and always fills a sending one, no matter the levels,
      * instead of calling them "balanced" and refusing to move fluid (the equalization stall). True for
-     * the relay_endpoint tag or a detector-learned relay, unless pinned as a real tank / conduit.
+     * the relay role (tag or code) or a detector-learned relay, unless pinned as a real tank / conduit.
      */
     public static boolean isRelayEndpoint(Level level, BlockPos pos) {
         BlockState state = level.getBlockState(pos);
-        if (state.is(IS_RESERVOIR) || state.is(FLUID_CONDUITS) || state.is(IGNORE)) return false;
-        if (state.is(RELAY_ENDPOINT)) return true;
-        return PipesNPhysicsConfig.AUTO_DETECT_RELAY_HANDLERS.get()
+        FluidHandlerRole role = explicitRole(state);
+        if (role == FluidHandlerRole.RELAY) return true;
+        return role == null && PipesNPhysicsConfig.AUTO_DETECT_RELAY_HANDLERS.get()
                 && RelayDetector.isRelay(state.getBlock());
     }
 
     /**
      * Whether the handler at {@code pos} is receive-only — the engine may fill it but never drains or
-     * equalizes it. Only the sink_only tag opts in (a detector-learned relay is a {@link #isRelayEndpoint
-     * relay endpoint} instead, which is the bidirectional-friendly demotion); vetoed by is_reservoir,
-     * a conduit, or ignore.
+     * equalizes it. Only the sink_only role (tag or code) opts in; a detector-learned relay is a
+     * {@link #isRelayEndpoint relay endpoint} instead (the bidirectional-friendly demotion).
      */
     public static boolean isReceiveOnly(Level level, BlockPos pos) {
-        BlockState state = level.getBlockState(pos);
-        if (state.is(IS_RESERVOIR) || state.is(FLUID_CONDUITS) || state.is(IGNORE)) return false;
-        return state.is(SINK_ONLY);
+        return explicitRole(level.getBlockState(pos)) == FluidHandlerRole.SINK_ONLY;
     }
 }
