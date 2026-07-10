@@ -63,7 +63,8 @@ CentrifugeApi.registerSeparator(input -> {
     return new CentrifugeRecipe(
         new FluidStack(MyFluids.MIXED.get(), 20),                       // consumed per operation
         List.of(new FluidStack(MyFluids.PART_A.get(), 10),              // outputs, densest first
-                new FluidStack(MyFluids.PART_B.get(), 10)));
+                new FluidStack(MyFluids.PART_B.get(), 10)),
+        3.0);                                                           // min spin (rad/s), 0 for none
 });
 ```
 
@@ -74,9 +75,15 @@ CentrifugeApi.registerSeparator(input -> {
 {
   "input":   { "id": "yourmod:mixed", "amount": 20 },
   "outputs": [ { "id": "yourmod:part_a", "amount": 10 },
-               { "id": "yourmod:part_b", "amount": 10 } ]
+               { "id": "yourmod:part_b", "amount": 10 } ],
+  "min_angular_speed": 3.0
 }
 ```
+
+`min_angular_speed` (radians/second) is optional and defaults to 0. It is a per-recipe spin floor on
+top of the global `centrifugeMinAngularSpeed` config, so a stubborn mixture can demand a faster spin
+than the default. From code, `new CentrifugeRecipe(input, outputs, minAngularSpeed)` sets it; the
+two-argument form leaves it at 0.
 
 **Handler roles** (`FluidHandlerApi`): tell the engine how to treat your fluid-holding block
 — `RESERVOIR` (a tank), `RELAY`, `CONDUIT`, `SINK_ONLY`, or `IGNORE`. Call after your blocks

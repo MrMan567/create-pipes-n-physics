@@ -31,6 +31,7 @@ public class PipesNPhysicsConfig {
     public static final ModConfigSpec.BooleanValue ENABLE_CENTRIFUGE_UNMIX;
     public static final ModConfigSpec.IntValue CENTRIFUGE_UNMIX_RATE;
     public static final ModConfigSpec.DoubleValue CENTRIFUGE_UNMIX_MIN_SPEED;
+    public static final ModConfigSpec.DoubleValue CENTRIFUGE_MIN_ANGULAR_SPEED;
     public static final ModConfigSpec.BooleanValue DEBUG_SUBLEVEL_SPIN;
     public static final ModConfigSpec.BooleanValue ENABLE_OPEN_END_WORLD_PLACEMENT;
     public static final ModConfigSpec.BooleanValue ENABLE_SUBLEVEL_CONNECTION_REFRESH;
@@ -183,6 +184,12 @@ public class PipesNPhysicsConfig {
                 .comment("Minimum orbital speed (m/s) a tank must be moving at before it un-mixes — mount it",
                         "off the spin axis and spin fast enough to clear this.")
                 .defineInRange("centrifugeUnmixMinSpeed", 4.0, 0.0, 1000.0);
+        CENTRIFUGE_MIN_ANGULAR_SPEED = server
+                .comment("Minimum spin rate (radians/second) the contraption must turn at before the centrifuge",
+                        "does anything — both the outward push and un-mixing. Unlike orbital speed this is",
+                        "independent of how far the tanks sit from the axis, so it reads pure spin. 0 disables",
+                        "the gate (any rotation works). 1 rad/s is about 9.5 RPM, so 3.0 is roughly 29 RPM.")
+                .defineInRange("centrifugeMinAngularSpeed", 0.0, 0.0, 1000.0);
         server.pop();
 
         server.push("debug");

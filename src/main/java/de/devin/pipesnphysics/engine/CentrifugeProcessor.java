@@ -33,12 +33,17 @@ public final class CentrifugeProcessor {
                 || !CentrifugeApi.hasAny()) return;
 
         // Gate on the whole contraption spinning (the fastest-moving tank), not the reactor's own speed —
-        // so a tank at the axis un-mixes too and its products fling out to the off-axis outlets.
+        // so a tank at the axis un-mixes too and its products fling out to the off-axis outlets. Orbital
+        // speed sets the radius reach; the spin-rate gate is radius-independent, so a slow turn never
+        // un-mixes however far out a tank is mounted.
         double networkSpeed = 0;
+        double networkAngular = 0;
         for (Node node : graph.handlers()) {
             networkSpeed = Math.max(networkSpeed, CentrifugeField.orbitalSpeed(level, node.pos(), gameTime));
+            networkAngular = Math.max(networkAngular, CentrifugeField.angularSpeed(level, node.pos(), gameTime));
         }
-        if (networkSpeed < PipesNPhysicsConfig.CENTRIFUGE_UNMIX_MIN_SPEED.get()) return;
+        if (networkSpeed < PipesNPhysicsConfig.CENTRIFUGE_UNMIX_MIN_SPEED.get()
+                || networkAngular < PipesNPhysicsConfig.CENTRIFUGE_MIN_ANGULAR_SPEED.get()) return;
 
         for (Node reactor : graph.handlers()) {
             IFluidHandler cap = BoundaryColumn.findHandler(level, reactor.pos(), reactor.accessFace());
@@ -46,7 +51,9 @@ public final class CentrifugeProcessor {
             FluidStack held = primaryDrainable(cap);
             if (held.isEmpty()) continue;
             CentrifugeRecipe recipe = CentrifugeApi.find(held);
-            if (recipe != null) unmix(level, graph, reactor, cap, recipe, gameTime);
+            if (recipe != null && networkAngular >= recipe.minAngularSpeed()) {
+                unmix(level, graph, reactor, cap, recipe, gameTime);
+            }
         }
     }
 

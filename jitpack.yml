@@ -2,5 +2,3 @@
 # local maven repo so JitPack can serve it as com.github.StaticFX:create-pipes-n-physics:<tag>.
 jdk:
   - openjdk21
-install:
-  - ./gradlew publishToMavenLocal -x test --no-daemon
