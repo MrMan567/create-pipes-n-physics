@@ -28,6 +28,13 @@ import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+/**
+ * Hello and welcome to PipesNPhysics!
+ * You are probably looking into how to build centrifuge recipes and make your fluid components work. Therefore head over to
+ *
+ * @see de.devin.pipesnphysics.api.CentrifugeApi
+ * @see de.devin.pipesnphysics.api.FluidHandlerApi
+ */
 @Mod(PipesNPhysics.ID)
 public class PipesNPhysics {
     public static final String ID = "pipesnphysics";

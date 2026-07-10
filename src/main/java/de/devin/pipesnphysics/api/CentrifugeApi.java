@@ -6,15 +6,12 @@ import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
- * Public entry point for the fluid centrifuge. A separation can be defined two ways: declaratively as
- * a datapack {@link CentrifugeRecipe} under {@code data/<ns>/centrifuging/*.json}, or in code via a
- * {@link CentrifugeSeparator} for dynamic behavior (outputs that depend on the fluid's components).
- * The engine asks {@link #find} what a spinning tank's fluid splits into: the built-in datapack source
- * first (so a pack can override a hook), then registered separators in registration order.
- *
- * <p>This package depends on nothing internal — the datapack loader installs its own lookup through
- * {@link #updateDatapackSource}, keeping the API a self-contained layer. Thread-safe: register from
- * your mod's setup; {@link #find} runs on the server thread.
+ * A separation is defined either as a datapack recipe in
+ * the centrifuging folder, or in code with a CentrifugeSeparator when the outputs depend on the
+ * fluid's data components. The engine asks find what a spinning tank's fluid splits into: the datapack
+ * source first, so a pack can override a hook, then registered separators in registration order.
+ * This package depends on nothing internal — the datapack loader installs its own lookup through
+ * updateDatapackSource. Register from your mod's setup; find runs on the server thread.
  */
 public final class CentrifugeApi {
     private static final List<CentrifugeSeparator> SEPARATORS = new CopyOnWriteArrayList<>();
@@ -29,8 +26,8 @@ public final class CentrifugeApi {
     }
 
     /**
-     * Internal — the built-in datapack loader installs its lookup and current presence here on each
-     * reload, so this package keeps no reference back to the loader. Not for external callers.
+     * Internal: the datapack loader installs its lookup and current presence here on each reload, so
+     * this package keeps no reference back to it. Not for external callers.
      */
     public static void updateDatapackSource(CentrifugeSeparator source, boolean present) {
         datapackSource = source;

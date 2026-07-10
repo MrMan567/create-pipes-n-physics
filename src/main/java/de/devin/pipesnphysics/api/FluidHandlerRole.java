@@ -2,9 +2,9 @@ package de.devin.pipesnphysics.api;
 
 /**
  * The role a fluid-handler block plays in the pipe network — how the engine treats it. These mirror
- * the five role block tags ({@code is_reservoir}, {@code fluid_conduits}, {@code relay_endpoint},
- * {@code sink_only}, {@code ignore_fluid_handler}); declare one in code with {@link FluidHandlerApi#setRole}.
- * A matching block tag takes precedence over a code role, so a pack can always override.
+ * the five role block tags (is_reservoir, fluid_conduits, relay_endpoint, sink_only,
+ * ignore_fluid_handler); declare one in code with FluidHandlerApi.setRole. A matching block tag takes
+ * precedence over a code role, so a pack can always override.
  */
 public enum FluidHandlerRole {
     /** A normal tank/capacitor: drained and surface-equalized. Also vetoes the automatic relay detector. */
