@@ -31,17 +31,19 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * acceptable, the renderer owns them. Stock-rendered cells (flag off, gas, junctions) keep
  * the tick unchanged.
  *
- * The high {@code priority} is load-bearing for cross-mod compat. Another Create addon may ALSO
- * hijack {@code tick()} with its own {@code @At("HEAD") cancellable} injector that calls
- * {@code ci.cancel()} — CROWNS does exactly this ({@code FluidTransportBehaviourMixin} reimplements
- * the tick to mix real-gas state). Two HEAD-cancellable injectors race: whichever executes first
- * cancels, and the other's callback is skipped by the injected cancellation return. If theirs wins,
- * OUR {@link EngineTickHandler#markDirty} never fires and the engine's per-tick heartbeat dies — the
- * network never wakes and the whole engine looks broken. A higher-priority mixin is applied later, so
- * its HEAD callback is woven in FRONT and runs first: this makes us cancel before any lower-priority
- * addon (CROWNS ships priority 900). Under our engine we own pipe transport anyway, so suppressing a
- * reimplemented Create tick is correct; CROWNS's per-endpoint gas-state mixing still runs through
- * {@code FluidTank.fill}, which our IFluidHandler transfers hit.
+ * The high {@code priority} biases this cancel to win when another Create addon ALSO hijacks
+ * {@code tick()} with an {@code @At("HEAD") cancellable} injector — CROWNS does exactly this
+ * ({@code FluidTransportBehaviourMixin} reimplements the tick to mix real-gas state, cancelling at
+ * HEAD with default priority 1000). Two HEAD-cancellable injectors race: whichever executes first
+ * cancels, and the other's callback is skipped by the injected cancellation return. Winning here
+ * keeps CROWNS's reimplemented transport from running, which is tidiest — but it is NOT load-bearing,
+ * because that reimplementation is inert under our engine anyway (its {@code manageFlows} needs
+ * Create pump pressure, which {@link PumpBlockEntityMixin} cancels). The one thing that MUST fire
+ * every tick — {@link EngineTickHandler#markDirty}, the engine's heartbeat — no longer rides this
+ * cancel: it lives on the pipe block entity's own tick ({@link PipeHeartbeatMixin}), which no
+ * behaviour-level cancel can preempt. So if CROWNS wins this race the engine still wakes and moves
+ * fluid. CROWNS's per-endpoint gas-state mixing still runs through {@code FluidTank.fill}, which our
+ * IFluidHandler transfers hit.
  */
 @Mixin(value = FluidTransportBehaviour.class, remap = false, priority = 1500)
 public abstract class GravityFlowMixin extends BlockEntityBehaviour {
@@ -53,9 +55,8 @@ public abstract class GravityFlowMixin extends BlockEntityBehaviour {
         if (blockEntity.isVirtual()) return; // Ponder scenes & schematics keep Create's animation
         Level level = blockEntity.getLevel();
         if (level == null) return;
-        if (!level.isClientSide()) {
-            EngineTickHandler.markDirty(level, blockEntity.getBlockPos());
-        }
+        // The heartbeat (markDirty) lives on the block-entity tick now (PipeHeartbeatMixin), so it
+        // survives even when a peer addon wins this HEAD-cancel race and skips this callback.
 
         FluidTransportBehaviour self = (FluidTransportBehaviour) (Object) this;
         BlockPos pos = blockEntity.getBlockPos();
