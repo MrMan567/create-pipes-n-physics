@@ -4,6 +4,7 @@ import com.simibubi.create.content.fluids.tank.FluidTankBlockEntity;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.compat.SableCompat;
 import de.devin.pipesnphysics.compat.SablePhysicsCompat;
+import de.devin.pipesnphysics.engine.MomentumField;
 import de.devin.pipesnphysics.engine.SublevelSpinProbe;
 import de.devin.pipesnphysics.physics.TankMassFormulas;
 import dev.ryanhcode.sable.api.block.BlockEntitySubLevelActor;
@@ -45,6 +46,17 @@ public class FluidTankMassMixin implements BlockEntitySubLevelActor {
                     qx, qy, qz, qw,
                     world.x, world.y, world.z,
                     subLevel.getLevel().getGameTime(), subLevel.getLevel().dimension());
+        }
+
+        // Momentum-driven head: record the rigid body's linear velocity and a reference position each
+        // physics step so the engine can differentiate it into a frame acceleration and tilt the fluid
+        // opposite it (the linear counterpart of the centrifugal push). Controller reports once per body.
+        if (self.isController() && PipesNPhysicsConfig.ENABLE_MOMENTUM_HEAD.get()) {
+            Vector3dc velocity = handle.getLinearVelocity();
+            Vec3 origin = SableCompat.getWorldPos(subLevel.getLevel(), self.getBlockPos());
+            MomentumField.record(subLevel.getUniqueId().toString(),
+                    velocity.x(), velocity.y(), velocity.z(),
+                    origin.x, origin.y, origin.z, timeStep, subLevel.getLevel().getGameTime());
         }
 
         if (!PipesNPhysicsConfig.ENABLE_DYNAMIC_TANK_MASS.get()) return;

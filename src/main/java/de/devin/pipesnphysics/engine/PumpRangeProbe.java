@@ -28,11 +28,20 @@ import java.util.Set;
 public final class PumpRangeProbe {
     private static final double REACH_TOLERANCE = 0.25;
     private static final int MAX_CELLS = 512;
+    /** Max age of the engine's own per-tick solution to reuse — the request throttle cadence. */
+    private static final int SOLUTION_MAX_AGE_TICKS = 4;
 
     private PumpRangeProbe() {}
 
     public static PumpRangePayload probe(ServerLevel level, BlockPos pumpPos) {
-        Graph graph = GraphBuilder.build(level, pumpPos);
+        long now = level.getGameTime();
+        Graph graph = GraphCache.get(level, pumpPos, now);
+        Solution cached = graph == null ? null
+                : GraphCache.recentSolution(level, graph, now, SOLUTION_MAX_AGE_TICKS);
+        if (graph == null) {
+            graph = GraphBuilder.build(level, pumpPos);
+            GraphCache.store(level, graph, now);
+        }
         Node pump = graph.nodeAt(pumpPos);
         if (pump == null || !pump.isPump() || pump.pumpFacing() == null) {
             return new PumpRangePayload(pumpPos, List.of());
@@ -44,7 +53,7 @@ public final class PumpRangeProbe {
         double pumpHead = Math.abs(speed) * PipesNPhysicsConfig.PUMP_HEAD_PER_RPM.get();
         double suction = PipesNPhysicsConfig.SUCTION_LIMIT.get();
 
-        Solution solution = FlowSolver.solve(level, graph);
+        Solution solution = cached != null ? cached : FlowSolver.solve(level, graph);
         Double known = solution.nodeHeads().get(pump.index());
         double supplyHead = known != null ? known : pump.worldY();
 

@@ -4,6 +4,7 @@ import com.simibubi.create.content.fluids.FluidPropagator;
 import de.devin.pipesnphysics.PipesNPhysics;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.engine.EngineTickHandler;
+import de.devin.pipesnphysics.engine.GraphCache;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.neoforged.bus.api.SubscribeEvent;
@@ -15,6 +16,11 @@ import net.neoforged.neoforge.event.level.ChunkEvent;
  * drops the edge that crossed it, so the still-loaded half solves a truncated topology; nothing else
  * re-checks when the far chunk returns. Marking the loaded chunk's pipe cells re-solves any network
  * that reaches into it, healing a run that a chunk unload had severed.
+ *
+ * The UNLOAD side evicts every cached graph reaching into the departing chunk: a cached network
+ * must never outlive its chunks, or the solve would fetch block entities and capabilities from
+ * unloaded positions — forcing synchronous chunk loads. (An uncached build can't outlive one; its
+ * BFS is isLoaded-gated and the graph dies with the tick.)
  */
 @EventBusSubscriber(modid = PipesNPhysics.ID)
 public final class ChunkWakeHandler {
@@ -27,5 +33,11 @@ public final class ChunkWakeHandler {
         for (BlockPos pos : event.getChunk().getBlockEntitiesPos()) {
             if (FluidPropagator.getPipe(level, pos) != null) EngineTickHandler.markChanged(level, pos);
         }
+    }
+
+    @SubscribeEvent
+    public static void onChunkUnload(ChunkEvent.Unload event) {
+        if (!(event.getLevel() instanceof ServerLevel level)) return;
+        GraphCache.invalidateChunk(level, event.getChunk().getPos());
     }
 }

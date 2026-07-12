@@ -1,6 +1,7 @@
 package de.devin.pipesnphysics.compat;
 
 import de.devin.pipesnphysics.engine.CentrifugeField;
+import de.devin.pipesnphysics.engine.MomentumField;
 import de.devin.pipesnphysics.engine.SublevelSpinProbe;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -50,6 +51,7 @@ public class SableCompat {
         PROVIDER.clearCaches();
         SublevelSpinProbe.clear();
         CentrifugeField.clear();
+        MomentumField.clear();
         if (SUBLEVELS_PRESENT) {
             SableSubLevelDriver.clear();
             SablePhysicsCompat.clear();
@@ -58,6 +60,15 @@ public class SableCompat {
 
     public static boolean isSubLevelReady(Level level, BlockPos pos) {
         return PROVIDER.isSubLevelReady(level, pos);
+    }
+
+    /**
+     * The unique-id string of the physics sub-level containing this cell, or null off a sub-level — the
+     * SAME identity a contraption's physics tick records its momentum frame under, so the read side can
+     * attribute a cell to its own rigid body instead of guessing by proximity.
+     */
+    public static String getSubLevelId(Level level, BlockPos pos) {
+        return PROVIDER.getSubLevelId(level, pos);
     }
 
     /**
@@ -153,6 +164,11 @@ public class SableCompat {
         @Override
         public <T> T atOverlappingContraptions(Level level, BlockPos origin, BiFunction<Level, BlockPos, T> reader) {
             return null; // no sub-levels without Sable: nothing overlaps
+        }
+
+        @Override
+        public String getSubLevelId(Level level, BlockPos pos) {
+            return null; // no sub-levels without Sable: every cell is main-level
         }
 
         @Override

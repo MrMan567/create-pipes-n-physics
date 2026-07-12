@@ -56,6 +56,9 @@ public final class EngineTickHandler {
      */
     private static final int BACKED_UP_RECHECK_TICKS = 4;
 
+    /** How often orphaned graph-cache entries are swept (memory reclamation, not correctness). */
+    private static final int CACHE_SWEEP_INTERVAL_TICKS = 200;
+
     private static final Map<ResourceKey<Level>, Set<BlockPos>> DIRTY = new HashMap<>();
     private static final Map<ResourceKey<Level>, Set<BlockPos>> URGENT = new HashMap<>();
     private static final Map<ResourceKey<Level>, Map<BlockPos, Long>> QUIET = new HashMap<>();
@@ -68,8 +71,24 @@ public final class EngineTickHandler {
         DIRTY.computeIfAbsent(level.dimension(), k -> new HashSet<>()).add(pos.immutable());
     }
 
-    /** Something meaningful changed (pump flip, speed, topology): wake the network. */
+    /**
+     * Something meaningful changed (pump flip, speed, topology): wake the network AND evict its
+     * cached graph, so the wake re-discovers the network instead of re-solving a stale shape.
+     */
     public static void markChanged(Level level, BlockPos pos) {
+        if (level.isClientSide()) return;
+        markDirty(level, pos);
+        URGENT.computeIfAbsent(level.dimension(), k -> new HashSet<>()).add(pos.immutable());
+        GraphCache.invalidateAround(level, pos);
+    }
+
+    /**
+     * The network must re-solve (its sub-level moved or tilted, re-projecting every elevation) but
+     * its shape is unchanged: wake WITHOUT evicting the cached graph. Plot-coordinate topology is
+     * motion-invariant and every solve-relevant elevation is re-read fresh each solve, so a cruising
+     * contraption keeps its graph instead of paying a full rebuild every tick.
+     */
+    public static void markMoved(Level level, BlockPos pos) {
         if (level.isClientSide()) return;
         markDirty(level, pos);
         URGENT.computeIfAbsent(level.dimension(), k -> new HashSet<>()).add(pos.immutable());
@@ -86,6 +105,19 @@ public final class EngineTickHandler {
         DIRTY.clear();
         URGENT.clear();
         QUIET.clear();
+        GraphCache.clear();
+    }
+
+    /**
+     * Whether pos belongs to a network that is currently sleeping. The sub-level driver uses this
+     * to skip seeding quiet contraption cells — one lookup instead of the mark-and-bounce through
+     * DIRTY that every sleeping cell otherwise pays each tick.
+     */
+    public static boolean isQuiet(Level level, BlockPos pos, long now) {
+        Map<BlockPos, Long> quiet = QUIET.get(level.dimension());
+        if (quiet == null) return false;
+        Long until = quiet.get(pos);
+        return until != null && until > now;
     }
 
     @SubscribeEvent
@@ -94,9 +126,16 @@ public final class EngineTickHandler {
         // Sable contraptions are assembled with no place event and their dry pipes never
         // self-tick, so the engine never wakes on a sub-level. Seed every sub-level pipe cell
         // each tick (the QUIET sleep still throttles re-solves); a no-op without full Sable.
+        boolean sweep = event.getServer().getTickCount() % CACHE_SWEEP_INTERVAL_TICKS == 0;
         for (ServerLevel level : event.getServer().getAllLevels()) {
             SableCompat.seedSubLevels(level, EngineTickHandler::markDirty);
+            // Reclaim cache entries of networks that died with no signal (disassembled
+            // contraptions, exploded runs) — nothing ever seeds them again, so only this sweeps.
+            if (sweep) GraphCache.sweep(level, level.getGameTime());
         }
+        // Momentum frames are keyed per sub-level (cross-dimension), so sweep once — reclaims the
+        // frames of disassembled contraptions no cell ever looks up again.
+        if (sweep) MomentumField.sweep(event.getServer().overworld().getGameTime());
         if (PipesNPhysicsConfig.DEBUG_SUBLEVEL_SPIN.get()) {
             SublevelSpinProbe.tick(event.getServer());
         }
@@ -137,15 +176,36 @@ public final class EngineTickHandler {
             Long sleepUntil = quiet.get(pos);
             if (sleepUntil != null && sleepUntil > now) return;
         }
-        BlockPos seed = GraphBuilder.findSeed(level, pos);
-        if (seed == null || covered.contains(seed)) return;
-        if (!wake) {
-            Long sleepUntil = quiet.get(seed);
-            if (sleepUntil != null && sleepUntil > now) return;
+        // Cached-network fast path: any coverage cell resolves the whole graph, skipping both
+        // findSeed's neighbor ring and the BFS rebuild. Topology wakes (markChanged) evicted their
+        // networks at mark time, so a hit here is a network nothing reshaped.
+        Graph graph = GraphCache.get(level, pos, now);
+        if (graph == null) {
+            BlockPos seed = GraphBuilder.findSeed(level, pos);
+            if (seed == null || covered.contains(seed)) return;
+            if (!wake) {
+                Long sleepUntil = quiet.get(seed);
+                if (sleepUntil != null && sleepUntil > now) return;
+            }
+            graph = GraphCache.get(level, seed, now);
+            if (graph == null) {
+                graph = GraphBuilder.build(level, seed);
+                if (graph.isEmpty()) return;
+                GraphCache.store(level, graph, now);
+                // A silently placed pipe (schematicannon — no event, no eviction) can extend or
+                // bridge a network that ALREADY solved this tick off its stale cached graph: this
+                // fresh build then contains already-solved cells, and solving it too would move up
+                // to double the per-endpoint cap in one tick. Store it (next tick's lookup gets the
+                // merged shape, displacing the stale halves) but skip this tick's solve, preserving
+                // the one-solve-per-network-per-tick rule. Only exclusive cells count as overlap:
+                // an open-end space block or per-face handler is legitimately shared between two
+                // live networks and must not starve the second one's rebuild.
+                if (overlapsSolved(graph, covered)) {
+                    covered.addAll(graph.coverage());
+                    return;
+                }
+            }
         }
-
-        Graph graph = GraphBuilder.build(level, seed);
-        if (graph.isEmpty()) return;
         covered.addAll(graph.coverage());
 
         Solution solution = FlowSolver.solve(level, graph);
@@ -166,12 +226,33 @@ public final class EngineTickHandler {
         FluidEngine.apply(level, ready);
         CentrifugeProcessor.process(level, graph, now);
 
-        if (solution.active() || solution.hasTransfer() || draining) {
+        boolean busy = solution.active() || solution.hasTransfer() || draining;
+        boolean armed = hasRunningPump(level, graph);
+        // Busy/armed networks get the fast graph-cache TTL: they are the ones that would route
+        // fluid over a silently edited run, so their stale-shape window stays at the armed cadence.
+        GraphCache.recordSolve(level, graph, solution, now, busy || armed);
+
+        if (busy) {
             graph.coverage().forEach(quiet::remove);
         } else {
-            long until = now + recheckTicks(solution, hasRunningPump(level, graph));
+            // Clamped so the wake ending this sleep never re-solves a graph OLDER than the sleep:
+            // if the cached entry expires mid-sleep, wake right then and rebuild.
+            long until = Math.min(now + recheckTicks(solution, armed), GraphCache.expiry(level, graph));
             for (BlockPos cell : graph.coverage()) quiet.put(cell, until);
         }
+    }
+
+    /** Whether any of the graph's EXCLUSIVE cells (pipes, pumps, junctions) already solved this tick. */
+    private static boolean overlapsSolved(Graph graph, Set<BlockPos> covered) {
+        if (covered.isEmpty()) return false;
+        for (BlockPos cell : graph.coverage()) {
+            if (!covered.contains(cell)) continue;
+            Node node = graph.nodeAt(cell);
+            boolean shared = node != null
+                    && (node.isOpenEnd() || (node.isHandler() && node.accessFace() != null));
+            if (!shared) return true;
+        }
+        return false;
     }
 
     /**

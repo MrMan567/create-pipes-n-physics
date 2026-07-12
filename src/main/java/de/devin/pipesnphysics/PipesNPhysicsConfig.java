@@ -24,6 +24,7 @@ public class PipesNPhysicsConfig {
     public static final ModConfigSpec.BooleanValue ENABLE_VALVE_THROTTLE;
     public static final ModConfigSpec.EnumValue<ValveCharacteristic> VALVE_CHARACTERISTIC;
     public static final ModConfigSpec.BooleanValue AUTO_DETECT_RELAY_HANDLERS;
+    public static final ModConfigSpec.BooleanValue ENABLE_NETWORK_CACHE;
     public static final ModConfigSpec.BooleanValue ENABLE_DYNAMIC_TANK_MASS;
     public static final ModConfigSpec.BooleanValue EXPERIMENTAL_TANK_COG;
     public static final ModConfigSpec.BooleanValue ENABLE_CENTRIFUGE;
@@ -32,6 +33,9 @@ public class PipesNPhysicsConfig {
     public static final ModConfigSpec.IntValue CENTRIFUGE_UNMIX_RATE;
     public static final ModConfigSpec.DoubleValue CENTRIFUGE_UNMIX_MIN_SPEED;
     public static final ModConfigSpec.DoubleValue CENTRIFUGE_MIN_ANGULAR_SPEED;
+    public static final ModConfigSpec.BooleanValue ENABLE_MOMENTUM_HEAD;
+    public static final ModConfigSpec.DoubleValue MOMENTUM_STRENGTH;
+    public static final ModConfigSpec.DoubleValue MOMENTUM_MIN_ACCEL;
     public static final ModConfigSpec.BooleanValue DEBUG_SUBLEVEL_SPIN;
     public static final ModConfigSpec.BooleanValue ENABLE_OPEN_END_WORLD_PLACEMENT;
     public static final ModConfigSpec.BooleanValue ENABLE_SUBLEVEL_CONNECTION_REFRESH;
@@ -125,6 +129,15 @@ public class PipesNPhysicsConfig {
                         "sink_only (receive-only), or ignore_fluid_handler (skip); Create tanks and basins",
                         "are never demoted.")
                 .define("autoDetectRelayHandlers", true);
+        ENABLE_NETWORK_CACHE = server
+                .comment("Reuse each pipe network's discovered graph across ticks instead of re-scanning",
+                        "it from the world every solve. Every edit that can change a network's shape",
+                        "(break/place, pump flips, valve angles, chunk loads) evicts the cached graph,",
+                        "and entries expire after a few ticks anyway so event-less edits (pistons,",
+                        "contraption assembly) are picked up promptly. Also governs the Sable sub-level",
+                        "pipe-scan cache. Turn off only to rule caching out while debugging odd network",
+                        "behavior.")
+                .define("enableNetworkCache", true);
         server.pop();
 
         server.push("sableCompat");
@@ -190,6 +203,23 @@ public class PipesNPhysicsConfig {
                         "independent of how far the tanks sit from the axis, so it reads pure spin. 0 disables",
                         "the gate (any rotation works). 1 rad/s is about 9.5 RPM, so 3.0 is roughly 29 RPM.")
                 .defineInRange("centrifugeMinAngularSpeed", 0.0, 0.0, 1000.0);
+        server.pop();
+
+        server.push("momentum");
+        ENABLE_MOMENTUM_HEAD = server
+                .comment("Slosh fluid on an ACCELERATING contraption: when its linear velocity changes, fluid is",
+                        "pushed opposite the acceleration (toward the back when speeding up, forward when braking),",
+                        "so momentum tilts the fluid surface. The linear counterpart of the centrifuge. Inert at",
+                        "constant velocity and off a physics sub-level.")
+                .define("enableMomentumHead", true);
+        MOMENTUM_STRENGTH = server
+                .comment("Multiplier on the momentum tilt. 1.0 is physically scaled ((a·r)/g); raise for a stronger",
+                        "slosh, lower to soften.")
+                .defineInRange("momentumStrength", 1.0, 0.0, 100.0);
+        MOMENTUM_MIN_ACCEL = server
+                .comment("Minimum acceleration (m/s²) before momentum tilts the fluid at all. 0 uses only the small",
+                        "internal noise floor; raise it if a jittery ship sloshes when you don't want it to.")
+                .defineInRange("momentumMinAccel", 0.0, 0.0, 1000.0);
         server.pop();
 
         server.push("debug");

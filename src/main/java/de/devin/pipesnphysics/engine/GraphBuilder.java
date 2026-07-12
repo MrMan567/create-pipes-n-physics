@@ -237,20 +237,22 @@ public final class GraphBuilder {
                 // path below instead of joining the network as a tank node.
                 if (handler != null && !VanillaFluidTargets.canProvideFluidWithoutCapability(nState)
                         && !HandlerRoles.isIgnored(level, neighbor)) {
-                    boolean firstSight = d.handlers.add(neighbor.immutable());
-                    conns.add(neighbor.immutable());
+                    BlockPos handlerPos = neighbor.immutable();
+                    boolean firstSight = d.handlers.add(handlerPos);
+                    conns.add(handlerPos);
+                    backLink(d, handlerPos, cur);
                     boolean sideAgnostic = level.getCapability(
                             Capabilities.FluidHandler.BLOCK, neighbor, null) != null;
                     // A conduit handler is traversed THROUGH so its own chain is discovered.
                     if (isConduit(level, neighbor)) {
-                        frontier.add(neighbor.immutable());
+                        frontier.add(handlerPos);
                     } else if (!sideAgnostic) {
                         // A SIDE-SPECIFIC handler (no null-side capability): record the face this pipe
                         // meets it on so the endpoint resolves and transfers through that exact tank, and
                         // do NOT couple its other faces — those are DIFFERENT tanks and belong to their own
                         // networks (that is how one block serves a different fluid per side). face is the
                         // handler's face toward this pipe (opposite the pipe's opening direction).
-                        d.handlerFaces.putIfAbsent(neighbor.immutable(), face.getOpposite());
+                        d.handlerFaces.putIfAbsent(handlerPos, face.getOpposite());
                     } else if (firstSight) {
                         // A side-agnostic tank/basin couples EVERY run that touches it — fluid flows
                         // run→tank→run through the shared reservoir — so discover the OTHER runs on its
@@ -280,31 +282,44 @@ public final class GraphBuilder {
                 // An open pipe end facing air, a fluid, or a vanilla fluid target
                 // (cauldron etc.) becomes an OPEN_END boundary node at the space block.
                 if (FluidPropagator.isOpenEnd(level, cur, face)) {
-                    d.openEnds.putIfAbsent(neighbor.immutable(), face.getOpposite());
-                    conns.add(neighbor.immutable());
+                    BlockPos mouthPos = neighbor.immutable();
+                    d.openEnds.putIfAbsent(mouthPos, face.getOpposite());
+                    conns.add(mouthPos);
+                    backLink(d, mouthPos, cur);
                 }
             }
-            d.connections.put(cur, conns);
-        }
-
-        // Ensure each boundary block is recorded with its connection back to the
-        // pipes (or conduits) that found it. Conduits already recorded their own forward
-        // links, so MERGE rather than overwrite: a conduit keeps the neighbours it found
-        // and also gains back-links from whoever pointed at it, so the contraction walk
-        // traverses the chain in both directions.
-        Set<BlockPos> boundaries = new LinkedHashSet<>(d.handlers);
-        boundaries.addAll(d.openEnds.keySet());
-        for (BlockPos boundary : boundaries) {
-            List<BlockPos> conns = new ArrayList<>(d.connections.getOrDefault(boundary, List.of()));
-            for (var entry : d.connections.entrySet()) {
-                if (entry.getValue().contains(boundary) && !conns.contains(entry.getKey())) {
-                    conns.add(entry.getKey());
-                }
-            }
-            d.connections.put(boundary, conns);
+            mergeConnections(d, cur, conns);
         }
 
         return d;
+    }
+
+    /**
+     * Record the reverse link into a boundary (handler or open end) the moment its discoverer links
+     * forward, so the contraction walk traverses the chain in both directions. Boundaries never
+     * enumerate their own faces, so without this a tank or mouth would have no way back to the
+     * pipes that found it. (This replaces a post-BFS pass that rescanned every connection list per
+     * boundary — quadratic on tank-heavy networks.)
+     */
+    private static void backLink(Discovery d, BlockPos boundary, BlockPos from) {
+        List<BlockPos> conns = d.connections.computeIfAbsent(boundary, k -> new ArrayList<>());
+        if (!conns.contains(from)) conns.add(from);
+    }
+
+    /**
+     * Register a cell's discovered connections, MERGING with any back-links already recorded under
+     * it: a conduit (or a handler that is also a pipe) may have received back-links from earlier
+     * cells before its own faces were enumerated, and those must survive.
+     */
+    private static void mergeConnections(Discovery d, BlockPos cur, List<BlockPos> conns) {
+        List<BlockPos> existing = d.connections.get(cur);
+        if (existing == null) {
+            d.connections.put(cur, conns);
+            return;
+        }
+        for (BlockPos c : conns) {
+            if (!existing.contains(c)) existing.add(c);
+        }
     }
 
     /**
@@ -353,9 +368,11 @@ public final class GraphBuilder {
             }
             if (level.getCapability(Capabilities.FluidHandler.BLOCK, neighbor, face.getOpposite()) != null
                     && !HandlerRoles.isIgnored(level, neighbor)) {
-                d.handlers.add(neighbor.immutable());
-                conns.add(neighbor.immutable());
-                if (isConduit(level, neighbor)) frontier.add(neighbor.immutable());
+                BlockPos handlerPos = neighbor.immutable();
+                d.handlers.add(handlerPos);
+                conns.add(handlerPos);
+                backLink(d, handlerPos, cur);
+                if (isConduit(level, neighbor)) frontier.add(handlerPos);
                 continue;
             }
             if (FluidPropagator.getPipe(level, neighbor) != null) {
@@ -363,7 +380,7 @@ public final class GraphBuilder {
                 frontier.add(neighbor.immutable());
             }
         }
-        d.connections.put(cur, conns);
+        mergeConnections(d, cur, conns);
     }
 
     /**

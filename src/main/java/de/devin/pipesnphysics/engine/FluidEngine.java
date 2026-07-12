@@ -83,9 +83,10 @@ public final class FluidEngine {
             if (BoundaryColumn.findHandler(level, transfer.to()) == null) {
                 OpenEndPipes.markSpilled(level, transfer.to());
             } else if (level.getBlockEntity(transfer.to()) instanceof HosePulleyBlockEntity) {
-                // A transfer INTO a pulley pushes fluid out to the world; hold it as a one-way
-                // sink for the cooldown so drain-priority does not reclaim the fresh block.
-                OpenEndPipes.markPulleyDeposited(level, transfer.to());
+                // A transfer INTO a pulley pushes fluid out to the world; pin it as a one-way
+                // output sink so drain-priority does not reclaim the body it just filled, and so
+                // it resumes filling after a supply pause instead of flipping to a drainer.
+                OpenEndPipes.markPulleyOutput(level, transfer.to());
             }
         }
     }

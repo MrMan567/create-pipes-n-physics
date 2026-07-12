@@ -165,7 +165,8 @@ public final class BoundaryColumn {
             BlockPos controllerPos = controller.getBlockPos();
             FluidStack fluid = inventory.getFluid();
             double baseY = FluidTankGeometry.columnBaseY(level, controllerPos, controller)
-                    - CentrifugeField.headOffset(level, controllerPos, level.getGameTime());
+                    - CentrifugeField.headOffset(level, controllerPos, level.getGameTime())
+                    + MomentumField.headOffset(level, controllerPos);
             return new BoundaryColumn(
                     controllerPos, pos,
                     baseY,
@@ -182,19 +183,18 @@ public final class BoundaryColumn {
         // DRAIN-PRIORITY: when its handler advertises a drainable body, it is a brimming,
         // one-way SOURCE (draw a lake, unchanged). Otherwise it is a bottomless, one-way
         // SINK — the network pushes fluid out through it and Create deposits it into the
-        // world (the "can't push out of a pulley" gap). A pulley that JUST deposited is
-        // held as a sink for a cooldown even though its fresh block now reads drainable:
-        // without that latch drain-priority would flip it to a source and suck its own
-        // output straight back (the reclaim oscillation, the same class the open-end spill
-        // latch guards). Create's own counterpart bookkeeping only softens this; the latch
-        // is what actually holds the direction.
+        // world (the "can't push out of a pulley" gap). Once a pulley has deposited it is
+        // pinned in OUTPUT mode and stays a sink even though the body it just filled now
+        // reads drainable: otherwise drain-priority would flip it to a source and suck its
+        // own output straight back (the reclaim oscillation, the same class the open-end
+        // spill latch guards) — and, if the supply pauses, refuse to resume filling when it
+        // returns. The role is sticky (persists across supply pauses, no timer) and clears
+        // only when the pulley is removed; break-and-replace turns it back into a drainer.
         if (isHosePulley(level, pos)) {
             FluidStack drainable = cap.getFluidInTank(0);
             boolean drainableBody = !drainable.isEmpty()
                     && !cap.drain(drainable.copyWithAmount(1), FluidAction.SIMULATE).isEmpty();
-            boolean depositing = OpenEndPipes.pulleyRecentlyDeposited(level, pos,
-                    PipesNPhysicsConfig.OPEN_END_INTAKE_COOLDOWN_TICKS.get());
-            if (drainableBody && !depositing) {
+            if (drainableBody && !OpenEndPipes.isPulleyOutput(level, pos)) {
                 return new BoundaryColumn(pos, pos,
                         SableCompat.getWorldY(level, pos) - 0.5, 1, PULLEY_CAPACITY_MB,
                         drainable.copyWithAmount(PULLEY_CAPACITY_MB),
@@ -224,7 +224,8 @@ public final class BoundaryColumn {
         // Only the generic path can be a side-specific handler (a tank/pulley/relay is side-agnostic),
         // so this is where the access face rides onto the column for the later transfer.
         double baseY = SableCompat.getColumnBaseY(level, pos, 1, 1)
-                - CentrifugeField.headOffset(level, pos, level.getGameTime());
+                - CentrifugeField.headOffset(level, pos, level.getGameTime())
+                + MomentumField.headOffset(level, pos);
         return new BoundaryColumn(pos, pos,
                 baseY, 1, capacity, found, amount, null, false, true,
                 SableCompat.getUpProjectionY(level, pos)).accessFace(face);

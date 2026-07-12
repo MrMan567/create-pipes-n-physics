@@ -5,6 +5,7 @@ import com.simibubi.create.content.fluids.tank.FluidTankBlockEntity;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.engine.EngineTickHandler;
 import de.devin.pipesnphysics.engine.FluidTankGeometry;
+import de.devin.pipesnphysics.engine.GraphCache;
 import de.devin.pipesnphysics.engine.OpenEndPipes;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -42,6 +43,8 @@ public final class NetworkEditHandler {
             // Prune any open-end mouth whose pipe this was, so its buffer is not leaked and a rebuilt
             // mouth starts clean (a no-op for a non-mouth break).
             OpenEndPipes.onPipeRemoved(level, event.getPos());
+            // Drop any sticky pulley output role at this pos, so a rebuilt pulley may drain again.
+            OpenEndPipes.forgetPulley(level, event.getPos());
             wakeAround(level, event.getPos());
         }
     }
@@ -53,15 +56,19 @@ public final class NetworkEditHandler {
 
     /**
      * Wake the network(s) at pos when the edited block is itself part of one — a
-     * pipe/pump, or a fluid handler (tank/basin) joining or leaving it. A block merely
-     * placed or broken NEXT TO a pipe changes no topology and must not re-solve the
-     * network. Marking the six neighbors as well wakes BOTH halves of a run split by
-     * the edit, and reaches the pipe beside a tank that was just placed or removed.
+     * pipe/pump, a fluid handler (tank/basin) joining or leaving it, or a cell a cached
+     * network covers (an open-end mouth is a coverage cell but neither pipe nor handler,
+     * so CAPPING one would otherwise slip past this gate and leave the network solving a
+     * mouth that no longer exists; UNCAPPING stays heartbeat-bounded — the break lands on
+     * a cell the post-cap graph does not cover). A block merely placed or broken
+     * NEXT TO a pipe changes no topology and must not re-solve the network. Marking the
+     * six neighbors as well wakes BOTH halves of a run split by the edit, and reaches
+     * the pipe beside a tank that was just placed or removed.
      */
     private static void wakeAround(Level level, BlockPos pos) {
         if (level.isClientSide()) return;
         if (!PipesNPhysicsConfig.ENABLE_ENGINE.get()) return;
-        if (!isPipe(level, pos) && !hasHandler(level, pos)) return;
+        if (!isPipe(level, pos) && !hasHandler(level, pos) && !GraphCache.isCovered(level, pos)) return;
 
         EngineTickHandler.markChanged(level, pos);
         for (Direction dir : Direction.values()) {

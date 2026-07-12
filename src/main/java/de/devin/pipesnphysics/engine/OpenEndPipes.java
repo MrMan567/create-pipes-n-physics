@@ -12,7 +12,9 @@ import net.neoforged.neoforge.fluids.FluidStack;
 import net.neoforged.neoforge.fluids.capability.IFluidHandler;
 
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Holds the live {@link OpenEndedPipe} behind each OPEN_END node, keyed by the
@@ -34,13 +36,15 @@ public final class OpenEndPipes {
     private static final Map<ResourceKey<Level>, Map<BlockPos, Long>> SPILL_TICKS = new HashMap<>();
 
     /**
-     * Game-time of the last deposit out of each hose pulley (keyed by the pulley pos). A pulley
-     * that just pushed fluid into the world reads its own fresh block as a drainable body the next
-     * tick; under drain-priority that would flip it back to a source and reclaim its output. While
-     * a pulley is recently-deposited it is held as a one-way sink instead — see
-     * {@code BoundaryColumn.resolve}. Same latch idea as {@link #recentlySpilled}, one node down.
+     * Hose pulleys currently in OUTPUT mode (keyed by pulley pos). A pulley that pushes fluid into
+     * the world fills a body it then reads as drainable; under drain-priority that would flip it back
+     * to a source and reclaim its output, so an output pulley is pinned as a one-way sink instead —
+     * see {@code BoundaryColumn.resolve}. This is STICKY, not a short cooldown: a supply pause longer
+     * than any timer must not turn an output pulley into a drainer (the "stops filling after supply
+     * resumes" bug), so the role persists until the pulley is removed ({@link #forgetPulley}) or the
+     * server stops. Same anti-reclaim idea as {@link #recentlySpilled}, one node down.
      */
-    private static final Map<ResourceKey<Level>, Map<BlockPos, Long>> PULLEY_DEPOSIT_TICKS = new HashMap<>();
+    private static final Map<ResourceKey<Level>, Set<BlockPos>> PULLEY_OUTPUT = new HashMap<>();
 
     private OpenEndPipes() {}
 
@@ -64,21 +68,21 @@ public final class OpenEndPipes {
         return false;
     }
 
-    /** Record that a hose pulley just took fluid to deposit into the world (called when a fill executes). */
-    public static void markPulleyDeposited(Level level, BlockPos pulleyPos) {
-        PULLEY_DEPOSIT_TICKS.computeIfAbsent(level.dimension(), k -> new HashMap<>())
-                .put(pulleyPos.immutable(), level.getGameTime());
+    /** Pin a hose pulley into output mode (called when a deposit-out-to-world transfer executes). */
+    public static void markPulleyOutput(Level level, BlockPos pulleyPos) {
+        PULLEY_OUTPUT.computeIfAbsent(level.dimension(), k -> new HashSet<>()).add(pulleyPos.immutable());
     }
 
-    /** Whether this pulley deposited within the last {@code cooldown} ticks (stale entries pruned on read). */
-    public static boolean pulleyRecentlyDeposited(Level level, BlockPos pulleyPos, int cooldown) {
-        Map<BlockPos, Long> ticks = PULLEY_DEPOSIT_TICKS.get(level.dimension());
-        if (ticks == null) return false;
-        Long when = ticks.get(pulleyPos);
-        if (when == null) return false;
-        if (level.getGameTime() - when < cooldown) return true;
-        ticks.remove(pulleyPos);
-        return false;
+    /** Whether this pulley is in output mode (has deposited and not since been removed). */
+    public static boolean isPulleyOutput(Level level, BlockPos pulleyPos) {
+        Set<BlockPos> output = PULLEY_OUTPUT.get(level.dimension());
+        return output != null && output.contains(pulleyPos);
+    }
+
+    /** Forget a pulley's output role (called when it is broken), so a rebuilt pulley may drain again. */
+    public static void forgetPulley(Level level, BlockPos pulleyPos) {
+        Set<BlockPos> output = PULLEY_OUTPUT.get(level.dimension());
+        if (output != null) output.remove(pulleyPos);
     }
 
     /** Get or create the handler for an open end discovered by the graph builder. */
@@ -186,6 +190,6 @@ public final class OpenEndPipes {
     public static void clear() {
         CACHE.clear();
         SPILL_TICKS.clear();
-        PULLEY_DEPOSIT_TICKS.clear();
+        PULLEY_OUTPUT.clear();
     }
 }

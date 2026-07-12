@@ -28,13 +28,27 @@ import java.util.Set;
  * this pipe. It is the number that makes towers, pumps, and suction readable.
  */
 public final class PipeProbe {
+    /**
+     * How old the engine's own per-tick solution may be and still answer a probe. Matches the
+     * server-side request throttle, so a probe never reads staler data than its own cadence; an
+     * awake network re-solves every tick and always serves fresh, a sleeping one falls back to a
+     * dedicated solve exactly as before.
+     */
+    private static final int SOLUTION_MAX_AGE_TICKS = 4;
+
     private PipeProbe() {}
 
     public static PipeStatusPayload probe(ServerLevel level, BlockPos pos) {
-        Graph graph = GraphBuilder.build(level, pos);
-        if (graph.isEmpty()) return PipeStatusPayload.notConnected(pos);
-
-        Solution solution = FlowSolver.solve(level, graph);
+        long now = level.getGameTime();
+        Graph graph = GraphCache.get(level, pos, now);
+        Solution solution = graph == null ? null
+                : GraphCache.recentSolution(level, graph, now, SOLUTION_MAX_AGE_TICKS);
+        if (graph == null) {
+            graph = GraphBuilder.build(level, pos);
+            if (graph.isEmpty()) return PipeStatusPayload.notConnected(pos);
+            GraphCache.store(level, graph, now);
+        }
+        if (solution == null) solution = FlowSolver.solve(level, graph);
 
         for (Edge edge : graph.edges()) {
             int cell = edge.pipes().indexOf(pos);

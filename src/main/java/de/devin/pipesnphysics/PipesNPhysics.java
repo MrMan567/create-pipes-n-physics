@@ -6,6 +6,7 @@ import com.simibubi.create.foundation.item.KineticStats;
 import com.simibubi.create.foundation.item.TooltipModifier;
 import de.devin.pipesnphysics.compat.SableCompat;
 import de.devin.pipesnphysics.engine.EngineTickHandler;
+import de.devin.pipesnphysics.engine.GraphCache;
 import de.devin.pipesnphysics.engine.OpenEndPipes;
 import de.devin.pipesnphysics.engine.RelayDetector;
 import de.devin.pipesnphysics.engine.command.PipeGraphCommand;
@@ -15,16 +16,20 @@ import de.devin.pipesnphysics.handler.PipeSwapHandler;
 import de.devin.pipesnphysics.recipe.CentrifugeRecipes;
 import net.createmod.catnip.lang.FontHelper;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.server.MinecraftServer;
 import net.neoforged.bus.api.IEventBus;
 import net.neoforged.fml.ModContainer;
 import net.neoforged.fml.common.Mod;
 import net.neoforged.fml.config.ModConfig;
+import net.neoforged.fml.event.config.ModConfigEvent;
 import net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent;
 import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.event.AddReloadListenerEvent;
+import net.neoforged.neoforge.event.TagsUpdatedEvent;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
 import net.neoforged.neoforge.event.server.ServerStoppedEvent;
 import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
+import net.neoforged.neoforge.server.ServerLifecycleHooks;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -65,6 +70,17 @@ public class PipesNPhysics {
                 PipeGraphCommand.register(event.getDispatcher()));
         NeoForge.EVENT_BUS.addListener((AddReloadListenerEvent event) ->
                 event.addListener(new CentrifugeRecipes()));
+        // Block tags (fluid_conduits, ignore_fluid_handler) and the valve-throttle toggle are
+        // build-time inputs of the network graph, so a tag or server-config reload flushes the
+        // cache. Both events can fire OFF the server thread (tag sync on the client thread in
+        // singleplayer, config reload on the file-watcher thread), so hop to it — the cache's maps
+        // are server-thread only.
+        NeoForge.EVENT_BUS.addListener((TagsUpdatedEvent event) -> {
+            if (event.getUpdateCause() == TagsUpdatedEvent.UpdateCause.SERVER_DATA_LOAD) flushGraphCache();
+        });
+        modBus.addListener((ModConfigEvent.Reloading event) -> {
+            if (event.getConfig().getSpec() == PipesNPhysicsConfig.SERVER_SPEC) flushGraphCache();
+        });
         NeoForge.EVENT_BUS.addListener((ServerStoppedEvent event) -> {
             SableCompat.clearCaches();
             EngineTickHandler.clear();
@@ -76,6 +92,12 @@ public class PipesNPhysics {
 
     public static ResourceLocation asResource(String path) {
         return ResourceLocation.fromNamespaceAndPath(ID, path);
+    }
+
+    /** Flush the graph cache on the server thread; a no-op before a server exists (cache empty). */
+    private static void flushGraphCache() {
+        MinecraftServer server = ServerLifecycleHooks.getCurrentServer();
+        if (server != null) server.execute(GraphCache::clear);
     }
 
     private void onCommonSetup(FMLCommonSetupEvent event) {
