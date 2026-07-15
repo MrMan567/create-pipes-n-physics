@@ -5,6 +5,7 @@ import com.simibubi.create.foundation.item.ItemDescription;
 import com.simibubi.create.foundation.item.KineticStats;
 import com.simibubi.create.foundation.item.TooltipModifier;
 import de.devin.pipesnphysics.compat.SableCompat;
+import de.devin.pipesnphysics.display.PnpDisplaySources;
 import de.devin.pipesnphysics.engine.EngineTickHandler;
 import de.devin.pipesnphysics.engine.GraphCache;
 import de.devin.pipesnphysics.engine.OpenEndPipes;
@@ -58,6 +59,7 @@ public class PipesNPhysics {
 
         modBus.addListener(this::onCommonSetup);
         modBus.addListener(EnginePackets::register);
+        PnpDisplaySources.register(modBus);
         // Dev/test-only: a side-specific fluid handler so the per-face endpoint path is GameTestable.
         if (!net.neoforged.fml.loading.FMLEnvironment.production) {
             modBus.addListener(TestSideHandlers::register);
@@ -102,5 +104,6 @@ public class PipesNPhysics {
 
     private void onCommonSetup(FMLCommonSetupEvent event) {
         LOGGER.info("Common setup...");
+        event.enqueueWork(PnpDisplaySources::associate);
     }
 }

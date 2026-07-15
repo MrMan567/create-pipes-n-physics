@@ -577,7 +577,14 @@ public final class CreatePipeRendering {
 
             FluidStack rep = solution.edgeFluids().getOrDefault(edge.index(),
                     solution.restFluids().getOrDefault(edge.index(), FluidStack.EMPTY));
-            if (!rep.isEmpty() && rep.getFluid().getFluidType().isLighterThanAir()) continue;
+            if (!rep.isEmpty() && rep.getFluid().getFluidType().isLighterThanAir()) {
+                // A gas has no partial waterline — it fills the pipe wherever it reaches. Stamp those
+                // cells FULL so the custom renderer OWNS the gas, instead of leaving it to Create (which,
+                // with the level mixins hiding stamped cells, left a gas run rendering nothing once it
+                // settled). rawA/rawB are guaranteed non-null past the bail above.
+                stampGasEdge(level, graph, edge, rep, rawA, rawB, levelCells);
+                continue;
+            }
             int index = edge.index();
             EdgeFlow.Direction dir = solution.edgeFlows().get(index).direction();
             boolean flowFromA = dir == EdgeFlow.Direction.A_TO_B;
@@ -716,6 +723,43 @@ public final class CreatePipeRendering {
                 }
                 if (changed) pipe.blockEntity.notifyUpdate();
             }
+        }
+    }
+
+    /**
+     * Stamp a GAS edge for the custom renderer. A gas is the MIRROR of a liquid: it pools at the TOP, so
+     * instead of a waterline it has a lower boundary ({@link #gasFloorLocal}) and the renderer fills the
+     * pipe from that floor UP — a gas layer that sits high. The stamped fraction is the floor's cell-local
+     * elevation (the client draws {@code [floor, top]} once it sees the fluid is lighter-than-air, the
+     * inverse of a liquid's {@code [bottom, surface]}). STILL ({@code flowDir = -1}; a gas simply fills, no
+     * travelling front). Uses the RAW node heads (gas heads are pressures, not a display-surface anchor).
+     * This makes the level renderer OWN gas cells instead of the leave-it-to-Create fallback, which drew
+     * nothing once a gas run settled. A full gas fills the whole bore; a partial gas shows only at the top.
+     */
+    private static void stampGasEdge(Level level, Graph graph, Edge edge, FluidStack fluid,
+                                     double headA, double headB, Set<BlockPos> levelCells) {
+        for (int i = 0; i < edge.pipes().size(); i++) {
+            double floorLocal = gasFloorLocal(level, graph, edge, i, headA, headB);
+            if (floorLocal > 1 + SUBMERSION_EPS) continue; // floor above the cell top: no gas reaches it
+            BlockPos cell = edge.pipes().get(i);
+            FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, cell);
+            if (!(pipe instanceof PipeLevelData holder)) continue;
+            levelCells.add(cell);
+            boolean changed = false;
+            int data = encodeLevel(Math.clamp(floorLocal, 0.0, 1.0), -1);
+            if (holder.pipesnphysics$getLevelData() != data) {
+                holder.pipesnphysics$setLevelData(data);
+                changed = true;
+            }
+            if (holder.pipesnphysics$getFrontData() != 0) {
+                holder.pipesnphysics$setFrontData(0);
+                changed = true;
+            }
+            if (!FluidStack.isSameFluidSameComponents(holder.pipesnphysics$getRenderFluid(), fluid)) {
+                holder.pipesnphysics$setRenderFluid(fluid.copyWithAmount(1));
+                changed = true;
+            }
+            if (changed) pipe.blockEntity.notifyUpdate();
         }
     }
 
@@ -1262,6 +1306,29 @@ public final class CreatePipeRendering {
     }
 
     /**
+     * The gas's lower boundary at cell {@code i} as a CELL-LOCAL elevation (0 = cell bottom face, 1 =
+     * cell top face) — the mirror of a liquid surface. A gas fills the pipe ABOVE this floor, so the
+     * level renderer fills [floor, top] where a liquid fills [bottom, surface]. Per reservoir column the
+     * world-Y floor is {@code columnHeight − gasHead} ({@code gasHead = fillHeight − baseY}; a pump/open
+     * end holds no gas, so imposes no floor), interpolated along the run. Returns 0 for a conduit-only
+     * run (no reservoir floor → fill the whole pipe); {@code > 1} means the floor is above the cell, so
+     * no gas reaches it.
+     */
+    private static double gasFloorLocal(Level level, Graph graph, Edge edge, int i,
+                                        double headA, double headB) {
+        double along = (i + 1.0) / (edge.length() + 1);
+        Double floorA = graph.node(edge.a()).isHandler()
+                ? columnHeight(level, graph.node(edge.a()).pos()) - headA : null;
+        Double floorB = graph.node(edge.b()).isHandler()
+                ? columnHeight(level, graph.node(edge.b()).pos()) - headB : null;
+        if (floorA == null && floorB == null) return 0.0; // conduit-only run: fill all
+        double floor = floorA != null && floorB != null
+                ? floorA + (floorB - floorA) * along
+                : floorA != null ? floorA : floorB;
+        return floor - (SableCompat.getWorldY(level, edge.pipes().get(i)) - 0.5);
+    }
+
+    /**
      * Whether a RESTING (non-flowing) edge holds fluid at cell {@code i}: a liquid cell is wet
      * once it sits below the connected fluid surface; a gas cell once it sits above the gas's
      * lower boundary (the mirror test). An open end is a VENT pinned at its mouth (a spill/intake
@@ -1276,18 +1343,9 @@ public final class CreatePipeRendering {
         BlockPos cell = edge.pipes().get(i);
         double frac = (i + 1.0) / (edge.length() + 1);
         if (gas) {
-            // A gas pools at the TOP and won't sink, so a cell holds it only if it is ABOVE the
-            // gas's lower boundary. Per reservoir column that boundary is `height − gasHead`
-            // (gasHead = fillHeight − baseY); a pump/open end holds no gas, so it imposes no floor.
-            Double floorA = graph.node(edge.a()).isHandler()
-                    ? columnHeight(level, graph.node(edge.a()).pos()) - headA : null;
-            Double floorB = graph.node(edge.b()).isHandler()
-                    ? columnHeight(level, graph.node(edge.b()).pos()) - headB : null;
-            if (floorA == null && floorB == null) return true; // conduit-only run: fill all
-            double floor = floorA != null && floorB != null
-                    ? floorA + (floorB - floorA) * frac
-                    : floorA != null ? floorA : floorB;
-            return SableCompat.getWorldY(level, cell) + 0.5 + SUBMERSION_EPS >= floor;
+            // A gas pools at the TOP and won't sink, so a cell holds it only if its TOP face is above
+            // the gas's lower boundary — i.e. the boundary as a cell-local elevation is <= 1.
+            return gasFloorLocal(level, graph, edge, i, headA, headB) <= 1 + SUBMERSION_EPS;
         }
         boolean aOpen = graph.node(edge.a()).isOpenEnd();
         boolean bOpen = graph.node(edge.b()).isOpenEnd();

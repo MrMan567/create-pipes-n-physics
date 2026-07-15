@@ -22,6 +22,11 @@ public final class FluidHandlerApi {
         ROLES.put(block, role);
     }
 
+    /** Remove a block's code role, falling it back to tags / automatic detection. */
+    public static void clearRole(Block block) {
+        ROLES.remove(block);
+    }
+
     /** The code-registered role for a block, or null if none — the engine merges this under the tags. */
     public static FluidHandlerRole role(Block block) {
         return ROLES.get(block);

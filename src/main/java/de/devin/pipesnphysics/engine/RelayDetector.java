@@ -54,6 +54,11 @@ public final class RelayDetector {
         return !relays.isEmpty() && relays.contains(BuiltInRegistries.BLOCK.getKey(block));
     }
 
+    /** How many spontaneous-gain strikes a block type has accrued toward relay demotion; 0 once learned. */
+    public static int strikeCount(Block block) {
+        return strikes.getOrDefault(BuiltInRegistries.BLOCK.getKey(block), 0);
+    }
+
     /**
      * Record a handler's live contents at the start of a network tick (called from the solver's column
      * collection). Compares against last tick's reading minus what WE filled in between: a positive

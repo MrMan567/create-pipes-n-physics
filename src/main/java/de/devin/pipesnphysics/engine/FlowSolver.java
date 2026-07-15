@@ -669,6 +669,10 @@ public final class FlowSolver {
         int driveNode = -1;
         double driveHead = 0;
         double driveInternalG = 0;
+        // Whether a pump on this edge draws (suction) FROM the far column — it then lifts fluid
+        // out of that tank regardless of level when pumpDrainAnyLevel is on (see the lip check).
+        boolean pumpPullsA = false;
+        boolean pumpPullsB = false;
 
         for (int side = 0; side < 2; side++) {
             int nodeIndex = side == 0 ? edge.a() : edge.b();
@@ -695,6 +699,7 @@ public final class FlowSolver {
                 driveInternalG = pump.internalConductance();
             } else if (toward.equals(pumpNode.pos().relative(pump.pushSide().getOpposite()))) {
                 allowedSign = combineSign(allowedSign, -outSign);
+                if (side == 0) pumpPullsB = true; else pumpPullsA = true;
             } else {
                 blockedEdges.add(edge.index());
                 return;
@@ -747,17 +752,26 @@ public final class FlowSolver {
         if (allowedSign == Integer.MIN_VALUE) return;
 
         if (!gas) {
+            // A pump actively drawing from a tank can lift its fluid out of a connection above the
+            // waterline (a dip tube), so pumpDrainAnyLevel exempts that column from the draw lip: no
+            // give-only wall here, and a bottomless lip (−inf) below so lipDrainCap never settles the
+            // tank at the opening. The suction limit (crest gate) still bounds the lift.
+            boolean drainAny = PipesNPhysicsConfig.PUMP_DRAIN_ANY_LEVEL.get();
             if (columnA != null) {
                 BlockPos opening = PipeGeometry.adjacentCell(graph, edge, edge.a());
                 lipA = SableCompat.getWorldY(level, opening) - 0.5;
-                if (!canDrawFrom(level, graph.node(edge.a()), columnA, opening, lipA)) {
+                if (drainAny && pumpPullsA) {
+                    lipA = Double.NEGATIVE_INFINITY;
+                } else if (!canDrawFrom(level, graph.node(edge.a()), columnA, opening, lipA)) {
                     allowedSign = combineSign(allowedSign, -1);
                 }
             }
             if (columnB != null) {
                 BlockPos opening = PipeGeometry.adjacentCell(graph, edge, edge.b());
                 lipB = SableCompat.getWorldY(level, opening) - 0.5;
-                if (!canDrawFrom(level, graph.node(edge.b()), columnB, opening, lipB)) {
+                if (drainAny && pumpPullsB) {
+                    lipB = Double.NEGATIVE_INFINITY;
+                } else if (!canDrawFrom(level, graph.node(edge.b()), columnB, opening, lipB)) {
                     allowedSign = combineSign(allowedSign, +1);
                 }
             }

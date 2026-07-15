@@ -21,6 +21,8 @@ import de.devin.pipesnphysics.engine.EdgeFlow;
 import de.devin.pipesnphysics.engine.EngineTickHandler;
 import de.devin.pipesnphysics.engine.FlowSolver;
 import de.devin.pipesnphysics.engine.Graph;
+import de.devin.pipesnphysics.api.FluidHandlerApi;
+import de.devin.pipesnphysics.api.FluidHandlerRole;
 import de.devin.pipesnphysics.engine.GraphBuilder;
 import de.devin.pipesnphysics.engine.HandlerRoles;
 import de.devin.pipesnphysics.engine.BoundaryColumn;
@@ -31,6 +33,8 @@ import de.devin.pipesnphysics.engine.PipeProbe;
 import de.devin.pipesnphysics.engine.Solution;
 import de.devin.pipesnphysics.engine.ValveThrottle;
 import de.devin.pipesnphysics.engine.net.PipeStatusPayload;
+import de.devin.pipesnphysics.display.PipeDisplayMetric;
+import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.handler.NetworkEditHandler;
 import de.devin.pipesnphysics.mixin.FluidTankAccessor;
 import de.devin.pipesnphysics.mixin.PipeConnectionAccessor;
@@ -50,6 +54,8 @@ import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.material.Fluid;
 import net.minecraft.world.level.material.Fluids;
+import net.minecraft.server.level.ServerLevel;
+import net.createmod.catnip.lang.LangNumberFormat;
 import net.neoforged.neoforge.capabilities.Capabilities;
 import net.neoforged.neoforge.fluids.FluidStack;
 import net.neoforged.neoforge.fluids.capability.IFluidHandler;
@@ -4160,6 +4166,101 @@ public class PipesNPhysicsGameTests {
     }
 
     /**
+     * A block that DOES expose a null-side handler but hands back a DIFFERENT handler on one face is still
+     * side-specific — the shape of TFMG's coke oven (creosote on the null side + non-top faces, CO2 on the
+     * top). The old {@code sideAgnostic = (null cap exists)} test coupled it and read the null side, so a
+     * pump on top of a coke oven saw the empty creosote tank and never pulled the CO2. With the identity
+     * discriminator the top pipe records {@code accessFace = UP} and the node resolves the SECONDARY (CO2)
+     * tank, not the null-side PRIMARY (creosote) one. The dev-only {@link TestSideHandlers} wet-sponge
+     * reproduces the exact capability shape.
+     */
+    @GameTest(template = "piping/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 100, batch = "relayDetector")
+    public static void perFaceHandlerResolvesTopDespiteNullCap(GameTestHelper helper) {
+        TestSideHandlers.clear();
+        Level level = helper.getLevel();
+        BlockPos rel = new BlockPos(1, 2, 1);
+        BlockPos pos = helper.absolutePos(rel);
+        helper.setBlock(rel, Blocks.WET_SPONGE);
+        TestSideHandlers.primaryAt(pos).fill(     // creosote — the null side + non-top faces
+                new FluidStack(Fluids.WATER, 8000), IFluidHandler.FluidAction.EXECUTE);
+        TestSideHandlers.secondaryAt(pos).fill(   // CO2 — the top face only
+                new FluidStack(Fluids.LAVA, 8000), IFluidHandler.FluidAction.EXECUTE);
+        if (level.getCapability(Capabilities.FluidHandler.BLOCK, pos, null) == null) {
+            helper.fail("test fixture must expose a null-side handler (the coke-oven shape)");
+            return;
+        }
+        helper.setBlock(rel.above(), AllBlocks.FLUID_PIPE.get());
+        Graph graph = GraphBuilder.build(level, helper.absolutePos(rel.above()));
+        Node node = graph.nodes().stream()
+                .filter(n -> n.isHandler() && n.pos().equals(pos)).findFirst().orElse(null);
+        if (node == null) {
+            helper.fail("coke-oven-shaped block was not discovered as a handler node from the top pipe");
+            return;
+        }
+        if (node.accessFace() != Direction.UP) {
+            helper.fail("top pipe recorded accessFace " + node.accessFace()
+                    + " (expected UP — the block was coupled via its null side instead of read per-face)");
+            return;
+        }
+        BoundaryColumn column = BoundaryColumn.resolve(level, node);
+        if (column == null || column.contents().getFluid() != Fluids.LAVA) {
+            helper.fail("top face resolved to " + (column == null ? "null column" : column.contents().getFluid())
+                    + " — expected the SECONDARY (top) tank, not the null-side PRIMARY");
+            return;
+        }
+        TestSideHandlers.clear();
+        helper.succeed();
+    }
+
+    /**
+     * A side-specific block that is ALSO a relay (a machine that PRODUCES a fluid on one face and is
+     * demoted to a bottomless one-way source — TFMG's coke oven, learned by the {@link RelayDetector}
+     * because it spontaneously gains CO2) must still drain through its ACCESS FACE. {@code relayEndpoint}
+     * used to build its column without the face, so the contents resolved through the correct handler but
+     * {@code handler(level)} later hit the empty null side — solved flow, no transfer, a SOURCE_DRY stall
+     * ("can pull the fluid but can't push it anywhere"). Here the WET_SPONGE fixture (LAVA on top,
+     * WATER on null+sides) is forced to the relay role: the column must resolve the top LAVA AND keep
+     * {@code accessFace=UP} so a real drain through {@code handler(level)} yields LAVA, not the null WATER.
+     */
+    @GameTest(template = "piping/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 100, batch = "relayDetector")
+    public static void relaySideSpecificDrainsThroughAccessFace(GameTestHelper helper) {
+        TestSideHandlers.clear();
+        FluidHandlerApi.setRole(Blocks.WET_SPONGE, FluidHandlerRole.RELAY);
+        try {
+            Level level = helper.getLevel();
+            BlockPos rel = new BlockPos(1, 2, 1);
+            BlockPos pos = helper.absolutePos(rel);
+            helper.setBlock(rel, Blocks.WET_SPONGE);
+            TestSideHandlers.primaryAt(pos).fill(     // null side + non-top faces
+                    new FluidStack(Fluids.WATER, 8000), IFluidHandler.FluidAction.EXECUTE);
+            TestSideHandlers.secondaryAt(pos).fill(   // top face — the produced fluid
+                    new FluidStack(Fluids.LAVA, 8000), IFluidHandler.FluidAction.EXECUTE);
+            Node node = new Node(0, pos, Node.Kind.HANDLER, pos.getY() + 0.5, null, null, Direction.UP);
+            BoundaryColumn column = BoundaryColumn.resolve(level, node);
+            if (column == null || column.contents().getFluid() != Fluids.LAVA) {
+                helper.fail("relay column did not resolve the top (secondary) fluid: "
+                        + (column == null ? "null" : column.contents().getFluid()));
+                return;
+            }
+            if (column.accessFace() != Direction.UP) {
+                helper.fail("relay column dropped its access face (was " + column.accessFace() + ")");
+                return;
+            }
+            FluidStack drained = BoundaryColumn.drainMatching(column.handler(level),
+                    new FluidStack(Fluids.LAVA, 1000), IFluidHandler.FluidAction.SIMULATE);
+            if (drained.isEmpty() || drained.getFluid() != Fluids.LAVA) {
+                helper.fail("relay handler(level) drained the null side, not the top — the SOURCE_DRY bug ("
+                        + (drained.isEmpty() ? "empty" : drained.getFluid()) + ")");
+                return;
+            }
+        } finally {
+            FluidHandlerApi.clearRole(Blocks.WET_SPONGE);
+            TestSideHandlers.clear();
+        }
+        helper.succeed();
+    }
+
+    /**
      * Create's own tanks are exempt: one legitimately fed by a second network from another side reads
      * as an external gain, so the detector must never demote a real reservoir type.
      */
@@ -4180,5 +4281,58 @@ public class PipesNPhysicsGameTests {
         }
         RelayDetector.clear();
         helper.succeed();
+    }
+
+    /**
+     * A display link reads a pipe network cell through the same server-side {@link PipeProbe} the
+     * goggle uses, and every metric folds that into one non-empty line. Locks the source wiring:
+     * probing a spun-up pump yields the pump-curve cap/lift, FLOW reflects the probed rate, and no
+     * metric (pipe or pump) throws or renders blank. The link BE / GUI are Create's — verify those
+     * visually in-game.
+     */
+    @GameTest(template = "piping/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 100)
+    public static void displaySourcesReportPipeAndPumpMetrics(GameTestHelper helper) {
+        BlockPos source = new BlockPos(0, 1, 1);
+        fill(helper, source, 8000);
+        helper.runAfterDelay(20, () -> { // let the kinetics spin the pump up
+            ServerLevel level = helper.getLevel();
+            BlockPos pumpRel = null, pipeRel = null;
+            for (int x = 0; x < 6; x++)
+                for (int y = 0; y < 4; y++)
+                    for (int z = 0; z < 4; z++) {
+                        BlockPos rel = new BlockPos(x, y, z);
+                        BlockState st = helper.getBlockState(rel);
+                        if (st.getBlock() instanceof PumpBlock) pumpRel = rel;
+                        else if (st.is(AllBlocks.FLUID_PIPE.get())) pipeRel = rel;
+                    }
+            if (pumpRel == null || pipeRel == null) { helper.fail("template has no pump/pipe"); return; }
+
+            BlockPos pumpAbs = helper.absolutePos(pumpRel);
+            float speed = level.getBlockEntity(pumpAbs) instanceof KineticBlockEntity k ? Math.abs(k.getSpeed()) : 0f;
+            if (speed <= 0.01f) { helper.fail("pump is not spinning"); return; }
+            double cap = speed * PipesNPhysicsConfig.PUMP_FLOW_PER_RPM.get();
+            double canLift = speed * PipesNPhysicsConfig.PUMP_HEAD_PER_RPM.get();
+
+            PipeStatusPayload pumpData = PipeProbe.probe(level, pumpAbs);
+            PipeDisplayMetric.Readout pump = new PipeDisplayMetric.Readout(pumpData, cap, canLift);
+            String capText = PipeDisplayMetric.CAPACITY.format(pump).getString();
+            if (cap <= 0 || !capText.startsWith(LangNumberFormat.format(cap))) {
+                helper.fail("pump capacity metric did not reflect the curve cap: " + capText);
+                return;
+            }
+            if (!PipeDisplayMetric.FLOW.format(pump).getString().startsWith(LangNumberFormat.format(pumpData.mbPerTick()))) {
+                helper.fail("pump flow metric did not reflect the probed rate");
+                return;
+            }
+            for (PipeDisplayMetric m : PipeDisplayMetric.PUMP_METRICS)
+                if (m.format(pump).getString().isEmpty()) { helper.fail("blank pump metric: " + m); return; }
+
+            PipeStatusPayload pipeData = PipeProbe.probe(level, helper.absolutePos(pipeRel));
+            PipeDisplayMetric.Readout pipe = new PipeDisplayMetric.Readout(pipeData, 0, 0);
+            for (PipeDisplayMetric m : PipeDisplayMetric.PIPE_METRICS)
+                if (m.format(pipe).getString().isEmpty()) { helper.fail("blank pipe metric: " + m); return; }
+
+            helper.succeed();
+        });
     }
 }

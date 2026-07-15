@@ -18,6 +18,7 @@ public class PipesNPhysicsConfig {
     public static final ModConfigSpec.DoubleValue PUMP_FLOW_PER_RPM;
     public static final ModConfigSpec.IntValue MAX_FLOW_PER_ENDPOINT;
     public static final ModConfigSpec.DoubleValue SUCTION_LIMIT;
+    public static final ModConfigSpec.BooleanValue PUMP_DRAIN_ANY_LEVEL;
     public static final ModConfigSpec.BooleanValue ENABLE_OPEN_END_INTAKE;
     public static final ModConfigSpec.IntValue OPEN_END_INTAKE_COOLDOWN_TICKS;
     public static final ModConfigSpec.BooleanValue FORCE_OPEN_END_OUTPUT;
@@ -84,6 +85,13 @@ public class PipesNPhysicsConfig {
                 .comment("How many blocks the head at a pipe's highest point may sit below that point",
                         "before the liquid column breaks (the siphon / cavitation limit).")
                 .defineInRange("suctionLimitBlocks", 8.0, 0.0, 256.0);
+        PUMP_DRAIN_ANY_LEVEL = server
+                .comment("Let a pump drain a tank from a connection ABOVE the fluid's surface — i.e. pull a",
+                        "tank down past a side or top pipe instead of stopping once the level drops below it",
+                        "(as if the pump had a dip tube reaching the bottom). Only applies where a pump is",
+                        "actively drawing from the tank; plain gravity flow still can't leave an opening above",
+                        "the waterline. The suction limit above still bounds how far the pump can lift.")
+                .define("pumpDrainAnyLevel", false);
         ENABLE_OPEN_END_INTAKE = server
                 .comment("Let an open pipe end draw fluid IN from the world when the network is under",
                         "suction (its head sits below the pipe mouth): a self-regenerating source (a",

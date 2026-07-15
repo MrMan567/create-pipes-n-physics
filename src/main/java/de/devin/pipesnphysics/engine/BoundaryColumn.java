@@ -155,7 +155,7 @@ public final class BoundaryColumn {
         // to drain it (the equalization stall). Resolve it drain-priority and bottomless instead — exactly
         // like a hose pulley — so it is a one-way SOURCE while it holds fluid and a one-way SINK while
         // empty. See HandlerRoles#isRelayEndpoint.
-        if (HandlerRoles.isRelayEndpoint(level, pos)) return relayEndpoint(level, pos, cap);
+        if (HandlerRoles.isRelayEndpoint(level, pos)) return relayEndpoint(level, pos, face, cap);
 
         if (level.getBlockEntity(pos) instanceof FluidTankBlockEntity tankBe) {
             FluidTankBlockEntity controller = tankBe.getControllerBE();
@@ -244,15 +244,20 @@ public final class BoundaryColumn {
      * engine drains a receiving connector and fills a sending one on demand, and the real per-tick
      * volume is clamped later by the handler's own drain/fill (which enforces the mod's pairing gate).
      */
-    private static BoundaryColumn relayEndpoint(Level level, BlockPos pos, IFluidHandler cap) {
+    private static BoundaryColumn relayEndpoint(Level level, BlockPos pos, Direction face, IFluidHandler cap) {
         double baseY = SableCompat.getWorldY(level, pos) - 0.5;
         FluidStack drainable = cap.drain(Integer.MAX_VALUE, FluidAction.SIMULATE);
+        // The access face MUST ride onto the column: a relay can be side-specific (a block that produces a
+        // fluid on ONE face — a coke oven's CO2 on top — while its null side exposes a different, empty tank).
+        // Without it, the column reads the right fluid through `cap` here but `handler(level)` later resolves
+        // the null side and drains nothing (a SOURCE_DRY stall — solved flow, no transfer).
         if (!drainable.isEmpty()) {
             return new BoundaryColumn(pos, pos, baseY, 1, PULLEY_CAPACITY_MB,
-                    drainable.copyWithAmount(PULLEY_CAPACITY_MB), PULLEY_CAPACITY_MB, null, true, false, 1.0);
+                    drainable.copyWithAmount(PULLEY_CAPACITY_MB), PULLEY_CAPACITY_MB, null, true, false, 1.0)
+                    .accessFace(face);
         }
         return new BoundaryColumn(pos, pos, baseY, 1, PULLEY_CAPACITY_MB,
-                FluidStack.EMPTY, 0, null, false, false, 1.0);
+                FluidStack.EMPTY, 0, null, false, false, 1.0).accessFace(face);
     }
 
     /**

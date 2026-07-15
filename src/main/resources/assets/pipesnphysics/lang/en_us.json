@@ -54,5 +54,42 @@
   "pipesnphysics.direction.east": "→ East",
   "pipesnphysics.direction.west": "→ West",
   "pipesnphysics.direction.up": "→ Up",
-  "pipesnphysics.direction.down": "→ Down"
+  "pipesnphysics.direction.down": "→ Down",
+
+  "pipesnphysics.display_source.pipe": "Pipe Flow",
+  "pipesnphysics.display_source.pump": "Pump Output",
+
+  "pipesnphysics.display_source.pipe_metric.title": "Metric",
+  "pipesnphysics.display_source.pipe_metric.flow": "Flow rate",
+  "pipesnphysics.display_source.pipe_metric.fluid": "Fluid",
+  "pipesnphysics.display_source.pipe_metric.direction": "Direction",
+  "pipesnphysics.display_source.pipe_metric.pressure": "Pressure",
+  "pipesnphysics.display_source.pipe_metric.lift": "Lift left",
+  "pipesnphysics.display_source.pipe_metric.status": "Status",
+  "pipesnphysics.display_source.pipe_metric.summary": "Summary",
+
+  "pipesnphysics.display_source.pump_metric.title": "Metric",
+  "pipesnphysics.display_source.pump_metric.flow": "Output rate",
+  "pipesnphysics.display_source.pump_metric.capacity": "Max output",
+  "pipesnphysics.display_source.pump_metric.throughput": "Throughput",
+  "pipesnphysics.display_source.pump_metric.lift": "Can lift",
+  "pipesnphysics.display_source.pump_metric.limiter": "Limited by",
+  "pipesnphysics.display_source.pump_metric.fluid": "Fluid",
+  "pipesnphysics.display_source.pump_metric.status": "Status",
+  "pipesnphysics.display_source.pump_metric.summary": "Summary",
+
+  "pipesnphysics.display_source.unit.mb": " mB/t",
+  "pipesnphysics.display_source.unit.blocks": " blocks",
+  "pipesnphysics.display_source.unit.blocks_up": " blocks ↑",
+
+  "pipesnphysics.display_source.status.flowing": "Flowing",
+  "pipesnphysics.display_source.status.idle": "Idle",
+  "pipesnphysics.display_source.status.blocked": "Blocked",
+  "pipesnphysics.display_source.status.full": "Backed up",
+  "pipesnphysics.display_source.status.no_head": "Not enough lift",
+  "pipesnphysics.display_source.status.not_connected": "Not connected",
+
+  "pipesnphysics.display_source.limiter.lift": "Lift",
+  "pipesnphysics.display_source.limiter.pipe": "Pipe run",
+  "pipesnphysics.display_source.limiter.none": "At capacity"
 }

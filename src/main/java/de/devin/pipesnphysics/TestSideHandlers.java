@@ -17,15 +17,21 @@ import java.util.Map;
  * can be GameTested — no block in the pack is genuinely side-specific (the docking connector is
  * side-agnostic), so the feature is otherwise untestable.
  *
- * It registers a fluid capability on {@link Blocks#SPONGE} — inert in normal play — that exposes a
- * separate {@link FluidTank} on each HORIZONTAL face and NOTHING on the {@code null} side, which is
- * exactly the shape {@code GraphBuilder} treats as side-specific. Backing tanks are per BlockPos+face
- * so a test can pre-fill one side and read it back through the engine. Registration is gated to
- * {@code !production} by the caller, so it never ships.
+ * Two shapes, on two inert blocks, for the two per-face cases {@code GraphBuilder} must handle:
+ *  - {@link Blocks#SPONGE} — a separate {@link FluidTank} on each HORIZONTAL face and NOTHING on the
+ *    {@code null} side: the no-null-cap side-specific shape.
+ *  - {@link Blocks#WET_SPONGE} — the shape of TFMG's coke oven: ONE shared PRIMARY tank on the
+ *    {@code null} side and every non-top face, plus a DIFFERENT SECONDARY tank on {@link Direction#UP}.
+ *    A null cap exists, so the engine only reads the top tank if it treats "a face whose handler differs
+ *    from the null side" as side-specific (identity, not null-cap-absence).
+ * Backing tanks are per BlockPos so a test can pre-fill a side and read it back through the engine.
+ * Registration is gated to {@code !production} by the caller, so it never ships.
  */
 public final class TestSideHandlers {
     public static final int TANK_CAPACITY = 16000;
     private static final Map<BlockPos, EnumMap<Direction, FluidTank>> TANKS = new HashMap<>();
+    private static final Map<BlockPos, FluidTank> PRIMARY = new HashMap<>();
+    private static final Map<BlockPos, FluidTank> SECONDARY = new HashMap<>();
 
     private TestSideHandlers() {}
 
@@ -34,6 +40,10 @@ public final class TestSideHandlers {
             if (side == null || side.getAxis().isVertical()) return null; // side-specific: N/E/S/W only
             return tankAt(pos, side);
         }, Blocks.SPONGE);
+        // Coke-oven shape: null + non-top faces share ONE handler (identity holds, like a Create tank),
+        // the top exposes a DIFFERENT one — so it is side-specific only under the identity discriminator.
+        event.registerBlock(Capabilities.FluidHandler.BLOCK, (level, pos, state, be, side) ->
+                side == Direction.UP ? secondaryAt(pos) : primaryAt(pos), Blocks.WET_SPONGE);
     }
 
     /** The backing tank for one face — a test fills this, then reads it through the engine. */
@@ -42,7 +52,19 @@ public final class TestSideHandlers {
                 .computeIfAbsent(side, s -> new FluidTank(TANK_CAPACITY));
     }
 
+    /** The coke-oven PRIMARY (creosote) tank — one object shared by the null side and every non-top face. */
+    public static FluidTank primaryAt(BlockPos pos) {
+        return PRIMARY.computeIfAbsent(pos.immutable(), p -> new FluidTank(TANK_CAPACITY));
+    }
+
+    /** The coke-oven SECONDARY (CO2) tank — the distinct handler on the top face only. */
+    public static FluidTank secondaryAt(BlockPos pos) {
+        return SECONDARY.computeIfAbsent(pos.immutable(), p -> new FluidTank(TANK_CAPACITY));
+    }
+
     public static void clear() {
         TANKS.clear();
+        PRIMARY.clear();
+        SECONDARY.clear();
     }
 }

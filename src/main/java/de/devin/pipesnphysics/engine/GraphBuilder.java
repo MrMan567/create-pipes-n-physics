@@ -241,17 +241,26 @@ public final class GraphBuilder {
                     boolean firstSight = d.handlers.add(handlerPos);
                     conns.add(handlerPos);
                     backLink(d, handlerPos, cur);
-                    boolean sideAgnostic = level.getCapability(
-                            Capabilities.FluidHandler.BLOCK, neighbor, null) != null;
+                    var nullCap = level.getCapability(Capabilities.FluidHandler.BLOCK, neighbor, null);
+                    // SIDE-SPECIFIC when the face this pipe meets exposes a DIFFERENT handler than the null
+                    // side — a distinct per-face tank the engine must read through THIS face rather than
+                    // couple. A block with no null cap is trivially side-specific; a block whose null side
+                    // and this face return the SAME handler object is side-agnostic and couples. Create's
+                    // own tank/basin providers ignore the side and hand back one shared handler, so identity
+                    // keeps them coupled; a block that hands back a DIFFERENT handler per side (TFMG's coke
+                    // oven: secondary CO2 tank on top, primary creosote tank on the sides + null) is the
+                    // per-face case — else the engine resolves the null side and reads the wrong (usually
+                    // empty) tank, so a pump on top of a coke oven never pulls its CO2. `handler` is already
+                    // the face handler (getCapability(face.getOpposite())).
+                    boolean sideSpecific = nullCap == null || handler != nullCap;
                     // A conduit handler is traversed THROUGH so its own chain is discovered.
                     if (isConduit(level, neighbor)) {
                         frontier.add(handlerPos);
-                    } else if (!sideAgnostic) {
-                        // A SIDE-SPECIFIC handler (no null-side capability): record the face this pipe
-                        // meets it on so the endpoint resolves and transfers through that exact tank, and
-                        // do NOT couple its other faces — those are DIFFERENT tanks and belong to their own
-                        // networks (that is how one block serves a different fluid per side). face is the
-                        // handler's face toward this pipe (opposite the pipe's opening direction).
+                    } else if (sideSpecific) {
+                        // Record the face this pipe meets it on so the endpoint resolves and transfers
+                        // through that exact tank, and do NOT couple its other faces — those are DIFFERENT
+                        // tanks and belong to their own networks. face is the handler's face toward this
+                        // pipe (opposite the pipe's opening direction).
                         d.handlerFaces.putIfAbsent(handlerPos, face.getOpposite());
                     } else if (firstSight) {
                         // A side-agnostic tank/basin couples EVERY run that touches it — fluid flows

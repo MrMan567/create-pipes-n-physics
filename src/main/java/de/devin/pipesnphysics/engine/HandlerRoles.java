@@ -68,6 +68,27 @@ public final class HandlerRoles {
     }
 
     /**
+     * A one-line, human-readable verdict of the role the engine gives this block and WHERE that verdict
+     * comes from — a role tag, a code registration, a learned demotion, or the default. The reusable
+     * explainer behind the {@code /pipegraph} block report and any compat tooling; mirrors the
+     * {@link #explicitRole} precedence.
+     */
+    public static String explain(Level level, BlockPos pos) {
+        BlockState state = level.getBlockState(pos);
+        if (state.is(IS_RESERVOIR)) return "reservoir (is_reservoir tag) — a normal tank, drained + equalized";
+        if (state.is(FLUID_CONDUITS)) return "conduit (fluid_conduits tag) — chained + equalized with its neighbours";
+        if (state.is(IGNORE)) return "ignored (ignore_fluid_handler tag) — not a network node at all";
+        if (state.is(RELAY_ENDPOINT)) return "relay (relay_endpoint tag) — bottomless one-way endpoint, never equalized";
+        if (state.is(SINK_ONLY)) return "sink-only (sink_only tag) — the engine fills it but never drains it";
+        FluidHandlerRole code = FluidHandlerApi.role(state.getBlock());
+        if (code != null) return code.name().toLowerCase() + " (registered in code via the API)";
+        if (PipesNPhysicsConfig.AUTO_DETECT_RELAY_HANDLERS.get() && RelayDetector.isRelay(state.getBlock())) {
+            return "relay (learned by the detector this session) — bottomless one-way endpoint";
+        }
+        return "plain capacitor (no explicit role) — a normal tank unless the detector demotes it";
+    }
+
+    /**
      * Whether the block at {@code pos} should be skipped as a fluid target: the pipe treats it as if
      * it had no handler (a dead end / open face). The is_reservoir role vetoes ignore.
      */

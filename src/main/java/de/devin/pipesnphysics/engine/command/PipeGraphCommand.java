@@ -2,15 +2,22 @@ package de.devin.pipesnphysics.engine.command;
 
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.context.CommandContext;
+import com.simibubi.create.content.fluids.FluidPropagator;
+import com.simibubi.create.content.fluids.FluidTransportBehaviour;
 import com.simibubi.create.content.fluids.hosePulley.HosePulleyBlockEntity;
+import com.simibubi.create.content.fluids.pipes.VanillaFluidTargets;
+import com.simibubi.create.content.fluids.pump.PumpBlock;
 import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
+import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.engine.BoundaryColumn;
 import de.devin.pipesnphysics.engine.Edge;
 import de.devin.pipesnphysics.engine.EdgeFlow;
 import de.devin.pipesnphysics.engine.FluidEngine;
 import de.devin.pipesnphysics.engine.Graph;
+import de.devin.pipesnphysics.engine.HandlerRoles;
 import de.devin.pipesnphysics.engine.Node;
 import de.devin.pipesnphysics.engine.PipeProbe;
+import de.devin.pipesnphysics.engine.RelayDetector;
 import de.devin.pipesnphysics.engine.Solution;
 import de.devin.pipesnphysics.compat.SableCompat;
 import de.devin.pipesnphysics.engine.net.GraphOverlayPayload;
@@ -21,6 +28,8 @@ import net.minecraft.core.Direction;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.material.Fluids;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.neoforged.neoforge.fluids.FluidStack;
@@ -66,14 +75,204 @@ public final class PipeGraphCommand {
 
         Graph graph = FluidEngine.buildGraph(level, target);
         if (graph.isEmpty()) {
-            source.sendFailure(Component.literal("No pipe network at " + target.toShortString()));
-            return 0;
+            // Not a pipe seed — inspect the block itself: what the engine classifies it as and why fluid
+            // does (or does not) flow to it, then dump the network it touches, if any.
+            sendBlockReport(player, level, target);
+            return 1;
         }
         Solution solution = FluidEngine.simulate(level, target);
 
         sendText(player, level, graph, solution);
         PacketDistributor.sendToPlayer(player, buildPayload(level, graph, solution));
         return 1;
+    }
+
+    /**
+     * "What the engine sees" for a block that is NOT a pipe seed — a foreign tank/machine, or an
+     * arbitrary block the crosshair landed on. Walks the whole classification chain that decides whether
+     * fluid flows TO it: its fluid capability (and on which faces), whether it is a vanilla fluid target
+     * routed to an open end, the ROLE the engine assigns and why, the live drain/fill probe, how the
+     * boundary column resolves (the wall that can leave a block holding fluid it still won't move), and
+     * whether an adjacent pipe actually opens toward it. When it touches a network the normal graph dump
+     * follows. This is the compat-authoring counterpart to the player pipe goggle.
+     */
+    private static void sendBlockReport(ServerPlayer player, ServerLevel level, BlockPos pos) {
+        BlockState state = level.getBlockState(pos);
+        send(player, "§e--- Engine view: §f" + state.getBlock().getName().getString()
+                + " §7@ " + pos.toShortString() + " §e---");
+
+        // Fluid capability, and on which faces. No handler anywhere and not a vanilla target → the engine
+        // can never see it as a tank; a side-specific block serves its own network per face.
+        IFluidHandler nullSide = level.getCapability(Capabilities.FluidHandler.BLOCK, pos, null);
+        List<Direction> faces = new ArrayList<>();
+        for (Direction d : Direction.values()) {
+            if (level.getCapability(Capabilities.FluidHandler.BLOCK, pos, d) != null) faces.add(d);
+        }
+        boolean vanilla = VanillaFluidTargets.canProvideFluidWithoutCapability(state);
+        if (vanilla) {
+            // Even with a NeoForge cap (a cauldron), the engine deliberately skips these in the handler
+            // branch and drinks them through an open pipe MOUTH — so its handler role is moot.
+            send(player, "§7Fluid cap: §evanilla fluid target §7— drained as an OPEN_END through an open pipe mouth, not a tank node");
+        } else if (nullSide != null) {
+            send(player, "§7Fluid cap: §aside-agnostic §7(couples every run that touches it)");
+        } else if (!faces.isEmpty()) {
+            send(player, "§7Fluid cap: §eside-specific §7on faces §f" + faces
+                    + " §7(each face is its own tank / network)");
+        } else {
+            send(player, "§7Fluid cap: §cnone §7— the engine cannot treat this block as a tank");
+        }
+
+        // Role + relay-detector state, only meaningful for a real handler node (not a vanilla open-end target).
+        if (!vanilla && (nullSide != null || !faces.isEmpty())) {
+            send(player, "§7Role: §f" + HandlerRoles.explain(level, pos));
+            if (!HandlerRoles.hasExplicitRole(state) && PipesNPhysicsConfig.AUTO_DETECT_RELAY_HANDLERS.get()) {
+                int strikes = RelayDetector.strikeCount(state.getBlock());
+                if (RelayDetector.isRelay(state.getBlock())) {
+                    send(player, "§7Detector: §elearned relay §7this session");
+                } else if (strikes > 0) {
+                    send(player, "§7Detector: §f" + strikes + " §7spontaneous-gain strike(s) so far");
+                }
+            }
+            sendFaceProbe(player, level, pos, nullSide);
+            send(player, "§7Column (what the engine resolves): §f"
+                    + columnReport(level, pos, resolveAccessFace(level, pos)));
+        }
+
+        // Is an adjacent pipe/pump actually plumbed toward this block? Then dump the network it touches.
+        BlockPos seed = reportNeighbors(player, level, pos);
+        if (seed != null) {
+            Graph g = FluidEngine.buildGraph(level, seed);
+            if (!g.isEmpty()) {
+                Solution s = FluidEngine.simulate(level, seed);
+                send(player, "§7— network it connects to (seed " + seed.toShortString() + ") —");
+                sendText(player, level, g, s);
+                PacketDistributor.sendToPlayer(player, buildPayload(level, g, s));
+            }
+        }
+    }
+
+    /**
+     * The fluid handler PER FACE — the crux of "why won't it flow to this block." A machine can expose its
+     * OUTPUT on only one face (a coke oven's CO2 on top) alongside a separate empty/input handler on the
+     * {@code null} side and other faces; the engine resolves the {@code null} side FIRST, so it reads the
+     * block EMPTY and never drains the face that actually gives. This dumps the {@code null} side and every
+     * face's holds/give/take, flagging any face that gives MORE than the {@code null} side — the handler the
+     * engine should be reading through.
+     */
+    private static void sendFaceProbe(ServerPlayer player, ServerLevel level, BlockPos pos, IFluidHandler nullSide) {
+        FluidStack probe = probeFluid(level, pos);
+        int nullGive = nullSide == null ? -1 : nullSide.drain(Integer.MAX_VALUE, FluidAction.SIMULATE).getAmount();
+        send(player, "§7Handler per face §8(probe " + probe.getHoverName().getString() + "):");
+        if (nullSide != null) send(player, "§d  null-side: " + oneProbe(nullSide, probe));
+        for (Direction d : Direction.values()) {
+            IFluidHandler cap = level.getCapability(Capabilities.FluidHandler.BLOCK, pos, d);
+            if (cap == null) continue;
+            int give = cap.drain(Integer.MAX_VALUE, FluidAction.SIMULATE).getAmount();
+            String flag = nullSide != null && cap != nullSide && give > nullGive
+                    ? " §e← gives more than null-side; engine reads null → sees this block EMPTY" : "";
+            send(player, "§d  " + d + ": " + oneProbe(cap, probe) + flag);
+        }
+    }
+
+    /** One handler's live HOLDS / GIVE (drain) / TAKE (fill) probe against {@code probe}, with its fluid name. */
+    private static String oneProbe(IFluidHandler cap, FluidStack probe) {
+        FluidStack held = cap.getTanks() > 0 ? cap.getFluidInTank(0) : FluidStack.EMPTY;
+        int give = cap.drain(Integer.MAX_VALUE, FluidAction.SIMULATE).getAmount();
+        int take = cap.fill(probe, FluidAction.SIMULATE);
+        return String.format("holds=%d give=%d take=%d%s", held.getAmount(), give, take,
+                held.isEmpty() ? "" : " (" + held.getHoverName().getString() + ")");
+    }
+
+    /**
+     * The face the engine resolves this block through, mirroring {@code GraphBuilder}: a connecting
+     * (pipe/pump) face whose handler DIFFERS from the null side — the per-face endpoint (a coke oven's CO2
+     * top) — else null for a side-agnostic block that resolves through its shared null handler. Lets the
+     * "Column" line report the SAME tank the network actually reads, not the null side.
+     */
+    private static Direction resolveAccessFace(ServerLevel level, BlockPos pos) {
+        IFluidHandler nullCap = level.getCapability(Capabilities.FluidHandler.BLOCK, pos, null);
+        Direction differing = null;
+        for (Direction d : Direction.values()) {
+            IFluidHandler cap = level.getCapability(Capabilities.FluidHandler.BLOCK, pos, d);
+            if (cap == null || cap == nullCap) continue; // side-agnostic on this face → resolve null
+            BlockPos neighbor = pos.relative(d);
+            if (FluidPropagator.getPipe(level, neighbor) != null
+                    || level.getBlockState(neighbor).getBlock() instanceof PumpBlock) {
+                return d; // a plumbed face that differs from null — exactly the engine's access face
+            }
+            if (differing == null) differing = d;
+        }
+        return differing;
+    }
+
+    /** The first fluid any face (or the null side) of this block holds, or water — what to probe fills with. */
+    private static FluidStack probeFluid(ServerLevel level, BlockPos pos) {
+        IFluidHandler nullCap = level.getCapability(Capabilities.FluidHandler.BLOCK, pos, null);
+        if (nullCap != null && nullCap.getTanks() > 0 && !nullCap.getFluidInTank(0).isEmpty()) {
+            return nullCap.getFluidInTank(0).copyWithAmount(1000);
+        }
+        for (Direction d : Direction.values()) {
+            IFluidHandler cap = level.getCapability(Capabilities.FluidHandler.BLOCK, pos, d);
+            if (cap != null && cap.getTanks() > 0 && !cap.getFluidInTank(0).isEmpty()) {
+                return cap.getFluidInTank(0).copyWithAmount(1000);
+            }
+        }
+        return new FluidStack(Fluids.WATER, 1000);
+    }
+
+    /**
+     * How the engine's boundary column resolves this handler — the wall that can leave a block holding
+     * fluid it still will not move: a finite reservoir surface-equalizes and lip-gates, an EMPTY one is
+     * receive-only, a FULL one is give-only, a relay/pulley is a bottomless one-way endpoint. Builds the
+     * same synthetic HANDLER node the solver would (its {@code accessFace} for a side-specific block) and
+     * runs the real {@link BoundaryColumn#resolve}.
+     */
+    private static String columnReport(ServerLevel level, BlockPos pos, Direction accessFace) {
+        Node synthetic = new Node(0, pos, Node.Kind.HANDLER, SableCompat.getWorldY(level, pos), null, null, accessFace);
+        BoundaryColumn column = BoundaryColumn.resolve(level, synthetic);
+        if (column == null) return "does not resolve (no live handler / multiblock mid-assembly)";
+        String role = !column.isFiniteReservoir()
+                ? (column.isInfiniteSource()
+                        ? "bottomless SOURCE — one-way, drain-priority"
+                        : "bottomless SINK — one-way, receive-only")
+                : column.isEmpty() ? "finite reservoir, EMPTY → receive-only (fills, never drains)"
+                : column.contentMb() >= column.capacityMb() ? "finite reservoir, FULL → give-only (drains, never fills)"
+                : "finite reservoir — surface-equalized, lip-gated";
+        return String.format("%s §7[%d/%d mB, %.0f%%]", role,
+                column.contentMb(), column.capacityMb(), column.fillFraction() * 100);
+    }
+
+    /**
+     * Report, per face, whether an adjacent pipe or pump is actually plumbed toward this block — the
+     * silent "no connection" cause (a pipe that does not open back, common on stale Sable assemblies).
+     * Returns a seed to dump the touched network, preferring a pipe that genuinely opens toward the
+     * block; null when nothing adjacent connects.
+     */
+    private static BlockPos reportNeighbors(ServerPlayer player, ServerLevel level, BlockPos pos) {
+        BlockPos seed = null;
+        boolean any = false;
+        for (Direction face : Direction.values()) {
+            BlockPos neighbor = pos.relative(face);
+            if (!level.isLoaded(neighbor)) continue;
+            BlockState nState = level.getBlockState(neighbor);
+            if (nState.getBlock() instanceof PumpBlock) {
+                send(player, "§7  " + face + ": §badjacent pump");
+                any = true;
+                if (seed == null) seed = neighbor.immutable();
+                continue;
+            }
+            FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, neighbor);
+            if (pipe == null) continue;
+            any = true;
+            boolean opensBack = pipe.canHaveFlowToward(nState, face.getOpposite());
+            send(player, "§7  " + face + ": pipe " + (opensBack
+                    ? "§aopens toward it ✓"
+                    : "§cpresent but does NOT open back ✗ §7(stale connection / not plumbed this side)"));
+            if (opensBack) seed = neighbor.immutable();          // prefer a genuinely-connected pipe
+            else if (seed == null) seed = neighbor.immutable();  // still dump the network so the graph shows
+        }
+        if (!any) send(player, "§7Neighbours: §cno adjacent pipe or pump §7— nothing to connect to");
+        return seed;
     }
 
     private static void sendText(ServerPlayer player, ServerLevel level, Graph g, Solution s) {
