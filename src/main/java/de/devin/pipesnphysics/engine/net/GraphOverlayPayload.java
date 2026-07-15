@@ -10,16 +10,19 @@ import net.minecraft.resources.ResourceLocation;
 import java.util.List;
 
 /**
- * Sent server → client when a player runs {@code /pipegraph}. Contains a snapshot
- * of one network's nodes and directional edges; the client stores it and draws
- * an in-world overlay for a fixed time.
+ * Sent server → client when a player runs {@code /pipegraph} and on each live refresh.
+ * Contains one network's nodes and directional edges plus the {@code seed} (packed BlockPos)
+ * the network was built from; the client stores it, draws an in-world overlay for a fixed time,
+ * and periodically re-requests it by {@code seed} so a live (bursty) flow keeps tracking instead
+ * of freezing on the single tick the command ran.
  */
-public record GraphOverlayPayload(List<NodeEntry> nodes, List<EdgeEntry> edges) implements CustomPacketPayload {
+public record GraphOverlayPayload(long seed, List<NodeEntry> nodes, List<EdgeEntry> edges) implements CustomPacketPayload {
     public static final ResourceLocation ID = ResourceLocation.fromNamespaceAndPath(PipesNPhysics.ID, "graph_overlay");
     public static final Type<GraphOverlayPayload> TYPE = new Type<>(ID);
 
     public static final StreamCodec<RegistryFriendlyByteBuf, GraphOverlayPayload> STREAM_CODEC =
             StreamCodec.composite(
+                    ByteBufCodecs.VAR_LONG, GraphOverlayPayload::seed,
                     NodeEntry.CODEC.apply(ByteBufCodecs.list()), GraphOverlayPayload::nodes,
                     EdgeEntry.CODEC.apply(ByteBufCodecs.list()), GraphOverlayPayload::edges,
                     GraphOverlayPayload::new

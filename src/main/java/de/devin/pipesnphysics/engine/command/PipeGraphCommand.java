@@ -13,7 +13,9 @@ import de.devin.pipesnphysics.engine.BoundaryColumn;
 import de.devin.pipesnphysics.engine.Edge;
 import de.devin.pipesnphysics.engine.EdgeFlow;
 import de.devin.pipesnphysics.engine.FluidEngine;
+import de.devin.pipesnphysics.engine.FlowSolver;
 import de.devin.pipesnphysics.engine.Graph;
+import de.devin.pipesnphysics.engine.GraphCache;
 import de.devin.pipesnphysics.engine.HandlerRoles;
 import de.devin.pipesnphysics.engine.Node;
 import de.devin.pipesnphysics.engine.PipeProbe;
@@ -49,6 +51,9 @@ import java.util.List;
  * Intended for inspecting topology and verifying flow direction during development.
  */
 public final class PipeGraphCommand {
+    /** Read the engine's own solution when it is at most this many ticks old — the goggle's window. */
+    private static final int SOLUTION_MAX_AGE_TICKS = 4;
+
     private PipeGraphCommand() {}
 
     public static void register(CommandDispatcher<CommandSourceStack> dispatcher) {
@@ -80,12 +85,48 @@ public final class PipeGraphCommand {
             sendBlockReport(player, level, target);
             return 1;
         }
-        Solution solution = FluidEngine.simulate(level, target);
+        // Read the engine's OWN recent solution (the same source the goggle reads), not an
+        // independent single-tick solve — else a bursty flow the goggle shows reads as idle here.
+        Resolved resolved = recentSolve(level, target);
+        if (resolved == null) return 1; // network vanished between build and solve
 
-        sendText(player, level, graph, solution);
-        PacketDistributor.sendToPlayer(player, buildPayload(level, graph, solution));
+        sendText(player, level, resolved.graph(), resolved.solution());
+        PacketDistributor.sendToPlayer(player,
+                buildPayload(level, resolved.graph(), resolved.solution(), target));
         return 1;
     }
+
+    /**
+     * Build a live /pipegraph overlay for a seed — the server side of the {@code GraphOverlayRequest}
+     * refresh the client fires while an overlay is on screen. Null when the seed no longer roots a
+     * network. Uses the engine's recent solution so the in-world graph tracks a live/bursty flow.
+     */
+    public static GraphOverlayPayload buildOverlay(ServerLevel level, BlockPos seed) {
+        Resolved resolved = recentSolve(level, seed);
+        return resolved == null ? null
+                : buildPayload(level, resolved.graph(), resolved.solution(), seed);
+    }
+
+    /**
+     * The engine's cached graph + recent solution for a seed — the SAME data the goggle reads, so a
+     * flow the goggle shows appears here too — falling back to a fresh build+solve when nothing is
+     * cached. Null when the seed no longer roots a network.
+     */
+    private static Resolved recentSolve(ServerLevel level, BlockPos seed) {
+        long now = level.getGameTime();
+        Graph graph = GraphCache.get(level, seed, now);
+        Solution solution = graph == null ? null
+                : GraphCache.recentSolution(level, graph, now, SOLUTION_MAX_AGE_TICKS);
+        if (graph == null) {
+            graph = FluidEngine.buildGraph(level, seed);
+            if (graph.isEmpty()) return null;
+            GraphCache.store(level, graph, now);
+        }
+        if (solution == null) solution = FlowSolver.solve(level, graph);
+        return new Resolved(graph, solution);
+    }
+
+    private record Resolved(Graph graph, Solution solution) {}
 
     /**
      * "What the engine sees" for a block that is NOT a pipe seed — a foreign tank/machine, or an
@@ -146,7 +187,7 @@ public final class PipeGraphCommand {
                 Solution s = FluidEngine.simulate(level, seed);
                 send(player, "§7— network it connects to (seed " + seed.toShortString() + ") —");
                 sendText(player, level, g, s);
-                PacketDistributor.sendToPlayer(player, buildPayload(level, g, s));
+                PacketDistributor.sendToPlayer(player, buildPayload(level, g, s, seed));
             }
         }
     }
@@ -340,7 +381,7 @@ public final class PipeGraphCommand {
         }
     }
 
-    private static GraphOverlayPayload buildPayload(ServerLevel level, Graph g, Solution s) {
+    private static GraphOverlayPayload buildPayload(ServerLevel level, Graph g, Solution s, BlockPos seed) {
         List<GraphOverlayPayload.NodeEntry> nodes = new ArrayList<>(g.nodes().size());
         for (Node n : g.nodes()) {
             byte kind = switch (n.kind()) {
@@ -357,6 +398,10 @@ public final class PipeGraphCommand {
         List<GraphOverlayPayload.EdgeEntry> edges = new ArrayList<>(g.edges().size());
         for (Edge e : g.edges()) {
             EdgeFlow flow = s.edgeFlows().get(e.index());
+            // The overlay reflects the ACTUAL fluid moved, like the pipe/pump goggle and the chat
+            // dump's actual= column — NOT the solver's hydraulic flow. So an edge whose source/sink
+            // throttles a solved flow down to nothing draws no arrow instead of a phantom one.
+            int actual = PipeProbe.actualEdgeFlow(g, s, e);
             Node a = g.node(e.a()), b = g.node(e.b());
 
             List<BlockPos> orderedFromA = new ArrayList<>();
@@ -369,20 +414,22 @@ public final class PipeGraphCommand {
             List<BlockPos> ordered = reversed ? reverse(orderedFromA) : orderedFromA;
             List<Float> pressures = reversed ? reverse(pressuresFromA) : pressuresFromA;
 
+            // Arrow only when fluid actually moves; a solved-but-stalled run still shows its rod
+            // (no arrow), a held column stays magenta.
             byte dir = s.heldEdges().contains(e.index())
                     ? GraphOverlayPayload.EdgeEntry.DIR_HELD
-                    : flow.direction() == EdgeFlow.Direction.NONE
-                    ? GraphOverlayPayload.EdgeEntry.DIR_NONE
+                    : actual > 0
+                    ? GraphOverlayPayload.EdgeEntry.DIR_FORWARD
                     : s.stalledEdges().contains(e.index())
                     ? GraphOverlayPayload.EdgeEntry.DIR_STALLED
-                    : GraphOverlayPayload.EdgeEntry.DIR_FORWARD;
+                    : GraphOverlayPayload.EdgeEntry.DIR_NONE;
 
             List<Long> packed = new ArrayList<>(ordered.size());
             for (BlockPos p : ordered) packed.add(p.asLong());
-            edges.add(new GraphOverlayPayload.EdgeEntry(packed, flow.mbPerTick(), dir, pressures));
+            edges.add(new GraphOverlayPayload.EdgeEntry(packed, actual, dir, pressures));
         }
 
-        return new GraphOverlayPayload(nodes, edges);
+        return new GraphOverlayPayload(seed.asLong(), nodes, edges);
     }
 
     /**
@@ -550,37 +597,38 @@ public final class PipeGraphCommand {
     }
 
     /**
-     * The floating in-world label for a node: the block it is, plus a fluid line for
-     * sources/sinks (and RPM for pumps), then the stored head it carries. Empty for
-     * junctions, which the overlay leaves unannotated to avoid clutter. The head is the
-     * value /pipegraph prints in chat, now shown in-world so you can SEE where it sits.
-     * Lines are {@code \n}-separated for the client.
+     * The floating in-world label for a node, kept to TWO lines to stay legible: the block on line
+     * one, and a compact status on line two — its fluid (sources/sinks), RPM+facing (pumps), or
+     * "valve shut" — with the stored head merged onto that same line ({@code h4.0}) rather than a
+     * third line. Empty for junctions, which the overlay leaves unannotated. The head is the value
+     * /pipegraph prints in chat, shown in-world so you can SEE where it sits. Lines are
+     * {@code \n}-separated for the client.
      */
     private static String nodeLabel(ServerLevel level, Node n, Double head) {
-        String block = blockName(level, n);
-        String body = switch (n.kind()) {
+        String info = switch (n.kind()) {
             case HANDLER -> {
                 BoundaryColumn column = columnOf(level, n);
-                yield block + "\n" + (column != null && !column.contents().isEmpty() && column.contentMb() > 0
+                yield column != null && !column.contents().isEmpty() && column.contentMb() > 0
                         ? String.format("%d mB %s", column.contentMb(), column.contents().getHoverName().getString())
-                        : "empty");
+                        : "empty";
             }
             case OPEN_END -> {
                 BoundaryColumn column = columnOf(level, n);
-                yield block + "\n" + (column != null && !column.contents().isEmpty()
+                yield column != null && !column.contents().isEmpty()
                         ? "draws " + column.contents().getHoverName().getString()
-                        : "open end");
+                        : "open end";
             }
             case PUMP -> {
                 float rpm = level.getBlockEntity(n.pos()) instanceof KineticBlockEntity k ? k.getSpeed() : 0;
-                yield block + "\n" + String.format("%.0f RPM%s", rpm,
-                        n.pumpFacing() != null ? " →" + n.pumpFacing() : "");
+                yield String.format("%.0f RPM%s", rpm, n.pumpFacing() != null ? " →" + n.pumpFacing() : "");
             }
-            case CLOSED_GATE -> block + "\nvalve shut (holding)";
-            case JUNCTION -> "";
+            case CLOSED_GATE -> "valve shut";
+            case JUNCTION -> null;
         };
-        // Append the stored head where the node has one — except a junction, kept unannotated.
-        return head != null && !body.isEmpty() ? body + String.format("\nhead %.2f", head) : body;
+        if (info == null) return ""; // junction: unannotated to avoid clutter
+        // Merge the stored head onto the status line rather than a third line.
+        if (head != null) info += String.format("  h%.1f", head);
+        return blockName(level, n) + "\n" + info;
     }
 
     /** The stored head a HELD edge holds: the higher of its two endpoint display heads. */

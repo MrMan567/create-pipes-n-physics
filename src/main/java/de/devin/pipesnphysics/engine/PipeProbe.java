@@ -310,9 +310,13 @@ public final class PipeProbe {
         boolean anyStalled = false;
         boolean anyNoHead = false;
         for (Edge edge : graph.edgesOf(node.index())) {
-            EdgeFlow flow = solution.edgeFlows().get(edge.index());
-            if (flow.mbPerTick() > strongestRate) {
-                strongestRate = flow.mbPerTick();
+            // The honest "mB/t through this pump" — the fluid ACTUALLY moved, matching the pipe in
+            // front of it. The raw solved flow is the pump's hydraulic CAPABILITY, which the source/
+            // sink/lip then throttle: a starved pump would read near its cap while the pipe it feeds
+            // only trickles (the "pump says 240, pipe says 3" mismatch).
+            int actual = actualEdgeFlow(graph, solution, edge);
+            if (actual > strongestRate) {
+                strongestRate = actual;
                 strongestEdge = edge.index();
             }
             anyBlocked |= solution.blockedEdges().contains(edge.index());

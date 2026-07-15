@@ -214,8 +214,13 @@ public final class PipeLevelRenderer {
             f.lastSeen = now;
         }
 
-        float frac = CreatePipeRendering.levelFraction(data) * fadeScale;
-        if (frac <= 0) return false;
+        // A gas is the MIRROR of a liquid: its stamped fraction is the gas's LOWER boundary (0 = fills the
+        // whole bore, 1 = empty), so it fills [floor, top] and recedes by the floor rising TOWARD the top —
+        // 1 − (1 − raw)·fadeScale — where a liquid's surface drops toward the bottom (raw·fadeScale).
+        boolean gas = fluid.getFluid().getFluidType().isLighterThanAir();
+        float rawFrac = CreatePipeRendering.levelFraction(data);
+        float frac = gas ? 1f - (1f - rawFrac) * fadeScale : rawFrac * fadeScale;
+        if (!gas && frac <= 0) return false; // a liquid at zero surface is empty; a gas at floor 0 is FULL
 
         // A draining (fading) cell renders STILL and recedes purely by frac — no scroll, no travelling
         // front (its flow is gone). Only a live flowing cell keeps its direction/front.
@@ -234,23 +239,30 @@ public final class PipeLevelRenderer {
         float x0, y0, z0, x1, y1, z1;
         switch (state.getValue(AxisPipeBlock.AXIS)) {
             case Y -> {
-                // Vertical tube: a flowing bore fills fully; a resting surface rises to its waterline.
+                // Vertical tube: a liquid rises from the bottom to its surface (a flowing bore fills); a
+                // gas hangs from the top down to its floor.
                 x0 = lo; z0 = lo; x1 = hi; z1 = hi;
-                y0 = 0f; y1 = flowing ? 1f : Math.min(frac, 1f);
+                if (gas) { y0 = Math.clamp(frac, 0f, 1f); y1 = 1f; }
+                else { y0 = 0f; y1 = flowing ? 1f : Math.min(frac, 1f); }
+                if (y1 <= y0) return false;
             }
             case X -> {
-                // Horizontal tube along X: a horizontal surface partway up the tube cross-section.
-                float top = flowing ? flowingTop(frac, lo, hi) : horizontalTop(frac, lo, hi);
-                if (top <= lo) return false;
+                // Horizontal tube along X: a liquid fills [bottom, surface]; a gas fills [floor, top].
+                float yb, yt;
+                if (gas) { yb = Math.clamp(frac, lo, hi); yt = hi; }
+                else { yb = lo; yt = flowing ? flowingTop(frac, lo, hi) : horizontalTop(frac, lo, hi); }
+                if (yt <= yb) return false;
                 x0 = 0f; x1 = 1f;
-                y0 = lo; y1 = top;
+                y0 = yb; y1 = yt;
                 z0 = lo; z1 = hi;
             }
             default -> {
-                float top = flowing ? flowingTop(frac, lo, hi) : horizontalTop(frac, lo, hi);
-                if (top <= lo) return false;
+                float yb, yt;
+                if (gas) { yb = Math.clamp(frac, lo, hi); yt = hi; }
+                else { yb = lo; yt = flowing ? flowingTop(frac, lo, hi) : horizontalTop(frac, lo, hi); }
+                if (yt <= yb) return false;
                 z0 = 0f; z1 = 1f;
-                y0 = lo; y1 = top;
+                y0 = yb; y1 = yt;
                 x0 = lo; x1 = hi;
             }
         }

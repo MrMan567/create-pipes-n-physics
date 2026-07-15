@@ -5,6 +5,7 @@ import de.devin.pipesnphysics.client.PumpRangeClient;
 import de.devin.pipesnphysics.compat.SableCompat;
 import de.devin.pipesnphysics.engine.PipeProbe;
 import de.devin.pipesnphysics.engine.PumpRangeProbe;
+import de.devin.pipesnphysics.engine.command.PipeGraphCommand;
 import de.devin.pipesnphysics.engine.render.GraphOverlay;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
@@ -47,6 +48,10 @@ public final class EnginePackets {
                 PipeStatusRequest.TYPE,
                 PipeStatusRequest.STREAM_CODEC,
                 EnginePackets::onPipeStatusRequest);
+        registrar.playToServer(
+                GraphOverlayRequest.TYPE,
+                GraphOverlayRequest.STREAM_CODEC,
+                EnginePackets::onGraphOverlayRequest);
         registrar.playToClient(
                 PumpRangePayload.TYPE,
                 PumpRangePayload.STREAM_CODEC,
@@ -79,6 +84,23 @@ public final class EnginePackets {
 
     private static void onGraphOverlay(GraphOverlayPayload payload, IPayloadContext ctx) {
         ctx.enqueueWork(() -> GraphOverlay.receive(payload));
+    }
+
+    private static void onGraphOverlayRequest(GraphOverlayRequest request, IPayloadContext ctx) {
+        ctx.enqueueWork(() -> {
+            if (!(ctx.player() instanceof ServerPlayer player)) return;
+            ServerLevel level = player.serverLevel();
+            long now = level.getGameTime();
+            if (now - player.getPersistentData().getLong("pipesnphysics_graph_at") < PROBE_THROTTLE_TICKS) return;
+            player.getPersistentData().putLong("pipesnphysics_graph_at", now);
+
+            BlockPos seed = BlockPos.of(request.seed());
+            if (pipesnphysics$tooFar(level, seed, player)) return;
+            if (!level.isLoaded(seed)) return;
+
+            GraphOverlayPayload payload = PipeGraphCommand.buildOverlay(level, seed);
+            if (payload != null) PacketDistributor.sendToPlayer(player, payload);
+        });
     }
 
     private static void onPipeStatus(PipeStatusPayload payload, IPayloadContext ctx) {

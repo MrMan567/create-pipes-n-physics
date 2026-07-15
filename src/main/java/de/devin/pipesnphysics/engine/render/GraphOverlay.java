@@ -1,12 +1,16 @@
 package de.devin.pipesnphysics.engine.render;
 
+import com.mojang.blaze3d.vertex.DefaultVertexFormat;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
+import com.mojang.blaze3d.vertex.VertexFormat;
 import de.devin.pipesnphysics.PipesNPhysics;
 import de.devin.pipesnphysics.engine.net.GraphOverlayPayload;
+import de.devin.pipesnphysics.engine.net.GraphOverlayRequest;
 import net.minecraft.client.Camera;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.MultiBufferSource;
+import net.minecraft.client.renderer.RenderStateShard;
 import net.minecraft.client.renderer.RenderType;
 import net.minecraft.client.renderer.debug.DebugRenderer;
 import net.minecraft.core.BlockPos;
@@ -14,6 +18,7 @@ import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.neoforge.client.event.RenderLevelStageEvent;
+import net.neoforged.neoforge.network.PacketDistributor;
 import org.joml.Matrix4f;
 import org.joml.Vector3f;
 
@@ -24,25 +29,44 @@ import java.util.List;
  * Client-side renderer for graph snapshots sent by /pipegraph.
  *
  * The snapshot is held in a tiny LRU; each entry expires after LIFETIME_TICKS.
- * Every frame we draw the active overlays as colored line segments with arrowheads:
+ * Every frame we draw the active overlays:
  *   - HANDLER nodes  → green box
  *   - PUMP nodes     → orange box
- *   - JUNCTION nodes → white dot
- *   - edges          → each drawn in its own distinct color as a box-tube around the pipes;
- *                      flowing edges also get an arrowhead pointing along flow
+ *   - JUNCTION nodes → white box
+ *   - edges          → a thin square rod threaded down the pipe centre, colored by the pressure
+ *                      gradient (gray when dry, magenta when held); flowing edges get an arrowhead.
  *
- * Edges are drawn as a rectangular tube wrapping the pipe run (not a center line),
- * so the outline sits on the outside of the pipe geometry and stays visible.
+ * Edges are a ~1px extruded square drawn INSIDE the pipe rather than a tube wrapping it. The rod
+ * uses the no-depth quad batch so it reads as a line through the pipe whatever the pipe's opacity;
+ * the node boxes stay depth-tested lines.
  */
 @EventBusSubscriber(modid = PipesNPhysics.ID, value = Dist.CLIENT)
 public final class GraphOverlay {
     private static final int LIFETIME_TICKS = 600; // 30 seconds at 20 TPS
 
-    /** Half-width of the edge tube; sits just outside the pipe core so the outline is visible. */
-    private static final float EDGE_TUBE_RADIUS = 0.35f;
+    /** How often the client re-asks the server for a fresh solve, so the overlay tracks live flow. */
+    private static final long REQUEST_INTERVAL_MS = 200; // ~4 ticks, matching the server probe throttle
 
-    /** Half-size of each head-plane tile; 0.5 makes adjacent cells' tiles abut into one surface. */
-    private static final float HEAD_PLANE_HALF = 0.5f;
+    /** Half-side of the edge rod's square cross-section; 1/32 block ≈ a 1px-wide extruded square. */
+    private static final float ROD_HALF = 1f / 32f;
+
+    /**
+     * The edge-rod render type: translucent POSITION_COLOR quads with NO depth test, so the thin
+     * rod stays visible even threaded through an opaque pipe body. It does not write depth (COLOR_
+     * WRITE) so the overlay never pollutes the world depth buffer.
+     */
+    private static final RenderType ROD_RENDER_TYPE = RenderType.create(
+            "pnp_graph_rod",
+            DefaultVertexFormat.POSITION_COLOR,
+            VertexFormat.Mode.QUADS,
+            1536,
+            RenderType.CompositeState.builder()
+                    .setShaderState(RenderStateShard.POSITION_COLOR_SHADER)
+                    .setTransparencyState(RenderStateShard.TRANSLUCENT_TRANSPARENCY)
+                    .setDepthTestState(RenderStateShard.NO_DEPTH_TEST)
+                    .setCullState(RenderStateShard.NO_CULL)
+                    .setWriteMaskState(RenderStateShard.COLOR_WRITE)
+                    .createCompositeState(false));
 
     private static final List<ActiveOverlay> ACTIVE = new ArrayList<>();
 
@@ -53,8 +77,14 @@ public final class GraphOverlay {
         ACTIVE.clear();
     }
 
-    /** Called from the network payload handler. */
+    /**
+     * Called from the network payload handler. A payload for a network we already show is a live
+     * REFRESH — update its data in place and keep its lifetime — otherwise it is a new overlay.
+     */
     public static void receive(GraphOverlayPayload payload) {
+        for (ActiveOverlay a : ACTIVE) {
+            if (a.payload.seed() == payload.seed()) { a.payload = payload; return; }
+        }
         ACTIVE.add(new ActiveOverlay(payload, System.currentTimeMillis()));
         // Cap memory: only keep the 4 most recent snapshots.
         while (ACTIVE.size() > 4) ACTIVE.remove(0);
@@ -66,8 +96,17 @@ public final class GraphOverlay {
         if (ACTIVE.isEmpty()) return;
 
         long now = System.currentTimeMillis();
-        ACTIVE.removeIf(a -> (now - a.createdMs) > LIFETIME_TICKS * 50L);
+        ACTIVE.removeIf(a -> (now - a.firstSeenMs) > LIFETIME_TICKS * 50L);
         if (ACTIVE.isEmpty()) return;
+
+        // Keep each overlay live: periodically ask the server to re-solve its network so a bursty
+        // flow tracks (arrows blink with the bursts) instead of freezing on the command's tick.
+        for (ActiveOverlay a : ACTIVE) {
+            if (now - a.lastRequestMs >= REQUEST_INTERVAL_MS) {
+                a.lastRequestMs = now;
+                PacketDistributor.sendToServer(new GraphOverlayRequest(a.payload.seed()));
+            }
+        }
 
         Camera cam = event.getCamera();
         Vector3f camOff = new Vector3f(
@@ -87,15 +126,17 @@ public final class GraphOverlay {
         // next lines.addVertex throws "Not building!".
         VertexConsumer lines = buffers.getBuffer(RenderType.lines());
         for (ActiveOverlay a : ACTIVE) {
-            drawSnapshot(pose, lines, a.payload, lifeFraction(a, now));
+            drawNodes(pose, lines, a.payload, lifeFraction(a, now));
         }
         buffers.endBatch(RenderType.lines());
 
-        VertexConsumer planes = buffers.getBuffer(RenderType.debugQuads());
+        // Edges are thin extruded squares drawn through the pipe — the no-depth quad batch so they
+        // stay visible inside opaque pipes.
+        VertexConsumer rods = buffers.getBuffer(ROD_RENDER_TYPE);
         for (ActiveOverlay a : ACTIVE) {
-            drawHeadPlanes(pose, planes, a.payload, lifeFraction(a, now));
+            drawEdges(pose, rods, a.payload, lifeFraction(a, now));
         }
-        buffers.endBatch(RenderType.debugQuads());
+        buffers.endBatch(ROD_RENDER_TYPE);
 
         pose.popPose();
 
@@ -110,7 +151,8 @@ public final class GraphOverlay {
     /**
      * Floating letter above each edge's run, matching the names /pipegraph prints
      * in chat. Drawn with the vanilla debug text helper, which billboards toward
-     * the camera and renders through blocks.
+     * the camera; occluded by blocks so only labels on visible pipes show (avoids
+     * the whole base's labels bleeding through terrain).
      */
     private static void drawEdgeLabels(MultiBufferSource buffers,
                                        GraphOverlayPayload payload, float fade) {
@@ -129,7 +171,7 @@ public final class GraphOverlay {
             int color = (alpha << 24) | 0xFFFF55;
             DebugRenderer.renderFloatingText(new PoseStack(), buffers,
                     GraphOverlayPayload.edgeLetter(ei), x, y, z, color,
-                    0.035f, true, 0, true);
+                    0.025f, true, 0, false);
         }
     }
 
@@ -148,12 +190,12 @@ public final class GraphOverlay {
             for (int i = 0; i < lines.length; i++) {
                 int rgb = i == 0 ? nodeRgb(n.kind()) : 0xD0D0D0;
                 DebugRenderer.renderFloatingText(new PoseStack(), buffers, lines[i],
-                        x, top - i * 0.26, z, (alpha << 24) | rgb, 0.028f, true, 0, true);
+                        x, top - i * 0.19, z, (alpha << 24) | rgb, 0.02f, true, 0, false);
             }
         }
     }
 
-    /** Label color per node kind, matching the box colors in {@link #drawSnapshot}. */
+    /** Label color per node kind, matching the box colors in {@link #drawNodes}. */
     private static int nodeRgb(byte kind) {
         return switch (kind) {
             case GraphOverlayPayload.NodeEntry.KIND_HANDLER -> 0x40DC40;
@@ -164,16 +206,15 @@ public final class GraphOverlay {
     }
 
     private static float lifeFraction(ActiveOverlay a, long now) {
-        long age = now - a.createdMs;
+        long age = now - a.firstSeenMs;
         long max = LIFETIME_TICKS * 50L;
         return 1f - Math.min(1f, age / (float) max);
     }
 
-    private static void drawSnapshot(PoseStack pose, VertexConsumer buf,
-                                     GraphOverlayPayload payload, float alpha) {
+    /** Node markers — a small wireframe box per node, colored by kind (depth-tested lines). */
+    private static void drawNodes(PoseStack pose, VertexConsumer buf,
+                                  GraphOverlayPayload payload, float alpha) {
         Matrix4f m = pose.last().pose();
-
-        // Nodes — small boxes.
         for (var n : payload.nodes()) {
             int r, g, b;
             switch (n.kind()) {
@@ -184,73 +225,43 @@ public final class GraphOverlay {
             }
             drawBox(m, buf, n.x() + 0.5f, n.y() + 0.5f, n.z() + 0.5f, 0.25f, r, g, b, alpha);
         }
+    }
 
-        // Edges — colored as a pressure gradient along the run when fluid can
-        // reach them; dim neutral gray when dry (letters give identity). Arrowhead
-        // if flowing.
-        List<? extends GraphOverlayPayload.EdgeEntry> edges = payload.edges();
-        for (int ei = 0; ei < edges.size(); ei++) {
-            var e = edges.get(ei);
+    /**
+     * Edge rods — a thin extruded square down each pipe's centre, colored by the pressure gradient
+     * along the run when fluid can reach it, dim gray when dry, magenta when held (the letters give
+     * identity). Flowing edges also get an arrowhead. All in the no-depth quad batch so the rod is
+     * visible through the pipe body.
+     */
+    private static void drawEdges(PoseStack pose, VertexConsumer buf,
+                                  GraphOverlayPayload payload, float alpha) {
+        Matrix4f m = pose.last().pose();
+        for (var e : payload.edges()) {
             boolean flowing = e.direction() == GraphOverlayPayload.EdgeEntry.DIR_FORWARD;
             boolean held = e.direction() == GraphOverlayPayload.EdgeEntry.DIR_HELD;
             List<Long> pts = e.points();
             List<Float> pressures = e.pressures();
             // A HELD column is drawn solid magenta (no gradient) so the stored head reads at a glance.
             boolean gradient = !held && pressures.size() == pts.size() && pts.size() >= 2;
-
             int[] fallback = held ? HELD_EDGE_COLOR : DRY_EDGE_COLOR;
+
             for (int i = 1; i < pts.size(); i++) {
                 BlockPos p0 = BlockPos.of(pts.get(i - 1));
                 BlockPos p1 = BlockPos.of(pts.get(i));
                 int[] c0 = gradient ? pressureColor(pressures.get(i - 1)) : fallback;
                 int[] c1 = gradient ? pressureColor(pressures.get(i)) : fallback;
-                tube(m, buf,
+                rodSegment(m, buf,
                         p0.getX() + 0.5f, p0.getY() + 0.5f, p0.getZ() + 0.5f,
                         p1.getX() + 0.5f, p1.getY() + 0.5f, p1.getZ() + 0.5f,
-                        EDGE_TUBE_RADIUS, c0, c1, alpha);
+                        c0, c1, alpha);
             }
             if (flowing && pts.size() >= 2) {
                 int[] tip = gradient ? pressureColor(pressures.get(pts.size() - 1)) : fallback;
                 BlockPos last = BlockPos.of(pts.get(pts.size() - 1));
                 BlockPos prev = BlockPos.of(pts.get(pts.size() - 2));
-                drawArrowhead(m, buf, prev, last, tip[0], tip[1], tip[2], alpha);
+                drawArrowheadRod(m, buf, prev, last, tip, alpha);
             }
         }
-    }
-
-    /**
-     * Draws the solved head as a translucent horizontal plane: one tile per edge point at the head
-     * elevation (gauge pressure + the cell's Y), colored by the same pressure ramp as the tube. A
-     * settled run reads as one flat sheet; a gradient steps. Lets you SEE where the head — the fluid
-     * surface the engine settles to — sits in the world. Only drawn where the edge had solved heads
-     * (its per-point pressures are populated); a dry run shows no plane.
-     */
-    private static void drawHeadPlanes(PoseStack pose, VertexConsumer buf,
-                                       GraphOverlayPayload payload, float fade) {
-        Matrix4f m = pose.last().pose();
-        int alpha = (int) (255 * 0.3f * Math.max(0.3f, fade));
-        for (var e : payload.edges()) {
-            List<Long> pts = e.points();
-            List<Float> pressures = e.pressures();
-            if (pressures.size() != pts.size()) continue; // no solved heads → no plane
-            for (int i = 0; i < pts.size(); i++) {
-                BlockPos p = BlockPos.of(pts.get(i));
-                float head = pressures.get(i) + p.getY() + 0.5f;
-                if (!Float.isFinite(head)) continue;
-                float x = p.getX() + 0.5f, z = p.getZ() + 0.5f;
-                int[] c = pressureColor(pressures.get(i));
-                float s = HEAD_PLANE_HALF;
-                planeVertex(m, buf, x - s, head, z - s, c, alpha);
-                planeVertex(m, buf, x + s, head, z - s, c, alpha);
-                planeVertex(m, buf, x + s, head, z + s, c, alpha);
-                planeVertex(m, buf, x - s, head, z + s, c, alpha);
-            }
-        }
-    }
-
-    private static void planeVertex(Matrix4f m, VertexConsumer buf,
-                                    float x, float y, float z, int[] c, int alpha) {
-        buf.addVertex(m, x, y, z).setColor(c[0], c[1], c[2], alpha);
     }
 
     /**
@@ -287,24 +298,53 @@ public final class GraphOverlay {
         return new int[] { (int) (r * 255), (int) (g * 255), (int) (b * 255) };
     }
 
-    private static void drawArrowhead(Matrix4f m, VertexConsumer buf,
-                                      BlockPos from, BlockPos to,
-                                      int r, int g, int b, float a) {
+    /** Two short backward-flaring rods at the run's end forming an arrowhead along the flow. */
+    private static void drawArrowheadRod(Matrix4f m, VertexConsumer buf,
+                                         BlockPos from, BlockPos to, int[] c, float a) {
         float fx = from.getX() + 0.5f, fy = from.getY() + 0.5f, fz = from.getZ() + 0.5f;
         float tx = to.getX() + 0.5f, ty = to.getY() + 0.5f, tz = to.getZ() + 0.5f;
         float dx = tx - fx, dy = ty - fy, dz = tz - fz;
         float len = (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
         if (len < 0.001f) return;
         dx /= len; dy /= len; dz /= len;
-        // Two short backward-flaring segments to look like an arrowhead.
         float back = 0.35f, side = 0.2f;
         float bx = tx - dx * back, by = ty - dy * back, bz = tz - dz * back;
         // Perpendicular axis (pick world-up unless edge is vertical).
         float px, py, pz;
         if (Math.abs(dy) > 0.9f) { px = 1; py = 0; pz = 0; }
         else { px = 0; py = 1; pz = 0; }
-        line(m, buf, tx, ty, tz, bx + px * side, by + py * side, bz + pz * side, r, g, b, a);
-        line(m, buf, tx, ty, tz, bx - px * side, by - py * side, bz - pz * side, r, g, b, a);
+        rodSegment(m, buf, tx, ty, tz, bx + px * side, by + py * side, bz + pz * side, c, c, a);
+        rodSegment(m, buf, tx, ty, tz, bx - px * side, by - py * side, bz - pz * side, c, c, a);
+    }
+
+    /**
+     * Draws a thin square rod (a ~1px square extruded) from (x0,y0,z0) to (x1,y1,z1) as four side
+     * quads, vertex colors blended start→end. Emitted into the no-depth quad batch so it reads as a
+     * line threaded through the pipe regardless of the pipe's opacity.
+     */
+    private static void rodSegment(Matrix4f m, VertexConsumer buf,
+                                   float x0, float y0, float z0,
+                                   float x1, float y1, float z1,
+                                   int[] c0, int[] c1, float a) {
+        float[][] offs = crossSection(x1 - x0, y1 - y0, z1 - z0);
+        if (offs == null) return;
+        int alpha = (int) (255 * Math.max(0.25f, a));
+        for (int i = 0; i < 4; i++) {
+            float[] o0 = offs[i];
+            float[] o1 = offs[(i + 1) % 4];
+            // One side face of the square prism, wound p0.o0 → p0.o1 → p1.o1 → p1.o0.
+            quadVertex(m, buf, x0, y0, z0, o0, c0, alpha);
+            quadVertex(m, buf, x0, y0, z0, o1, c0, alpha);
+            quadVertex(m, buf, x1, y1, z1, o1, c1, alpha);
+            quadVertex(m, buf, x1, y1, z1, o0, c1, alpha);
+        }
+    }
+
+    /** One rod vertex at a corner offset (scaled to {@link #ROD_HALF}); POSITION_COLOR, no normal. */
+    private static void quadVertex(Matrix4f m, VertexConsumer buf,
+                                   float cx, float cy, float cz, float[] off, int[] c, int alpha) {
+        buf.addVertex(m, cx + off[0] * ROD_HALF, cy + off[1] * ROD_HALF, cz + off[2] * ROD_HALF)
+                .setColor(c[0], c[1], c[2], alpha);
     }
 
     private static void drawBox(Matrix4f m, VertexConsumer buf,
@@ -329,19 +369,12 @@ public final class GraphOverlay {
     }
 
     /**
-     * Draws a rectangular tube wrapping the segment (x0,y0,z0)->(x1,y1,z1): four longitudinal
-     * edges offset radius from the axis, capped by a square ring at each end. This wraps the
-     * pipe instead of running a line through its center, keeping the outline visible.
-     * The longitudinal lines blend from the start color to the end color, so chained
-     * segments form a continuous gradient.
+     * The four corner directions of a square cross-section orthogonal to (dx,dy,dz), as unit
+     * offsets; null when the direction is degenerate.
      */
-    private static void tube(Matrix4f m, VertexConsumer buf,
-                             float x0, float y0, float z0,
-                             float x1, float y1, float z1,
-                             float radius, int[] colorStart, int[] colorEnd, float a) {
-        float dx = x1 - x0, dy = y1 - y0, dz = z1 - z0;
+    private static float[][] crossSection(float dx, float dy, float dz) {
         float len = (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
-        if (len < 1e-5f) return;
+        if (len < 1e-5f) return null;
         dx /= len; dy /= len; dz /= len;
 
         // Reference axis not parallel to the direction, so the cross-product is well-defined.
@@ -359,34 +392,12 @@ public final class GraphOverlay {
         float vy = dz * ux - dx * uz;
         float vz = dx * uy - dy * ux;
 
-        // Four corner directions of the square cross-section.
-        float[][] offs = {
+        return new float[][] {
                 { ux + vx, uy + vy, uz + vz },
                 { ux - vx, uy - vy, uz - vz },
                 { -ux - vx, -uy - vy, -uz - vz },
                 { -ux + vx, -uy + vy, -uz + vz },
         };
-        for (float[] o : offs) {
-            float ox = o[0] * radius, oy = o[1] * radius, oz = o[2] * radius;
-            gradientLine(m, buf, x0 + ox, y0 + oy, z0 + oz, x1 + ox, y1 + oy, z1 + oz,
-                    colorStart, colorEnd, a);
-        }
-        drawRing(m, buf, x0, y0, z0, offs, radius, colorStart[0], colorStart[1], colorStart[2], a);
-        drawRing(m, buf, x1, y1, z1, offs, radius, colorEnd[0], colorEnd[1], colorEnd[2], a);
-    }
-
-    private static void drawRing(Matrix4f m, VertexConsumer buf,
-                                 float cx, float cy, float cz,
-                                 float[][] offs, float radius,
-                                 int r, int g, int b, float a) {
-        for (int i = 0; i < offs.length; i++) {
-            float[] o0 = offs[i];
-            float[] o1 = offs[(i + 1) % offs.length];
-            line(m, buf,
-                    cx + o0[0] * radius, cy + o0[1] * radius, cz + o0[2] * radius,
-                    cx + o1[0] * radius, cy + o1[1] * radius, cz + o1[2] * radius,
-                    r, g, b, a);
-        }
     }
 
     private static void line(Matrix4f m, VertexConsumer buf,
@@ -411,5 +422,20 @@ public final class GraphOverlay {
         buf.addVertex(m, x1, y1, z1).setColor(c1[0], c1[1], c1[2], alpha).setNormal(nx, ny, nz);
     }
 
-    private record ActiveOverlay(GraphOverlayPayload payload, long createdMs) {}
+    /**
+     * A live overlay: {@code firstSeenMs} anchors the 30s lifetime and fade (a refresh does not
+     * extend it), {@code lastRequestMs} throttles the re-request, {@code payload} is swapped in place
+     * on each refresh.
+     */
+    private static final class ActiveOverlay {
+        private GraphOverlayPayload payload;
+        private final long firstSeenMs;
+        private long lastRequestMs;
+
+        ActiveOverlay(GraphOverlayPayload payload, long firstSeenMs) {
+            this.payload = payload;
+            this.firstSeenMs = firstSeenMs;
+            this.lastRequestMs = firstSeenMs;
+        }
+    }
 }
