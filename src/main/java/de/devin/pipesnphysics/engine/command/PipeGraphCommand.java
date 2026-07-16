@@ -9,20 +9,21 @@ import com.simibubi.create.content.fluids.pipes.VanillaFluidTargets;
 import com.simibubi.create.content.fluids.pump.PumpBlock;
 import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
-import de.devin.pipesnphysics.engine.BoundaryColumn;
-import de.devin.pipesnphysics.engine.Edge;
-import de.devin.pipesnphysics.engine.EdgeFlow;
-import de.devin.pipesnphysics.engine.FluidEngine;
-import de.devin.pipesnphysics.engine.FlowSolver;
-import de.devin.pipesnphysics.engine.Graph;
-import de.devin.pipesnphysics.engine.GraphCache;
-import de.devin.pipesnphysics.engine.HandlerRoles;
-import de.devin.pipesnphysics.engine.Node;
-import de.devin.pipesnphysics.engine.PipeProbe;
-import de.devin.pipesnphysics.engine.RelayDetector;
-import de.devin.pipesnphysics.engine.Solution;
 import de.devin.pipesnphysics.compat.SableCompat;
+import de.devin.pipesnphysics.engine.EdgeFlow;
+import de.devin.pipesnphysics.engine.FlowSolver;
+import de.devin.pipesnphysics.engine.FluidEngine;
+import de.devin.pipesnphysics.engine.Solution;
+import de.devin.pipesnphysics.engine.boundary.BoundaryColumn;
+import de.devin.pipesnphysics.engine.boundary.HandlerRoles;
+import de.devin.pipesnphysics.engine.boundary.RelayDetector;
+import de.devin.pipesnphysics.engine.graph.Edge;
+import de.devin.pipesnphysics.engine.graph.Graph;
+import de.devin.pipesnphysics.engine.graph.GraphCache;
+import de.devin.pipesnphysics.engine.graph.Node;
 import de.devin.pipesnphysics.engine.net.GraphOverlayPayload;
+import de.devin.pipesnphysics.engine.probe.PipeProbe;
+import de.devin.pipesnphysics.engine.store.PipeStore;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.core.BlockPos;
@@ -41,6 +42,8 @@ import net.neoforged.neoforge.fluids.capability.IFluidHandler;
 import net.neoforged.neoforge.fluids.capability.IFluidHandler.FluidAction;
 import net.neoforged.neoforge.network.PacketDistributor;
 
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -90,7 +93,7 @@ public final class PipeGraphCommand {
         Resolved resolved = recentSolve(level, target);
         if (resolved == null) return 1; // network vanished between build and solve
 
-        sendText(player, level, resolved.graph(), resolved.solution());
+        sendText(player, level, resolved.graph(), resolved.solution(), target);
         PacketDistributor.sendToPlayer(player,
                 buildPayload(level, resolved.graph(), resolved.solution(), target));
         return 1;
@@ -184,9 +187,9 @@ public final class PipeGraphCommand {
         if (seed != null) {
             Graph g = FluidEngine.buildGraph(level, seed);
             if (!g.isEmpty()) {
-                Solution s = FluidEngine.simulate(level, seed);
+                Solution s = FluidEngine.solveFresh(level, seed);
                 send(player, "§7— network it connects to (seed " + seed.toShortString() + ") —");
-                sendText(player, level, g, s);
+                sendText(player, level, g, s, pos);
                 PacketDistributor.sendToPlayer(player, buildPayload(level, g, s, seed));
             }
         }
@@ -316,26 +319,69 @@ public final class PipeGraphCommand {
         return seed;
     }
 
-    private static void sendText(ServerPlayer player, ServerLevel level, Graph g, Solution s) {
+    private static void sendText(ServerPlayer player, ServerLevel level, Graph g, Solution s, BlockPos target) {
         send(player, "§e--- Pipe Graph ---");
         send(player, "§7Nodes: §f" + g.nodes().size() + "  §7Edges: §f" + g.edges().size());
+        send(player, locateTarget(g, target));
+        printNodes(player, level, g, s, target);
+        sendFluidStats(player, level, g);
+        send(player, "§e--- Edges ---");
+        printEdges(player, g, s, target);
+        printTransfers(player, s);
+    }
+
+    /**
+     * Where the flagged (crosshair) position sits in the contracted graph — the whole reason a
+     * player runs /pipegraph on a specific pipe. A mid-run cell appears in no node or edge line
+     * (an edge prints only its two endpoints), so without this callout the dump never contains
+     * the coordinates of the very pipe being flagged.
+     */
+    private static String locateTarget(Graph g, BlockPos target) {
+        Node node = g.nodeAt(target);
+        if (node != null) {
+            return "§6Flagged: §f" + target.toShortString() + " §7— node §f" + node.kind();
+        }
+        for (Edge e : g.edges()) {
+            int i = e.pipes().indexOf(target);
+            if (i < 0) continue;
+            return String.format("§6Flagged: §f%s §7— edge §e%s §7cell §f%d§7/%d (%s ↔ %s)",
+                    target.toShortString(), GraphOverlayPayload.edgeLetter(e.index()),
+                    i + 1, e.pipes().size(),
+                    g.node(e.a()).pos().toShortString(), g.node(e.b()).pos().toShortString());
+        }
+        return "§6Flagged: §f" + target.toShortString() + " §7— §cnot part of this network";
+    }
+
+    /** One chat line per node (position, kind, heads, RPM) plus its fluid/pulley/probe/dock detail lines. */
+    private static void printNodes(ServerPlayer player, ServerLevel level, Graph g, Solution s, BlockPos target) {
         FluidStack probeFluid = firstPresentFluid(level, g);
         for (Node n : g.nodes()) {
             Double head = s.nodeHeads().get(n.index());
             Double ceiling = s.nodeCeilings().get(n.index());
             String block = blockName(level, n);
-            send(player, String.format("  §f%s §7%s §b%s §7y=§f%.1f%s%s%s%s",
+            send(player, String.format("  §f%s §7%s §b%s §7y=§f%.1f%s%s%s%s%s",
                     n.pos().toShortString(), n.kind(), block,
                     n.worldY(),
                     head != null ? String.format(" §7head=§f%.2f", head) : "",
                     ceiling != null ? String.format(" §7ceil=§b%.2f", ceiling) : " §8ceil=∅",
                     n.pumpFacing() != null ? " §7face=§f" + n.pumpFacing() : "",
-                    n.isPump() ? String.format(" §7rpm=§f%.0f", pumpSpeed(level, n)) : ""));
+                    n.isPump() ? String.format(" §7rpm=§f%.0f", pumpSpeed(level, n)) : "",
+                    n.pos().equals(target) ? " §6← flagged" : ""));
             BoundaryColumn column = columnOf(level, n);
             if (column != null && !column.contents().isEmpty() && column.contentMb() > 0) {
                 send(player, "      §7" + (n.isOpenEnd()
                         ? "draws §f" + column.contents().getHoverName().getString()
                         : fluidSummary(column)));
+            }
+            // A junction/gate cell is a one-cell slot fluid must traverse — show its live content,
+            // else the dump reads as if junctions could not hold fluid at all.
+            if (n.isClosedGate() || n.kind() == Node.Kind.JUNCTION) {
+                PipeStore.Store slot = PipeStore.at(level, n.pos());
+                if (slot != null) {
+                    send(player, String.format("      §7slot holds §f%d§7/%d mB%s", slot.amount(),
+                            PipeStore.capacityMb(), slot.amount() > 0
+                                    ? " §f" + slot.fluid().getHoverName().getString() : ""));
+                }
             }
             String pulley = pulleyDiagnostic(level, n);
             if (pulley != null) send(player, "      §c" + pulley);
@@ -344,8 +390,10 @@ public final class PipeGraphCommand {
             String dock = dockingDiagnostic(level, n);
             if (dock != null) send(player, "      §6" + dock);
         }
-        sendFluidStats(player, level, g);
-        send(player, "§e--- Edges ---");
+    }
+
+    /** One chat line per edge: endpoints, length, status word, and the solved vs actual rate. */
+    private static void printEdges(ServerPlayer player, Graph g, Solution s, BlockPos target) {
         for (Edge e : g.edges()) {
             EdgeFlow flow = s.edgeFlows().get(e.index());
             int rate = PipeProbe.actualEdgeFlow(g, s, e); // mB actually moved, not the hydraulic flow
@@ -363,12 +411,17 @@ public final class PipeGraphCommand {
             }
             Solution.Reason reason = s.edgeReasons().get(e.index());
             Node a = g.node(e.a()), b = g.node(e.b());
-            send(player, String.format("  §e%s §f%s §7↔ §f%s §7len=%d §7%s §7solved=%d actual=%d mB/t%s",
+            send(player, String.format("  §e%s §f%s §7↔ §f%s §7len=%d §7%s §7solved=%d actual=%d mB/t%s%s",
                     GraphOverlayPayload.edgeLetter(e.index()),
                     a.pos().toShortString(), b.pos().toShortString(),
                     e.length(), dir, flow.mbPerTick(), rate,
-                    reason != null ? " §8[" + reason + "]" : ""));
+                    reason != null ? " §8[" + reason + "]" : "",
+                    e.pipes().contains(target) ? " §6← flagged" : ""));
         }
+    }
+
+    /** The tick's planned endpoint transfers (diagnostics — execution is the brigade). */
+    private static void printTransfers(ServerPlayer player, Solution s) {
         if (s.hasTransfer()) {
             for (Solution.Transfer transfer : s.transfers()) {
                 send(player, String.format("§a> %d mB %s : %s → %s",
@@ -384,52 +437,60 @@ public final class PipeGraphCommand {
     private static GraphOverlayPayload buildPayload(ServerLevel level, Graph g, Solution s, BlockPos seed) {
         List<GraphOverlayPayload.NodeEntry> nodes = new ArrayList<>(g.nodes().size());
         for (Node n : g.nodes()) {
-            byte kind = switch (n.kind()) {
-                case HANDLER -> GraphOverlayPayload.NodeEntry.KIND_HANDLER;
-                case PUMP -> GraphOverlayPayload.NodeEntry.KIND_PUMP;
-                case JUNCTION, CLOSED_GATE -> GraphOverlayPayload.NodeEntry.KIND_JUNCTION;
-                case OPEN_END -> GraphOverlayPayload.NodeEntry.KIND_OPEN_END;
-            };
-            nodes.add(new GraphOverlayPayload.NodeEntry(
-                    n.pos().getX(), n.pos().getY(), n.pos().getZ(), kind,
-                    nodeLabel(level, n, s.nodeHeads().get(n.index()))));
+            nodes.add(nodeEntry(level, s, n));
         }
-
         List<GraphOverlayPayload.EdgeEntry> edges = new ArrayList<>(g.edges().size());
         for (Edge e : g.edges()) {
-            EdgeFlow flow = s.edgeFlows().get(e.index());
-            // The overlay reflects the ACTUAL fluid moved, like the pipe/pump goggle and the chat
-            // dump's actual= column — NOT the solver's hydraulic flow. So an edge whose source/sink
-            // throttles a solved flow down to nothing draws no arrow instead of a phantom one.
-            int actual = PipeProbe.actualEdgeFlow(g, s, e);
-            Node a = g.node(e.a()), b = g.node(e.b());
-
-            List<BlockPos> orderedFromA = new ArrayList<>();
-            orderedFromA.add(a.pos());
-            orderedFromA.addAll(e.pipes());
-            orderedFromA.add(b.pos());
-            List<Float> pressuresFromA = pointPressures(level, s, e, orderedFromA);
-
-            boolean reversed = flow.direction() == EdgeFlow.Direction.B_TO_A;
-            List<BlockPos> ordered = reversed ? reverse(orderedFromA) : orderedFromA;
-            List<Float> pressures = reversed ? reverse(pressuresFromA) : pressuresFromA;
-
-            // Arrow only when fluid actually moves; a solved-but-stalled run still shows its rod
-            // (no arrow), a held column stays magenta.
-            byte dir = s.heldEdges().contains(e.index())
-                    ? GraphOverlayPayload.EdgeEntry.DIR_HELD
-                    : actual > 0
-                    ? GraphOverlayPayload.EdgeEntry.DIR_FORWARD
-                    : s.stalledEdges().contains(e.index())
-                    ? GraphOverlayPayload.EdgeEntry.DIR_STALLED
-                    : GraphOverlayPayload.EdgeEntry.DIR_NONE;
-
-            List<Long> packed = new ArrayList<>(ordered.size());
-            for (BlockPos p : ordered) packed.add(p.asLong());
-            edges.add(new GraphOverlayPayload.EdgeEntry(packed, actual, dir, pressures));
+            edges.add(edgeEntry(level, g, s, e));
         }
-
         return new GraphOverlayPayload(seed.asLong(), nodes, edges);
+    }
+
+    /** One node's overlay entry: position, box kind, and its two-line floating label. */
+    private static GraphOverlayPayload.NodeEntry nodeEntry(ServerLevel level, Solution s, Node n) {
+        byte kind = switch (n.kind()) {
+            case HANDLER -> GraphOverlayPayload.NodeEntry.KIND_HANDLER;
+            case PUMP -> GraphOverlayPayload.NodeEntry.KIND_PUMP;
+            case JUNCTION, CLOSED_GATE -> GraphOverlayPayload.NodeEntry.KIND_JUNCTION;
+            case OPEN_END -> GraphOverlayPayload.NodeEntry.KIND_OPEN_END;
+        };
+        return new GraphOverlayPayload.NodeEntry(
+                n.pos().getX(), n.pos().getY(), n.pos().getZ(), kind,
+                nodeLabel(level, n, s.nodeHeads().get(n.index())));
+    }
+
+    /** One edge's overlay entry: its cells ordered along the flow, per-point pressures, and arrow state. */
+    private static GraphOverlayPayload.EdgeEntry edgeEntry(ServerLevel level, Graph g, Solution s, Edge e) {
+        EdgeFlow flow = s.edgeFlows().get(e.index());
+        // The overlay reflects the ACTUAL fluid moved, like the pipe/pump goggle and the chat
+        // dump's actual= column — NOT the solver's hydraulic flow. So an edge whose source/sink
+        // throttles a solved flow down to nothing draws no arrow instead of a phantom one.
+        int actual = PipeProbe.actualEdgeFlow(g, s, e);
+        Node a = g.node(e.a()), b = g.node(e.b());
+
+        List<BlockPos> orderedFromA = new ArrayList<>();
+        orderedFromA.add(a.pos());
+        orderedFromA.addAll(e.pipes());
+        orderedFromA.add(b.pos());
+        List<Float> pressuresFromA = pointPressures(level, s, e, orderedFromA);
+
+        boolean reversed = flow.direction() == EdgeFlow.Direction.B_TO_A;
+        List<BlockPos> ordered = reversed ? reverse(orderedFromA) : orderedFromA;
+        List<Float> pressures = reversed ? reverse(pressuresFromA) : pressuresFromA;
+
+        // Arrow only when fluid actually moves; a solved-but-stalled run still shows its rod
+        // (no arrow), a held column stays magenta.
+        byte dir = s.heldEdges().contains(e.index())
+                ? GraphOverlayPayload.EdgeEntry.DIR_HELD
+                : actual > 0
+                ? GraphOverlayPayload.EdgeEntry.DIR_FORWARD
+                : s.stalledEdges().contains(e.index())
+                ? GraphOverlayPayload.EdgeEntry.DIR_STALLED
+                : GraphOverlayPayload.EdgeEntry.DIR_NONE;
+
+        List<Long> packed = new ArrayList<>(ordered.size());
+        for (BlockPos p : ordered) packed.add(p.asLong());
+        return new GraphOverlayPayload.EdgeEntry(packed, actual, dir, pressures);
     }
 
     /**
@@ -443,16 +504,20 @@ public final class PipeGraphCommand {
         Double headB = s.nodeHeads().get(e.b());
         if (headA == null || headB == null) return List.of();
 
-        int n = orderedFromA.size();
-        List<Float> pressures = new ArrayList<>(n);
-        for (int i = 0; i < n; i++) {
-            double frac = n == 1 ? 0 : (double) i / (n - 1);
+        int pointCount = orderedFromA.size();
+        List<Float> pressures = new ArrayList<>(pointCount);
+        for (int i = 0; i < pointCount; i++) {
+            double frac = pointCount == 1 ? 0 : (double) i / (pointCount - 1);
             double head = headA + (headB - headA) * frac;
             pressures.add((float) (head - SableCompat.getWorldY(level, orderedFromA.get(i))));
         }
         return pressures;
     }
 
+    /**
+     * A reversed COPY — Collections.reverse mutates in place, and the A-ordered input may be
+     * immutable (the empty pressures list) or still aliased by the unreversed branch.
+     */
     private static <T> List<T> reverse(List<T> in) {
         List<T> out = new ArrayList<>(in.size());
         for (int i = in.size() - 1; i >= 0; i--) out.add(in.get(i));
@@ -517,12 +582,13 @@ public final class PipeGraphCommand {
         String bestGive = "", bestTake = "";
         int maxGive = give, maxTake = take;
         for (Direction side : Direction.values()) {
-            IFluidHandler s = level.getCapability(Capabilities.FluidHandler.BLOCK, n.pos(), side);
-            if (s == null) continue;
-            int g = s.drain(Integer.MAX_VALUE, FluidAction.SIMULATE).getAmount();
-            int t = probe.isEmpty() ? 0 : s.fill(probe.copyWithAmount(1000), FluidAction.SIMULATE);
-            if (g > maxGive) { maxGive = g; bestGive = side.toString(); }
-            if (t > maxTake) { maxTake = t; bestTake = side.toString(); }
+            IFluidHandler faceCap = level.getCapability(Capabilities.FluidHandler.BLOCK, n.pos(), side);
+            if (faceCap == null) continue;
+            int faceGive = faceCap.drain(Integer.MAX_VALUE, FluidAction.SIMULATE).getAmount();
+            int faceTake = probe.isEmpty() ? 0
+                    : faceCap.fill(probe.copyWithAmount(1000), FluidAction.SIMULATE);
+            if (faceGive > maxGive) { maxGive = faceGive; bestGive = side.toString(); }
+            if (faceTake > maxTake) { maxTake = faceTake; bestTake = side.toString(); }
         }
         if (!bestGive.isEmpty()) line += " | face give=" + maxGive + "@" + bestGive;
         if (!bestTake.isEmpty()) line += " | face take=" + maxTake + "@" + bestTake;
@@ -544,7 +610,7 @@ public final class PipeGraphCommand {
             Object tank = be.getClass().getField("tank").get(be);
             Object connectedPos = readField(tank, "connectedPos");
             Object connectedTank = readField(tank, "connectedTank");
-            java.lang.reflect.Method canInteract = tank.getClass().getDeclaredMethod("canInteract");
+            Method canInteract = tank.getClass().getDeclaredMethod("canInteract");
             canInteract.setAccessible(true);
             Object interacts = canInteract.invoke(tank);
             String pair = "";
@@ -555,15 +621,16 @@ public final class PipeGraphCommand {
             }
             return String.format("dock: connectedPos=%s connectedTank=%s canInteract=%s%s",
                     connectedPos, connectedTank != null, interacts, pair);
-        } catch (Throwable t) {
-            return "dock: reflect failed (" + t.getClass().getSimpleName() + ")";
+        } catch (Throwable thrown) {
+            return "dock: reflect failed (" + thrown.getClass().getSimpleName() + ")";
         }
     }
 
+    /** A private field's value off the (mod-optional) docking connector internals, by name. */
     private static Object readField(Object owner, String name) throws Exception {
-        java.lang.reflect.Field f = owner.getClass().getDeclaredField(name);
-        f.setAccessible(true);
-        return f.get(owner);
+        Field field = owner.getClass().getDeclaredField(name);
+        field.setAccessible(true);
+        return field.get(owner);
     }
 
     /** The first non-empty fluid found on any column of the network, used to probe what sinks will take. */

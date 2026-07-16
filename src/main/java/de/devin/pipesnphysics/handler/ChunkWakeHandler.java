@@ -4,7 +4,7 @@ import com.simibubi.create.content.fluids.FluidPropagator;
 import de.devin.pipesnphysics.PipesNPhysics;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.engine.EngineTickHandler;
-import de.devin.pipesnphysics.engine.GraphCache;
+import de.devin.pipesnphysics.engine.graph.GraphCache;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.neoforged.bus.api.SubscribeEvent;

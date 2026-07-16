@@ -9,6 +9,7 @@
     "FluidValveBlockEntityMixin",
     "ValveHandleBlockEntityMixin",
     "GravityFlowMixin",
+    "PipeContentCarryMixin",
     "PipeHeartbeatMixin",
     "FluidTankAccessor",
     "OpenEndedPipeMixin",

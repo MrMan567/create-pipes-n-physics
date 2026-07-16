@@ -62,6 +62,14 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
             pipesnphysics$lang(PipeStatusText.reasonKey(data))
                     .style(PipeStatusText.color(data.status()))
                     .forGoggles(tooltip, 1);
+            // An air break has already snapped the column over the crest, so there is no "margin
+            // left" to report — name the concrete fix instead (the same shape as the "Reach limit"
+            // action line). The suppressed suction-margin readout lives in the sneak block below.
+            if (data.statusDetail() == PipeStatusPayload.DETAIL_CREST) {
+                pipesnphysics$lang("gui.goggles.air_break_fix")
+                        .style(ChatFormatting.RED)
+                        .forGoggles(tooltip, 1);
+            }
         }
 
         if (!data.fluid().isEmpty()) {
@@ -69,6 +77,15 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
             if (!flowing) {
                 pipesnphysics$text(data.fluid().getHoverName().getString())
                         .style(ChatFormatting.AQUA)
+                        .forGoggles(tooltip, 1);
+            }
+            // The cell's real stored volume — pipes hold fluid now, so make it inspectable.
+            if (isPlayerSneaking && data.holdsMb() > 0) {
+                pipesnphysics$lang("gui.goggles.holds")
+                        .style(ChatFormatting.GRAY)
+                        .add(pipesnphysics$text(LangNumberFormat.format(data.holdsMb()))
+                                .style(ChatFormatting.AQUA))
+                        .add(pipesnphysics$lang("gui.goggles.mb").style(ChatFormatting.DARK_GRAY))
                         .forGoggles(tooltip, 1);
             }
             if (isPlayerSneaking) pipesnphysics$addFluidProperties(tooltip, data);
@@ -84,10 +101,14 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
     }
 
     /**
-     * Gauge pressure as a friendly local label: a positive column pushing down on
-     * this cell ("Push here") or a negative one pulling at it ("Pull here", shown
-     * as a positive magnitude rather than a minus sign). Under suction, the margin
-     * left before the column breaks ("Air-break in", in blocks of further lift).
+     * Gauge pressure in plain speech, each number carrying the words that say what it measures:
+     * a positive gauge is the fluid standing OVER this cell ("3.2 blocks of fluid overhead"), a
+     * negative one is how far the cell hangs ABOVE the waterline, held by suction ("2.1 blocks
+     * above the waterline") — never one shared unit for the two opposite ideas, and no minus
+     * signs. The air-break margin is anchored to its real reference ("of climb left on this
+     * run"): it is measured at the run's WORST point (the crest), so it deliberately does not do
+     * arithmetic with the local suction number, and a comfortable margin renders CALM (green)
+     * rather than reading as a standing warning — gold only under 2, red under 1.
      */
     @Unique
     private void pipesnphysics$addPressureLines(List<Component> tooltip, PipeStatusPayload data) {
@@ -98,16 +119,18 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
                     .style(ChatFormatting.GRAY)
                     .add(pipesnphysics$text(LangNumberFormat.format(Math.abs(pressure)))
                             .style(push ? ChatFormatting.AQUA : ChatFormatting.GOLD))
-                    .add(pipesnphysics$lang("gui.goggles.pressure_unit").style(ChatFormatting.DARK_GRAY))
+                    .add(pipesnphysics$lang(push ? "gui.goggles.pressure_unit" : "gui.goggles.suction_unit")
+                            .style(ChatFormatting.DARK_GRAY))
                     .forGoggles(tooltip, 1);
         }
         if (data.hasSuctionMargin()) {
             float margin = data.suctionMarginBlocks();
+            ChatFormatting color = margin < 1 ? ChatFormatting.RED
+                    : margin < 2 ? ChatFormatting.GOLD : ChatFormatting.GREEN;
             pipesnphysics$lang("gui.goggles.suction_margin")
                     .style(ChatFormatting.GRAY)
-                    .add(pipesnphysics$text(LangNumberFormat.format(margin))
-                            .style(margin < 1 ? ChatFormatting.RED : ChatFormatting.GOLD))
-                    .add(pipesnphysics$lang("gui.goggles.blocks").style(ChatFormatting.DARK_GRAY))
+                    .add(pipesnphysics$text(LangNumberFormat.format(margin)).style(color))
+                    .add(pipesnphysics$lang("gui.goggles.suction_margin_unit").style(ChatFormatting.DARK_GRAY))
                     .forGoggles(tooltip, 1);
         }
     }

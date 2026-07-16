@@ -1,15 +1,9 @@
 package de.devin.pipesnphysics.engine;
 
-import com.simibubi.create.content.fluids.hosePulley.HosePulleyBlockEntity;
-import com.simibubi.create.content.fluids.pipes.VanillaFluidTargets;
+import de.devin.pipesnphysics.engine.graph.Graph;
+import de.devin.pipesnphysics.engine.graph.GraphBuilder;
 import net.minecraft.core.BlockPos;
-import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
-import net.neoforged.neoforge.fluids.FluidStack;
-import net.neoforged.neoforge.fluids.capability.IFluidHandler;
-import net.neoforged.neoforge.fluids.capability.IFluidHandler.FluidAction;
-
-import java.util.List;
 
 /**
  * Top-level entry point for the fluid engine.
@@ -22,17 +16,19 @@ import java.util.List;
  *
  *   2. {@link FlowSolver#solve} reads the live tank fills and pump speeds, runs the
  *      implicit hydraulic solve (see {@link de.devin.pipesnphysics.engine.solve.NetworkSolver}),
- *      and returns a {@link Solution}: per-edge flow for visualization plus the list
- *      of endpoint-to-endpoint transfers for this tick. Solving never mutates the world.
+ *      and returns a {@link Solution}: per-edge flow plus the per-fluid passes for this
+ *      tick. Solving never mutates the world.
  *
- *   3. {@link #apply} executes the transfers through {@code IFluidHandler} with the
- *      simulate-then-execute pattern, so the engine interoperates with any mod's
- *      fluid containers and can never duplicate or destroy fluid: each pair moves
- *      exactly {@code min(what the source gave, what the sink accepted)}.
+ *   3. {@link #apply} executes the passes as conserved plug flow through the pipes'
+ *      own stored volume ({@link PipeFlowExecutor}): sources drain into the pipes,
+ *      sinks fill from what exits them, idle runs settle toward the hydrostatic
+ *      profile. Every handler exchange is simulate-then-execute, so the engine
+ *      interoperates with any mod's containers and can neither duplicate nor destroy
+ *      fluid; every internal move is paired integer mB between cells.
  *
- * The engine is stateless — fluid lives only in the endpoint handlers, never in the
- * pipes — so saving, chunk unload, and reload need no extra persistence and always
- * resume consistently.
+ * Fluid lives in the endpoint handlers and in the pipes' saved per-cell content
+ * ({@link PipeFluidCell}), which rides the block entities through save, chunk unload,
+ * and contraption assembly — reload resumes with the exact in-transit volume.
  */
 public final class FluidEngine {
     private FluidEngine() {}
@@ -42,69 +38,19 @@ public final class FluidEngine {
         return GraphBuilder.build(level, seedPos);
     }
 
-    /** Build and solve without applying. Used by the visualizer. */
-    public static Solution simulate(ServerLevel level, BlockPos seedPos) {
+    /** Build and solve a FRESH graph without applying anything. Used by the visualizer. */
+    public static Solution solveFresh(ServerLevel level, BlockPos seedPos) {
         Graph graph = GraphBuilder.build(level, seedPos);
         return FlowSolver.solve(level, graph);
     }
 
     /**
-     * Execute a set of transfers — the caller may hold some back (e.g. until the visual fluid front
-     * reaches the sink, see {@code EngineTickHandler}). Capabilities are looked up again here — the
-     * world may have changed since the solve — and each transfer is clamped by what the source can
-     * actually give and the sink can actually take, so a stale plan degrades to a smaller (or zero)
-     * transfer instead of an error.
+     * Execute one solved tick: run the flow brigade and the idle settle over the network's
+     * stored pipe volume. Handlers are resolved fresh here — the world may have changed since
+     * the solve — and every exchange is clamped by what the source really gives and the sink
+     * really takes, so a stale plan degrades to a smaller (or zero) movement instead of an error.
      */
-    public static void apply(ServerLevel level, List<Solution.Transfer> transfers) {
-        for (Solution.Transfer transfer : transfers) {
-            IFluidHandler source = handlerAt(level, transfer.from(), transfer.fromFace());
-            IFluidHandler sink = handlerAt(level, transfer.to(), transfer.toFace());
-            if (source == null || sink == null) continue;
-
-            FluidStack drained = BoundaryColumn.drainMatching(source, transfer.fluid().copy(), FluidAction.SIMULATE);
-            if (drained.isEmpty()) continue;
-            int accepted = sink.fill(drained, FluidAction.SIMULATE);
-            if (accepted <= 0) continue;
-
-            FluidStack moved = BoundaryColumn.drainMatching(source,
-                    transfer.fluid().copyWithAmount(Math.min(accepted, drained.getAmount())),
-                    FluidAction.EXECUTE);
-            if (moved.isEmpty()) continue;
-            sink.fill(moved, FluidAction.EXECUTE);
-
-            // Tell the relay detector how much WE moved, so next tick it can subtract our fill and see
-            // whether a handler gained fluid on its own (the relay signature).
-            RelayDetector.recordApplied(transfer.from(), -moved.getAmount());
-            RelayDetector.recordApplied(transfer.to(), moved.getAmount());
-
-            // A transfer INTO an open end is a spill (intake has the open end as the
-            // SOURCE). Stamp it so the network won't suck a finite source back in for a
-            // cooldown — the no-reclaim guard for hand-placed-source intake.
-            if (BoundaryColumn.findHandler(level, transfer.to()) == null) {
-                OpenEndPipes.markSpilled(level, transfer.to());
-            } else if (level.getBlockEntity(transfer.to()) instanceof HosePulleyBlockEntity) {
-                // A transfer INTO a pulley pushes fluid out to the world; pin it as a one-way
-                // output sink so drain-priority does not reclaim the body it just filled, and so
-                // it resumes filling after a supply pause instead of flipping to a drainer.
-                OpenEndPipes.markPulleyOutput(level, transfer.to());
-            }
-        }
-    }
-
-    /**
-     * Block capability, or the open-end pipe behind a world-space position. A vanilla
-     * fluid target (cauldron/honey) exposes a coarse-granularity capability — NeoForge's
-     * {@code CauldronWrapper} only drains in whole 1000 mB steps — but the engine treats
-     * it as an OPEN_END (see {@code GraphBuilder}), so it must drain through the open-end
-     * pipe (atomic drain + buffered delivery), NOT that capability. Resolving the
-     * capability here would refuse every sub-1000 mB transfer and show flow while moving
-     * nothing — the same hijack that misclassified the node, one layer down.
-     */
-    private static IFluidHandler handlerAt(ServerLevel level, BlockPos pos, Direction face) {
-        if (!VanillaFluidTargets.canProvideFluidWithoutCapability(level.getBlockState(pos))) {
-            IFluidHandler handler = BoundaryColumn.findHandler(level, pos, face);
-            if (handler != null) return handler;
-        }
-        return OpenEndPipes.existing(level, pos);
+    public static PipeFlowExecutor.Actuals apply(ServerLevel level, Graph graph, Solution solution) {
+        return PipeFlowExecutor.run(level, graph, solution);
     }
 }

@@ -49,8 +49,10 @@ public record GraphOverlayPayload(long seed, List<NodeEntry> nodes, List<EdgeEnt
 
     /**
      * One node, by world position with its kind and a short multi-line label (the
-     * block it is plus a fluid summary for sources/sinks). {@code label} is empty for
-     * nodes the overlay should not annotate (junctions). Lines are separated by {@code \n}.
+     * block it is plus a fluid summary for sources/sinks). {@code kind} picks the box
+     * style the client draws AND decides whether a label ships at all: {@code label} is
+     * empty for nodes the overlay should not annotate (junctions). Lines are separated
+     * by {@code \n}.
      */
     public record NodeEntry(int x, int y, int z, byte kind, String label) {
         public static final byte KIND_HANDLER = 0;
@@ -71,8 +73,9 @@ public record GraphOverlayPayload(long seed, List<NodeEntry> nodes, List<EdgeEnt
 
     /**
      * One edge as an ordered list of points (from source-side endpoint through the
-     * pipe cells to the sink-side endpoint), plus a flow rate. The client draws
-     * a polyline and an arrowhead pointing toward the last point.
+     * pipe cells to the sink-side endpoint), plus a flow rate. Each point is a packed
+     * BlockPos long ({@code BlockPos.asLong}). The client draws a polyline and an
+     * arrowhead pointing toward the last point.
      *
      * direction: 0 = NONE (drawn dim/no arrow), 1 = flowing along points order,
      * 2 = stalled (pressurized along points order but nothing moves — no arrow),

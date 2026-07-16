@@ -228,6 +228,35 @@ class NetworkSolverTest {
         assertTrue(flowing.flows()[0] > 0, "a modest crest is siphoned over");
     }
 
+    /**
+     * Suction can HOLD a column over a crest, never CREATE one: a DRY crest above the reachable
+     * potential must gate the branch (nothing pushes fluid up an air-filled leg), while the same
+     * geometry with a primed (wet) crest siphons. A pump whose boost REACHES the crest still
+     * primes a dry line — that is how a siphon gets established in the first place.
+     */
+    @Test
+    void dryCrestDoesNotSelfPrimeButWetOrPumpedOnesFlow() {
+        List<NodeSpec> tanks = List.of(
+                new NodeSpec(TANK_CAPACITANCE, 60),
+                new NodeSpec(TANK_CAPACITANCE, 50));
+
+        BranchSpec dry = new BranchSpec(0, 1, 40, 0, 0, 62, 0.5, false);
+        Result gated = step(tanks, List.of(dry));
+        assertEquals(0, gated.flows()[0], 1e-9, "a dry crest above the surface never self-primes");
+        assertTrue(gated.crestBlocked()[0], "the gate reports the air break");
+
+        BranchSpec wet = new BranchSpec(0, 1, 40, 0, 0, 62, 0.5, true);
+        assertTrue(step(tanks, List.of(wet)).flows()[0] > 0, "the primed column siphons");
+
+        BranchSpec pumped = new BranchSpec(0, 1, 40, 6, +1, 62, 0.5, false);
+        assertTrue(step(tanks, List.of(pumped)).flows()[0] > 0,
+                "a pump lifting the potential over the crest primes a dry line");
+
+        BranchSpec submerged = new BranchSpec(0, 1, 40, 0, 0, 55, 0.5, false);
+        assertTrue(step(tanks, List.of(submerged)).flows()[0] > 0,
+                "a crest below the supply surface needs no priming (an ordinary downhill bump)");
+    }
+
     @Test
     void crestNearTheSuctionLimitTapersInsteadOfCliff() {
         List<NodeSpec> tanks = List.of(

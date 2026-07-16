@@ -3,9 +3,9 @@ package de.devin.pipesnphysics.engine.net;
 import de.devin.pipesnphysics.PipesNPhysics;
 import de.devin.pipesnphysics.client.PumpRangeClient;
 import de.devin.pipesnphysics.compat.SableCompat;
-import de.devin.pipesnphysics.engine.PipeProbe;
-import de.devin.pipesnphysics.engine.PumpRangeProbe;
 import de.devin.pipesnphysics.engine.command.PipeGraphCommand;
+import de.devin.pipesnphysics.engine.probe.PipeProbe;
+import de.devin.pipesnphysics.engine.probe.PumpRangeProbe;
 import de.devin.pipesnphysics.engine.render.GraphOverlay;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
@@ -30,8 +30,23 @@ public final class EnginePackets {
      * always exceeds the range and the goggle never updates — projecting through the sub-level
      * pose puts it back where the player actually sees it.
      */
-    private static boolean pipesnphysics$tooFar(ServerLevel level, BlockPos pos, ServerPlayer player) {
+    private static boolean isTooFar(ServerLevel level, BlockPos pos, ServerPlayer player) {
         return SableCompat.getWorldPos(level, pos).distanceToSqr(player.position()) > MAX_PROBE_DISTANCE_SQ;
+    }
+
+    /**
+     * The guard every probe request passes: throttle per player (tracked under the given
+     * persistent-data key, so each request kind throttles independently), range-gate by real
+     * world position, and require the queried chunk to be loaded. The throttle stamp is
+     * written first, so a too-far or unloaded request still consumes the window.
+     */
+    private static boolean allowRequest(ServerPlayer player, String throttleKey, BlockPos pos) {
+        ServerLevel level = player.serverLevel();
+        long now = level.getGameTime();
+        if (now - player.getPersistentData().getLong(throttleKey) < PROBE_THROTTLE_TICKS) return false;
+        player.getPersistentData().putLong(throttleKey, now);
+        if (isTooFar(level, pos, player)) return false;
+        return level.isLoaded(pos);
     }
 
     public static void register(RegisterPayloadHandlersEvent event) {
@@ -70,15 +85,9 @@ public final class EnginePackets {
     private static void onPumpRangeRequest(PumpRangeRequest request, IPayloadContext ctx) {
         ctx.enqueueWork(() -> {
             if (!(ctx.player() instanceof ServerPlayer player)) return;
-            ServerLevel level = player.serverLevel();
-            long now = level.getGameTime();
-            if (now - player.getPersistentData().getLong("pipesnphysics_range_at") < PROBE_THROTTLE_TICKS) return;
-            player.getPersistentData().putLong("pipesnphysics_range_at", now);
-
-            if (pipesnphysics$tooFar(level, request.pos(), player)) return;
-            if (!level.isLoaded(request.pos())) return;
-
-            PacketDistributor.sendToPlayer(player, PumpRangeProbe.probe(level, request.pos()));
+            if (!allowRequest(player, "pipesnphysics_range_at", request.pos())) return;
+            PacketDistributor.sendToPlayer(player,
+                    PumpRangeProbe.probe(player.serverLevel(), request.pos()));
         });
     }
 
@@ -89,16 +98,9 @@ public final class EnginePackets {
     private static void onGraphOverlayRequest(GraphOverlayRequest request, IPayloadContext ctx) {
         ctx.enqueueWork(() -> {
             if (!(ctx.player() instanceof ServerPlayer player)) return;
-            ServerLevel level = player.serverLevel();
-            long now = level.getGameTime();
-            if (now - player.getPersistentData().getLong("pipesnphysics_graph_at") < PROBE_THROTTLE_TICKS) return;
-            player.getPersistentData().putLong("pipesnphysics_graph_at", now);
-
             BlockPos seed = BlockPos.of(request.seed());
-            if (pipesnphysics$tooFar(level, seed, player)) return;
-            if (!level.isLoaded(seed)) return;
-
-            GraphOverlayPayload payload = PipeGraphCommand.buildOverlay(level, seed);
+            if (!allowRequest(player, "pipesnphysics_graph_at", seed)) return;
+            GraphOverlayPayload payload = PipeGraphCommand.buildOverlay(player.serverLevel(), seed);
             if (payload != null) PacketDistributor.sendToPlayer(player, payload);
         });
     }
@@ -110,15 +112,9 @@ public final class EnginePackets {
     private static void onPipeStatusRequest(PipeStatusRequest request, IPayloadContext ctx) {
         ctx.enqueueWork(() -> {
             if (!(ctx.player() instanceof ServerPlayer player)) return;
-            ServerLevel level = player.serverLevel();
-            long now = level.getGameTime();
-            if (now - player.getPersistentData().getLong("pipesnphysics_probe_at") < PROBE_THROTTLE_TICKS) return;
-            player.getPersistentData().putLong("pipesnphysics_probe_at", now);
-
-            if (pipesnphysics$tooFar(level, request.pos(), player)) return;
-            if (!level.isLoaded(request.pos())) return;
-
-            PacketDistributor.sendToPlayer(player, PipeProbe.probe(level, request.pos()));
+            if (!allowRequest(player, "pipesnphysics_probe_at", request.pos())) return;
+            PacketDistributor.sendToPlayer(player,
+                    PipeProbe.probe(player.serverLevel(), request.pos()));
         });
     }
 }

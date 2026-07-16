@@ -1,8 +1,8 @@
 package de.devin.pipesnphysics.compat;
 
-import de.devin.pipesnphysics.engine.CentrifugeField;
-import de.devin.pipesnphysics.engine.MomentumField;
-import de.devin.pipesnphysics.engine.SublevelSpinProbe;
+import de.devin.pipesnphysics.engine.motion.CentrifugeField;
+import de.devin.pipesnphysics.engine.motion.MomentumField;
+import de.devin.pipesnphysics.engine.probe.SublevelSpinProbe;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;

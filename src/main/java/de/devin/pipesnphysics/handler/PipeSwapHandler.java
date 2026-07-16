@@ -22,6 +22,7 @@ import net.minecraft.world.item.context.UseOnContext;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
+import net.neoforged.neoforge.fluids.FluidStack;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.loading.FMLEnvironment;
@@ -71,6 +72,13 @@ public class PipeSwapHandler {
             held.shrink(1);
         }
         level.setBlock(pos, placed, Block.UPDATE_ALL);
+        // Stored pipe fluid rides the replaced block entity; PipeContentCarryMixin stashes it and
+        // the replacement pipe adopts it as it initializes. A PUMP never adopts (it stores nothing
+        // in the flow model), so claim its stash here and spill it back into the network instead.
+        if (placed.getBlock() instanceof PumpBlock && level instanceof ServerLevel serverLevel) {
+            FluidStack carried = PipeContentCarry.claim(level, pos);
+            if (!carried.isEmpty()) NetworkEditHandler.spillIntoNeighbors(serverLevel, pos, carried);
+        }
         level.playSound(null, pos, SoundEvents.METAL_PLACE, SoundSource.BLOCKS, 1.0f, 1.0f);
 
         FluidPropagator.propagateChangedPipe(level, pos, placed);

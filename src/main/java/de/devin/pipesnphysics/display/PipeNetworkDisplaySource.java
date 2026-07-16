@@ -7,8 +7,8 @@ import com.simibubi.create.content.redstone.displayLink.target.DisplayTargetStat
 import com.simibubi.create.foundation.gui.ModularGuiLineBuilder;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.display.PipeDisplayMetric.Readout;
-import de.devin.pipesnphysics.engine.PipeProbe;
 import de.devin.pipesnphysics.engine.net.PipeStatusPayload;
+import de.devin.pipesnphysics.engine.probe.PipeProbe;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.MutableComponent;

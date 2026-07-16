@@ -13,28 +13,30 @@ import com.simibubi.create.content.processing.basin.BasinBlockEntity;
 import com.simibubi.create.foundation.blockEntity.behaviour.BlockEntityBehaviour;
 import com.simibubi.create.foundation.blockEntity.behaviour.fluid.SmartFluidTankBehaviour;
 import com.simibubi.create.foundation.blockEntity.behaviour.scrollValue.ScrollValueBehaviour;
+import de.devin.pipesnphysics.PipesNPhysicsConfig;
+import de.devin.pipesnphysics.api.FluidHandlerApi;
+import de.devin.pipesnphysics.api.FluidHandlerRole;
 import de.devin.pipesnphysics.client.PipeStatusText;
-import de.devin.pipesnphysics.compat.CreatePipeRendering;
-import de.devin.pipesnphysics.compat.PipeLevelData;
-import de.devin.pipesnphysics.engine.Edge;
+import de.devin.pipesnphysics.display.PipeDisplayMetric;
 import de.devin.pipesnphysics.engine.EdgeFlow;
 import de.devin.pipesnphysics.engine.EngineTickHandler;
 import de.devin.pipesnphysics.engine.FlowSolver;
-import de.devin.pipesnphysics.engine.Graph;
-import de.devin.pipesnphysics.api.FluidHandlerApi;
-import de.devin.pipesnphysics.api.FluidHandlerRole;
-import de.devin.pipesnphysics.engine.GraphBuilder;
-import de.devin.pipesnphysics.engine.HandlerRoles;
-import de.devin.pipesnphysics.engine.BoundaryColumn;
-import de.devin.pipesnphysics.engine.Node;
-import de.devin.pipesnphysics.engine.RelayDetector;
-import de.devin.pipesnphysics.engine.OpenEndPipes;
-import de.devin.pipesnphysics.engine.PipeProbe;
+import de.devin.pipesnphysics.engine.FluidEngine;
+import de.devin.pipesnphysics.engine.PipeFlowExecutor;
 import de.devin.pipesnphysics.engine.Solution;
-import de.devin.pipesnphysics.engine.ValveThrottle;
+import de.devin.pipesnphysics.engine.boundary.BoundaryColumn;
+import de.devin.pipesnphysics.engine.boundary.HandlerRoles;
+import de.devin.pipesnphysics.engine.boundary.OpenEndPipes;
+import de.devin.pipesnphysics.engine.boundary.RelayDetector;
+import de.devin.pipesnphysics.engine.graph.Edge;
+import de.devin.pipesnphysics.engine.graph.Graph;
+import de.devin.pipesnphysics.engine.graph.GraphBuilder;
+import de.devin.pipesnphysics.engine.graph.Node;
 import de.devin.pipesnphysics.engine.net.PipeStatusPayload;
-import de.devin.pipesnphysics.display.PipeDisplayMetric;
-import de.devin.pipesnphysics.PipesNPhysicsConfig;
+import de.devin.pipesnphysics.engine.probe.PipeProbe;
+import de.devin.pipesnphysics.engine.store.PipeStore;
+import de.devin.pipesnphysics.engine.valve.ValveCharacteristic;
+import de.devin.pipesnphysics.engine.valve.ValveThrottle;
 import de.devin.pipesnphysics.handler.NetworkEditHandler;
 import de.devin.pipesnphysics.mixin.FluidTankAccessor;
 import de.devin.pipesnphysics.mixin.PipeConnectionAccessor;
@@ -93,7 +95,10 @@ public class PipesNPhysicsGameTests {
         helper.succeedWhen(() -> {
             int a = amount(helper, left);
             int b = amount(helper, right);
-            if (a + b != 8000) helper.fail("fluid not conserved: " + a + " + " + b);
+            int pipes = pipesnphysics$areaPipeContent(helper, 4, 4, 2);
+            if (a + b + pipes != 8000) {
+                helper.fail("fluid not conserved: " + a + " + " + b + " + pipes " + pipes);
+            }
             if (Math.abs(a - b) > 800) helper.fail("not equalized yet: " + a + " vs " + b);
         });
     }
@@ -112,7 +117,10 @@ public class PipesNPhysicsGameTests {
         helper.succeedWhen(() -> {
             int left = amount(helper, source);
             int moved = amount(helper, sink);
-            if (left + moved != 8000) helper.fail("fluid not conserved: " + left + " + " + moved);
+            int pipes = pipesnphysics$areaPipeContent(helper, 6, 4, 4);
+            if (left + moved + pipes != 8000) {
+                helper.fail("fluid not conserved: " + left + " + " + moved + " + pipes " + pipes);
+            }
             if (left != 0) helper.fail("source still holds " + left + " mB");
         });
     }
@@ -282,11 +290,310 @@ public class PipesNPhysicsGameTests {
     }
 
     /**
+     * A pipe run that leaves a junction and loops back to the SAME junction (a ring main) must
+     * stay in the graph. The contraction walk used to record it as a self-loop edge, which the
+     * dedup dropped — its cells landed in NO node and NO edge, so they never flowed or settled
+     * and /pipegraph silently omitted them (the "pipegraph doesn't include the pipe I'm looking
+     * at" report). The builder now splits such a run at its middle cell (a promoted JUNCTION)
+     * into two parallel edges, so every ring cell belongs to the graph.
+     */
+    @GameTest(template = "piping/empty_canvas", templateNamespace = PipesNPhysics.ID, timeoutTicks = 60)
+    public static void loopBackToSameJunctionStaysInTheGraph(GameTestHelper helper) {
+        List<BlockPos> ring = List.of(
+                new BlockPos(1, 1, 1), new BlockPos(2, 1, 1), new BlockPos(3, 1, 1),
+                new BlockPos(3, 1, 2), new BlockPos(2, 1, 2), new BlockPos(1, 1, 2));
+        BlockPos stub = new BlockPos(0, 1, 1); // third connection: makes (1,1,1) a junction
+        for (BlockPos rel : ring) helper.setBlock(rel, AllBlocks.FLUID_PIPE.get());
+        helper.setBlock(stub, AllBlocks.FLUID_PIPE.get());
+        helper.runAfterDelay(5, () -> {
+            Graph g = GraphBuilder.build(helper.getLevel(), helper.absolutePos(stub));
+            for (BlockPos rel : ring) {
+                BlockPos abs = helper.absolutePos(rel);
+                boolean inGraph = g.nodeAt(abs) != null
+                        || g.edges().stream().anyMatch(e -> e.pipes().contains(abs));
+                if (!inGraph) {
+                    helper.fail("ring cell " + rel.toShortString()
+                            + " is in no node and no edge — the self-loop run was dropped");
+                    return;
+                }
+            }
+            helper.succeed();
+        });
+    }
+
+    /**
+     * A junction/gate slot holding a lighter-than-air gas must HOLD it, exactly like a gas run
+     * ({@code SettlingRun} bails on gas): the slot's waterline target mixes the node head with
+     * world Y, and a gas's head is INVERTED, so the liquid math read "drain to zero" — the slot
+     * then bled its gas into an idle edge every settle tick while the brigade pushed it back, an
+     * endless churn the player sees as the pipe "constantly filling from the top" (the TFMG
+     * coke-oven CO2 report; diagnostic signature: actual= exactly the settle rate on an idle
+     * edge). Skips when no lighter-than-air fluid is registered in this runtime.
+     */
+    @GameTest(template = "piping/empty_canvas", templateNamespace = PipesNPhysics.ID, timeoutTicks = 100)
+    public static void junctionSlotHoldsGasInsteadOfBleedingIt(GameTestHelper helper) {
+        Fluid gas = null;
+        for (Fluid f : BuiltInRegistries.FLUID) {
+            if (f.defaultFluidState().isSource() && f.getFluidType().isLighterThanAir()) {
+                gas = f;
+                break;
+            }
+        }
+        if (gas == null) {
+            helper.succeed(); // no gas fluid in this runtime — nothing to verify
+            return;
+        }
+        Fluid theGas = gas;
+
+        // Capped everywhere (no open ends, one reservoir) so NO flow can solve: settle is the only
+        // thing that could move the gas. The broken liquid-target math errs in a direction that
+        // depends on the ABSOLUTE world Y (the inverted gas head crosses zero at y≈0): above it
+        // the slot BLEEDS into the run cell, below it the slot PULLS the run cell's gas — so seed
+        // BOTH stores and assert both hold, and the test bites at any test-world elevation.
+        BlockPos tank = new BlockPos(1, 1, 1);
+        BlockPos riser = new BlockPos(1, 2, 1);
+        BlockPos center = new BlockPos(1, 3, 1); // riser + two stubs = 3 connections, a junction
+        helper.setBlock(tank, AllBlocks.FLUID_TANK.get());
+        helper.setBlock(riser, AllBlocks.FLUID_PIPE.get());
+        helper.setBlock(center, AllBlocks.FLUID_PIPE.get());
+        helper.setBlock(new BlockPos(2, 3, 1), AllBlocks.FLUID_PIPE.get());
+        helper.setBlock(new BlockPos(1, 3, 2), AllBlocks.FLUID_PIPE.get());
+        helper.setBlock(new BlockPos(3, 3, 1), Blocks.IRON_BLOCK);
+        helper.setBlock(new BlockPos(1, 3, 3), Blocks.IRON_BLOCK);
+
+        helper.runAfterDelay(10, () -> {
+            handler(helper, tank).fill(new FluidStack(theGas, 2000), IFluidHandler.FluidAction.EXECUTE);
+            PipeStore.Store slot = PipeStore.at(helper.getLevel(), helper.absolutePos(center));
+            PipeStore.Store cell = PipeStore.at(helper.getLevel(), helper.absolutePos(riser));
+            if (slot == null || cell == null) {
+                helper.fail("no pipe store at the junction/riser cell");
+                return;
+            }
+            slot.insert(new FluidStack(theGas, 200), 200);
+            slot.flush();
+            cell.insert(new FluidStack(theGas, 100), 100);
+            cell.flush();
+        });
+        helper.runAfterDelay(80, () -> {
+            PipeStore.Store slot = PipeStore.at(helper.getLevel(), helper.absolutePos(center));
+            PipeStore.Store cell = PipeStore.at(helper.getLevel(), helper.absolutePos(riser));
+            int slotHeld = slot == null ? 0 : slot.amount();
+            int cellHeld = cell == null ? 0 : cell.amount();
+            if (slotHeld < 150 || cellHeld < 90) {
+                helper.fail("settle churned the resting gas (slot " + slotHeld + "/200, run cell "
+                        + cellHeld + "/100) — the liquid waterline target moved a gas");
+                return;
+            }
+            helper.succeed();
+        });
+    }
+
+    /**
+     * Two 1x1 tanks joined SIDE-ON (a lid connection sits above the waterline — the lip walls it)
+     * by an 11-cell run arching over a y+2 crest: the minimal pump-less siphon rig. Connection
+     * states are set EXPLICITLY — a raw setBlock keeps the pipe's default state (no shape update
+     * runs on the placed block itself), and the stale open faces read as spilling open-end mouths.
+     */
+    private static List<BlockPos> buildSiphonArch(GameTestHelper helper, BlockPos tankA, BlockPos tankB) {
+        helper.setBlock(tankA, AllBlocks.FLUID_TANK.get());
+        helper.setBlock(tankB, AllBlocks.FLUID_TANK.get());
+        Block pipe = AllBlocks.FLUID_PIPE.get();
+        helper.setBlock(new BlockPos(0, 1, 1), pipeState(pipe, Direction.EAST, Direction.UP));
+        helper.setBlock(new BlockPos(0, 2, 1), pipeState(pipe, Direction.DOWN, Direction.UP));
+        helper.setBlock(new BlockPos(0, 3, 1), pipeState(pipe, Direction.DOWN, Direction.EAST));
+        for (int x = 1; x <= 5; x++) {
+            helper.setBlock(new BlockPos(x, 3, 1), pipeState(pipe, Direction.WEST, Direction.EAST));
+        }
+        helper.setBlock(new BlockPos(6, 3, 1), pipeState(pipe, Direction.WEST, Direction.DOWN));
+        helper.setBlock(new BlockPos(6, 2, 1), pipeState(pipe, Direction.DOWN, Direction.UP));
+        helper.setBlock(new BlockPos(6, 1, 1), pipeState(pipe, Direction.WEST, Direction.UP));
+        return List.of(
+                new BlockPos(0, 1, 1), new BlockPos(0, 2, 1), new BlockPos(0, 3, 1),
+                new BlockPos(1, 3, 1), new BlockPos(2, 3, 1), new BlockPos(3, 3, 1),
+                new BlockPos(4, 3, 1), new BlockPos(5, 3, 1), new BlockPos(6, 3, 1),
+                new BlockPos(6, 2, 1), new BlockPos(6, 1, 1));
+    }
+
+    private static int pipeAmount(GameTestHelper helper, BlockPos rel) {
+        PipeStore.Store cell = PipeStore.at(helper.getLevel(), helper.absolutePos(rel));
+        return cell == null ? 0 : cell.amount();
+    }
+
+    /**
+     * An UNPRIMED siphon must not start by itself: the crest sits above the source surface, and
+     * suction can only HOLD a column there, never create one — nothing pushes water up a dry,
+     * air-filled leg (the "why does this flow? that siphon is going up in y" report: the sink
+     * barely gained while the solved trickle just climbed the ascending leg). The waterline may
+     * still rise INTO the bottom leg cells (communicating vessels), but the cells above it must
+     * stay dry.
+     */
+    @GameTest(template = "piping/empty_canvas", templateNamespace = PipesNPhysics.ID, timeoutTicks = 120)
+    public static void dryCrestDoesNotSelfPrimeASiphon(GameTestHelper helper) {
+        BlockPos tankA = new BlockPos(1, 1, 1);
+        BlockPos tankB = new BlockPos(5, 1, 1);
+        buildSiphonArch(helper, tankA, tankB);
+        helper.runAfterDelay(5, () -> {
+            fill(helper, tankA, 4000);
+            fill(helper, tankB, 1000);
+        });
+        helper.runAfterDelay(100, () -> {
+            int climbA = pipeAmount(helper, new BlockPos(0, 2, 1));
+            int climbB = pipeAmount(helper, new BlockPos(6, 2, 1));
+            if (climbA > 0 || climbB > 0) {
+                helper.fail("the dry siphon climbed its leg by itself (" + climbA + " / " + climbB
+                        + " mB above the waterline, tanks A=" + amount(helper, tankA)
+                        + " B=" + amount(helper, tankB) + ") — a dry crest must not self-prime");
+                return;
+            }
+            helper.succeed();
+        });
+    }
+
+    /**
+     * The counterpart: the SAME arch with its run pre-filled (a primed column, as a pump would
+     * leave behind) must siphon source→sink — the wet crest keeps the normal suction allowance —
+     * and the sealed full column must not lose its prime to the idle waterline recede (which
+     * would show as the SOURCE gaining fluid back from its own leg).
+     */
+    @GameTest(template = "piping/empty_canvas", templateNamespace = PipesNPhysics.ID, timeoutTicks = 140)
+    public static void primedSiphonFlowsAndKeepsItsPrime(GameTestHelper helper) {
+        BlockPos tankA = new BlockPos(1, 1, 1);
+        BlockPos tankB = new BlockPos(5, 1, 1);
+        List<BlockPos> run = buildSiphonArch(helper, tankA, tankB);
+        helper.runAfterDelay(5, () -> {
+            fill(helper, tankA, 4000);
+            fill(helper, tankB, 1000);
+            for (BlockPos rel : run) {
+                PipeStore.Store cell = PipeStore.at(helper.getLevel(), helper.absolutePos(rel));
+                if (cell == null) {
+                    helper.fail("no pipe store at " + rel.toShortString());
+                    return;
+                }
+                cell.insert(new FluidStack(Fluids.WATER, PipeStore.capacityMb()), PipeStore.capacityMb());
+                cell.flush();
+            }
+        });
+        helper.runAfterDelay(120, () -> {
+            int a = amount(helper, tankA);
+            int b = amount(helper, tankB);
+            if (b < 1200 || a > 3950) {
+                helper.fail("the primed siphon did not flow (source " + a + "/4000, sink " + b
+                        + "/1000) — a wet crest within the suction limit must siphon");
+                return;
+            }
+            helper.succeed();
+        });
+    }
+
+    /**
+     * A FLOWING run below both waterlines must fill up WHILE it flows, source-side-first. The
+     * brigade's plug rules alone only top the TAIL cell (delivery gates on a full tail; every
+     * upstream cell passes what it receives, netting zero), so a submerged run froze at whatever
+     * partial fill it started with, fullest at the sink ("the 3 pipes get increasingly more
+     * fluid" report). The flowing top-up (SettlingRun.topUp) draws from the reservoirs toward
+     * the hydrostatic profile alongside the flow: all three cells must reach ~full.
+     */
+    @GameTest(template = "piping/empty_canvas", templateNamespace = PipesNPhysics.ID, timeoutTicks = 100)
+    public static void submergedFlowingRunTopsUpFromTheSourceSide(GameTestHelper helper) {
+        Block pipe = AllBlocks.FLUID_PIPE.get();
+        // Two WIDE (2x2x3) tanks, run at their BOTTOM row (both waterlines above it). The head
+        // difference stays SMALL — the freeze only shows when the flow is slow next to the cell
+        // capacity (the report's 11 mB/t; a fast plug wave keeps cells near-full anyway) — and
+        // the width gives the surfaces enough inertia that the run is still FLOWING at assert
+        // time (equalized tanks would let the ordinary idle settle fill the run and hide the bug).
+        for (int y = 1; y <= 3; y++) {
+            for (int z = 1; z <= 2; z++) {
+                helper.setBlock(new BlockPos(0, y, z), AllBlocks.FLUID_TANK.get());
+                helper.setBlock(new BlockPos(1, y, z), AllBlocks.FLUID_TANK.get());
+                helper.setBlock(new BlockPos(5, y, z), AllBlocks.FLUID_TANK.get());
+                helper.setBlock(new BlockPos(6, y, z), AllBlocks.FLUID_TANK.get());
+            }
+        }
+        List<BlockPos> run = List.of(
+                new BlockPos(2, 1, 1), new BlockPos(3, 1, 1), new BlockPos(4, 1, 1));
+        for (BlockPos rel : run) helper.setBlock(rel, pipeState(pipe, Direction.WEST, Direction.EAST));
+        helper.runAfterDelay(5, () -> {
+            fill(helper, new BlockPos(1, 1, 1), 88000); // surface 2.75 blocks up
+            fill(helper, new BlockPos(5, 1, 1), 75200); // surface 2.35 — slow flow, long window
+            for (BlockPos rel : run) {
+                PipeStore.Store cell = PipeStore.at(helper.getLevel(), helper.absolutePos(rel));
+                if (cell == null) {
+                    helper.fail("no pipe store at " + rel.toShortString());
+                    return;
+                }
+                cell.insert(new FluidStack(Fluids.WATER, 50), 50); // wet, so the plug moves freely
+                cell.flush();
+            }
+            // The handler fills fire no block event; wake the sleeping network NOW so the flow
+            // window starts immediately and the assert below lands well before equalization.
+            EngineTickHandler.markChanged(helper.getLevel(), helper.absolutePos(run.get(0)));
+        });
+        helper.runAfterDelay(35, () -> {
+            int full = PipeStore.capacityMb();
+            // Guard the premise: the run must still be flowing (tanks not yet equalized), else
+            // this asserts the idle settle rather than the flowing top-up.
+            if (amount(helper, new BlockPos(1, 1, 1)) - amount(helper, new BlockPos(5, 1, 1)) < 1500) {
+                helper.fail("rig equalized before the assert — enlarge the head difference");
+                return;
+            }
+            for (BlockPos rel : run) {
+                int held = pipeAmount(helper, rel);
+                if (held < full - 25) {
+                    helper.fail("submerged flowing cell " + rel.toShortString() + " holds " + held
+                            + "/" + full + " — the run froze at the plug's partial fill instead of"
+                            + " topping up to the waterline");
+                    return;
+                }
+            }
+            helper.succeed();
+        });
+    }
+
+    /**
+     * Swapping a pipe block IN PLACE (the shift-swap, Create's wrench window toggle, encasing)
+     * replaces the block entity — and stored fluid rides the block entity, so the glassed pipe
+     * used to come up EMPTY and the content was voided ("switch a pipe to glassed view loses its
+     * content"). {@code PipeContentCarryMixin} stashes a destroyed cell's content and the
+     * replacement cell adopts it as it initializes: swap a full pipe for its windowed variant and
+     * the fluid must survive.
+     */
+    @GameTest(template = "piping/empty_canvas", templateNamespace = PipesNPhysics.ID, timeoutTicks = 60)
+    public static void swappedPipeKeepsItsContent(GameTestHelper helper) {
+        BlockPos middle = new BlockPos(2, 1, 1);
+        // A single capped cell: no open mouths, no neighbours to settle into — the content can
+        // only survive the swap or vanish with the replaced block entity.
+        helper.setBlock(new BlockPos(1, 1, 1), Blocks.IRON_BLOCK);
+        helper.setBlock(middle, pipeState(AllBlocks.FLUID_PIPE.get(), Direction.WEST, Direction.EAST));
+        helper.setBlock(new BlockPos(3, 1, 1), Blocks.IRON_BLOCK);
+        helper.runAfterDelay(5, () -> {
+            PipeStore.Store cell = PipeStore.at(helper.getLevel(), helper.absolutePos(middle));
+            if (cell == null) {
+                helper.fail("no pipe store at the middle cell");
+                return;
+            }
+            cell.insert(new FluidStack(Fluids.WATER, 250), 250);
+            cell.flush();
+            helper.setBlock(middle, AllBlocks.GLASS_FLUID_PIPE.get().defaultBlockState()
+                    .setValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.AXIS,
+                            Direction.Axis.X));
+        });
+        helper.runAfterDelay(30, () -> {
+            PipeStore.Store cell = PipeStore.at(helper.getLevel(), helper.absolutePos(middle));
+            int held = cell == null ? 0 : cell.amount();
+            if (held < 250) {
+                helper.fail("the swapped (glassed) pipe lost its content: holds " + held + "/250");
+                return;
+            }
+            helper.succeed();
+        });
+    }
+
+    /**
      * The goggle's flow number must be the fluid ACTUALLY moved, not the solver's hydraulic
-     * flow (which the lip / max-flow caps throttle below). {@code actualEdgeFlow} reads it off
-     * the executed transfers via the edge's cut: a transfer of 37 mB across a bridge edge whose
-     * hydraulic flow is 200 must report 37, so a near-empty source no longer reads a brisk flow
-     * while only a trickle leaves the tank.
+     * flow (which the lip / max-flow caps — or an unprimed pipe — hold below). The executor
+     * records the real per-edge movement into {@code Solution.actualFlow}; a recorded 37 mB on
+     * an edge whose hydraulic flow is 200 must report 37, so a near-empty source no longer
+     * reads a brisk flow while only a trickle leaves the tank.
      */
     @GameTest(template = "piping/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 100)
     public static void gogglePipeRateReflectsActualTransfer(GameTestHelper helper) {
@@ -306,8 +613,6 @@ public class PipesNPhysicsGameTests {
                 if (!e.pipes().isEmpty()) { edge = e; break; }
             }
             if (edge == null) { helper.fail("no edge with pipes"); return; }
-            var a = g.node(edge.a());
-            var b = g.node(edge.b());
 
             List<EdgeFlow> flows = new ArrayList<>();
             for (Edge e : g.edges()) {
@@ -315,14 +620,15 @@ public class PipesNPhysicsGameTests {
                         ? new EdgeFlow(edge.index(), EdgeFlow.Direction.A_TO_B, 200)
                         : EdgeFlow.none(e.index()));
             }
-            List<Solution.Transfer> transfers = List.of(
-                    new Solution.Transfer(a.pos(), b.pos(), new FluidStack(Fluids.WATER, 37)));
-            Solution sol = new Solution(flows, transfers, Map.of(), Map.of(), Map.of(), Map.of(),
+            int[] actualFlow = new int[g.edges().size()];
+            actualFlow[edge.index()] = 37;
+            Solution sol = new Solution(flows, List.of(), List.of(), actualFlow,
+                    Map.of(), Map.of(), Map.of(), Map.of(),
                     Map.of(), Set.of(), Set.of(), Set.of(), Set.of(), Map.of(), Map.of(), true);
 
             int actual = PipeProbe.actualEdgeFlow(g, sol, edge);
             if (actual != 37) {
-                helper.fail("actualEdgeFlow=" + actual + " — expected the transferred 37 mB, "
+                helper.fail("actualEdgeFlow=" + actual + " — expected the recorded 37 mB, "
                         + "not the hydraulic 200");
                 return;
             }
@@ -341,7 +647,7 @@ public class PipesNPhysicsGameTests {
      */
     @GameTest(template = "gravity/simple_fluid_leveling", templateNamespace = PipesNPhysics.ID, timeoutTicks = 100)
     public static void valveThrottleScalesFlow(GameTestHelper helper) {
-        helper.runAfterDelay(2, () -> {
+        helper.runAfterDelay(2, () -> withLinearValveCurve(() -> {
             Level level = helper.getLevel();
 
             // The bottom of the U is a straight pipe cell connected only along X — host the valve there.
@@ -410,7 +716,7 @@ public class PipesNPhysicsGameTests {
                 return;
             }
             helper.succeed();
-        });
+        }));
     }
 
     /**
@@ -481,7 +787,8 @@ public class PipesNPhysicsGameTests {
      */
     @GameTest(template = "piping/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
     public static void valveGovernsPumpedFlowFromThePullSide(GameTestHelper helper) {
-        helper.runAfterDelay(10, () -> { // let the kinetics spin the pump up and settle its FACING
+        // let the kinetics spin the pump up and settle its FACING
+        helper.runAfterDelay(10, () -> withLinearValveCurve(() -> {
             Level level = helper.getLevel();
             BlockPos pumpRel = null;
             for (int x = 0; x < 6 && pumpRel == null; x++)
@@ -532,7 +839,7 @@ public class PipesNPhysicsGameTests {
                 return;
             }
             helper.succeed();
-        });
+        }));
     }
 
     /**
@@ -727,6 +1034,9 @@ public class PipesNPhysicsGameTests {
             BlockPos downstreamAbs = helper.absolutePos(downstreamCell);
 
             setThrottle(level, valveAbs, 0); // SHUT
+            // Give the pump time to PACK the held feed with real fluid (prime) and the settle
+            // pass time to fill the downstream section from the half-full discharge tank.
+            helper.runAfterDelay(80, () -> {
             PipeStatusPayload held = PipeProbe.probe(level, feedAbs);
             if (held.statusDetail() != PipeStatusPayload.DETAIL_HELD) {
                 helper.fail("feed cell before a shut valve not reported HELD: detail="
@@ -747,6 +1057,9 @@ public class PipesNPhysicsGameTests {
             }
 
             setThrottle(level, valveAbs, 90); // REOPEN
+            // Create's valve flips its ENABLED blockstate on its own tick once the angle opens
+            // (the mixin gates it on angle > 0) — give it a few ticks before checking the rejoin.
+            helper.runAfterDelay(10, () -> {
             Graph g = GraphBuilder.build(level, feedAbs);
             // The run must actually REJOIN — the valve is a pipe cell again, not a CLOSED_GATE wall.
             var reopened = g.nodeAt(valveAbs);
@@ -761,6 +1074,8 @@ public class PipesNPhysicsGameTests {
                 return;
             }
             helper.succeed();
+            });
+            });
         });
     }
 
@@ -994,6 +1309,23 @@ public class PipesNPhysicsGameTests {
         });
     }
 
+    /**
+     * Runs {@code body} with the valve characteristic pinned to LINEAR, restoring the configured
+     * curve after. The proportionality tests assert the LINEAR angle-to-flow bands (45 degrees
+     * passes ~half); the gameTestServer reads the persisted dev run config, which may carry any
+     * curve dialed in for play (EQUAL_PERCENTAGE passes ~12% at 45 degrees and rounds 18 degrees
+     * to zero flow), so the tests must pin what they assert.
+     */
+    private static void withLinearValveCurve(Runnable body) {
+        ValveCharacteristic curve = PipesNPhysicsConfig.VALVE_CHARACTERISTIC.get();
+        PipesNPhysicsConfig.VALVE_CHARACTERISTIC.set(ValveCharacteristic.LINEAR);
+        try {
+            body.run();
+        } finally {
+            PipesNPhysicsConfig.VALVE_CHARACTERISTIC.set(curve);
+        }
+    }
+
     /** The solved hydraulic flow on the valve's edge after dialing the throttle to {@code angle}. */
     private static int valveFlow(Level level, Graph g, Edge edge, BlockPos valveAbs, int angle) {
         setThrottle(level, valveAbs, angle);
@@ -1023,7 +1355,10 @@ public class PipesNPhysicsGameTests {
         helper.succeedWhen(() -> {
             int left = amount(helper, top);
             int below = amount(helper, bottom);
-            if (left + below != 8000) helper.fail("fluid not conserved: " + left + " + " + below);
+            int pipes = pipesnphysics$areaPipeContent(helper, 4, 6, 4);
+            if (left + below + pipes != 8000) {
+                helper.fail("fluid not conserved: " + left + " + " + below + " + pipes " + pipes);
+            }
             if (left != 0) helper.fail("upper tank still holds " + left + " mB");
         });
     }
@@ -1501,6 +1836,186 @@ public class PipesNPhysicsGameTests {
     }
 
     /**
+     * A gravity siphon whose crest rises more than the suction limit above the supply surface
+     * BREAKS: the arch is a CREST-blocked edge carrying no flow. The goggle must then report the
+     * air break as its reason and NOT a positive "air break in N blocks" margin — that margin is
+     * recomputed from the display heads and can read a small POSITIVE value right at the threshold,
+     * flatly contradicting the "air break over the crest" line the same run shows (the reported
+     * "air break in 0.82 blocks on a dead pipe"). Builds its own tall arch so the crest height is
+     * under our control, independent of any template's geometry.
+     */
+    @GameTest(template = "piping/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
+    public static void airBrokenCrestReportsNoSuctionMargin(GameTestHelper helper) {
+        int crestY = (int) Math.ceil(PipesNPhysicsConfig.SUCTION_LIMIT.get()) + 3; // safely above the limit
+        BlockPos supply = new BlockPos(0, 1, 0);
+        BlockPos sink = new BlockPos(2, 1, 0);
+        BlockPos riserProbe = new BlockPos(0, crestY - 2, 1);
+
+        helper.runAfterDelay(10, () -> pipesnphysics$placeBrokenSiphon(helper, crestY, supply, sink));
+
+        // Fill AFTER the freshly placed tank BEs have ticked once, so the handler is ready — then a
+        // driving surface difference (full supply, empty sink) gives the pre-gate solve the flow the
+        // crest gate cuts (a balanced pair would idle for an unrelated reason).
+        helper.runAfterDelay(20, () -> {
+            fill(helper, supply, 8000);
+            drain(helper, sink);
+        });
+
+        helper.succeedWhen(() -> {
+            BlockPos seedAbs = helper.absolutePos(riserProbe);
+            Graph graph = GraphBuilder.build(helper.getLevel(), seedAbs);
+            Solution solution = FlowSolver.solve(helper.getLevel(), graph);
+            Edge arch = graph.edges().stream()
+                    .filter(e -> e.pipes().contains(seedAbs))
+                    .findFirst().orElse(null);
+            if (arch == null) {
+                helper.fail("no arch edge through the riser" + dump(helper, riserProbe));
+                return;
+            }
+            if (!solution.blockedEdges().contains(arch.index())
+                    || solution.edgeReasons().get(arch.index()) != Solution.Reason.CREST) {
+                helper.fail("the arch should be CREST-blocked, got reason "
+                        + solution.edgeReasons().get(arch.index())
+                        + " supply=" + amount(helper, supply) + " sink=" + amount(helper, sink)
+                        + dump(helper, riserProbe));
+                return;
+            }
+            PipeStatusPayload probe = PipeProbe.probe(helper.getLevel(), seedAbs);
+            if (probe.statusDetail() != PipeStatusPayload.DETAIL_CREST) {
+                helper.fail("probe should read the air-break reason, got detail "
+                        + probe.statusDetail() + dump(helper, riserProbe));
+                return;
+            }
+            if (probe.hasSuctionMargin()) {
+                helper.fail("a broken air-break run must not report a positive suction margin, got "
+                        + probe.suctionMarginBlocks() + dump(helper, riserProbe));
+            }
+        });
+    }
+
+    /**
+     * A broken siphon is a BAROMETER: the level renderer must fill the source leg with the static
+     * column suction holds — up to {@code source_surface + SUCTION_LIMIT} — then leave an air gap over
+     * the crest, so the water visibly climbs to the break. Reproduces "the source pipes render empty":
+     * the resting waterline was flattened to the LOWER (sink) surface, hiding the source column. Checks
+     * the LEVEL path ({@code apply(...,true)} → {@link PipeLevelData}): a source-riser cell well ABOVE
+     * the source surface is stamped (impossible under the min flatten), and the crest cell stays dry.
+     */
+    @GameTest(template = "piping/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200, batch = "levelRender")
+    public static void brokenSiphonRendersBarometricSourceColumn(GameTestHelper helper) {
+        int crestY = (int) Math.ceil(PipesNPhysicsConfig.SUCTION_LIMIT.get()) + 3;
+        BlockPos supply = new BlockPos(0, 1, 0);
+        BlockPos sink = new BlockPos(2, 1, 0);
+
+        helper.runAfterDelay(10, () -> pipesnphysics$placeBrokenSiphon(helper, crestY, supply, sink));
+        // BOTH tanks hold water (supply fuller, to drive the pre-gate flow the crest cuts) — like the
+        // real report — so each leg is a barometer and the source column fills right up to the break,
+        // not tapering toward an empty far end.
+        helper.runAfterDelay(20, () -> {
+            fill(helper, supply, 8000);
+            fill(helper, sink, 1000);
+        });
+        // Prime the legs as a previously-running siphon would have left them: full to the crest.
+        // Physically the break then collapses only the part above the barometric reach — the legs
+        // within surface + SUCTION_LIMIT hold (a vacuum gap forms at the crest), which is exactly
+        // what the settle pass must reproduce with the real stored volume.
+        helper.runAfterDelay(25, () -> {
+            Level level = helper.getLevel();
+            for (int y = 1; y <= crestY; y++) {
+                for (int x : new int[] {0, 2}) {
+                    PipeStore.Store cell = PipeStore.at(level, helper.absolutePos(new BlockPos(x, y, 1)));
+                    if (cell != null) {
+                        cell.insert(new FluidStack(Fluids.WATER, PipeStore.capacityMb()), PipeStore.capacityMb());
+                        cell.flush();
+                    }
+                }
+            }
+            PipeStore.Store arch = PipeStore.at(level, helper.absolutePos(new BlockPos(1, crestY, 1)));
+            if (arch != null) {
+                arch.insert(new FluidStack(Fluids.WATER, PipeStore.capacityMb()), PipeStore.capacityMb());
+                arch.flush();
+            }
+        });
+        helper.succeedWhen(() -> {
+            Level level = helper.getLevel();
+            BlockPos seedAbs = helper.absolutePos(new BlockPos(0, crestY - 2, 1));
+            Graph graph = GraphBuilder.build(level, seedAbs);
+            Solution solution = FlowSolver.solve(level, graph);
+            Edge arch = graph.edges().stream()
+                    .filter(e -> e.pipes().contains(seedAbs)).findFirst().orElse(null);
+            if (arch == null || !solution.blockedEdges().contains(arch.index())
+                    || solution.edgeReasons().get(arch.index()) != Solution.Reason.CREST) {
+                helper.fail("arch not crest-blocked" + dump(helper, new BlockPos(0, crestY - 2, 1)));
+                return;
+            }
+            Double supplyHead = graph.nodes().stream()
+                    .filter(n -> n.pos().equals(helper.absolutePos(supply)))
+                    .findFirst().map(n -> solution.nodeHeads().get(n.index())).orElse(null);
+            if (supplyHead == null) { helper.fail("no supply head" + dump(helper, supply)); return; }
+            double reach = PipesNPhysicsConfig.SUCTION_LIMIT.get();
+
+            // The crest cell sits above surface + reach — the air-break gap must drain dry
+            // (level-spreading leaves at most a dregs film on a flat crest arch).
+            if (cellMb(level, helper.absolutePos(new BlockPos(0, crestY, 1))) > 8) {
+                helper.fail("the crest cell should drain to the dry air-break gap, but holds "
+                        + cellMb(level, helper.absolutePos(new BlockPos(0, crestY, 1))) + " mB");
+            }
+            // A source-riser cell WELL above the source surface yet within the suction reach must
+            // KEEP its barometric column — the settle pass may only collapse the part above reach.
+            boolean sawColumnAboveSurface = false;
+            for (int y = 2; y < crestY; y++) {
+                BlockPos abs = helper.absolutePos(new BlockPos(0, y, 1));
+                double cellBottom = abs.getY() - 0.5;
+                if (cellBottom <= supplyHead + 0.5) continue;          // still at/below the surface
+                if (cellBottom > supplyHead + reach - 1) continue;     // near/above the barometric reach
+                if (cellMb(level, abs) > 0) {
+                    sawColumnAboveSurface = true;
+                    break;
+                }
+            }
+            if (!sawColumnAboveSurface) {
+                helper.fail("no source-riser cell above the surface kept the barometric column — "
+                        + "the settle drained the leg (surface=" + supplyHead + " reach=" + reach + ")"
+                        + dump(helper, new BlockPos(0, crestY - 2, 1)));
+            }
+        });
+    }
+
+    /** The stored mB in the pipe cell at an absolute position, 0 when empty or not a pipe. */
+    private static int cellMb(Level level, BlockPos absolutePos) {
+        PipeStore.Store store = PipeStore.at(level, absolutePos);
+        return store == null ? 0 : store.amount();
+    }
+
+    /** Builds the tall gravity siphon used by the air-break tests: two side-drawn tanks an x-gap apart,
+     *  a run that climbs at z=1, bridges the crest across x, and drops into the sink. */
+    private static void pipesnphysics$placeBrokenSiphon(GameTestHelper helper, int crestY,
+                                                        BlockPos supply, BlockPos sink) {
+        var pipe = AllBlocks.FLUID_PIPE.get();
+        var tank = AllBlocks.FLUID_TANK.get();
+        // Clear the template's own machine out of the working volume first.
+        for (int x = 0; x <= 4; x++)
+            for (int y = 1; y <= crestY + 1; y++)
+                for (int z = 0; z <= 1; z++)
+                    helper.setBlock(new BlockPos(x, y, z), Blocks.AIR.defaultBlockState());
+
+        helper.setBlock(supply, tank.defaultBlockState());
+        helper.setBlock(sink, tank.defaultBlockState());
+
+        // Draw from the SIDE of each tank at its own level (a pipe leaving the TOP of a full 1-tall
+        // tank sits exactly at the surface lip and reads "can't draw").
+        helper.setBlock(new BlockPos(0, 1, 1), pipeState(pipe, Direction.NORTH, Direction.UP));
+        helper.setBlock(new BlockPos(2, 1, 1), pipeState(pipe, Direction.NORTH, Direction.UP));
+        helper.setBlock(new BlockPos(0, crestY, 1), pipeState(pipe, Direction.DOWN, Direction.EAST));
+        helper.setBlock(new BlockPos(1, crestY, 1), pipeState(pipe, Direction.WEST, Direction.EAST));
+        helper.setBlock(new BlockPos(2, crestY, 1), pipeState(pipe, Direction.WEST, Direction.DOWN));
+        for (int y = 2; y < crestY; y++) {
+            helper.setBlock(new BlockPos(0, y, 1), pipeState(pipe, Direction.UP, Direction.DOWN));
+            helper.setBlock(new BlockPos(2, y, 1), pipeState(pipe, Direction.UP, Direction.DOWN));
+        }
+    }
+
+    /**
      * A powered pump with nothing to pull (empty source tank) moves no fluid, yet
      * "Head left" must still read on BOTH sides: the push side anchored by the
      * downstream tank, and the suction side seeded with the pump's waiting boost
@@ -1612,7 +2127,9 @@ public class PipesNPhysicsGameTests {
         fill(helper, new BlockPos(0, 1, 1), 8000);
         fill(helper, new BlockPos(4, 1, 1), 8000);
 
-        helper.runAfterDelay(3, () -> {
+        // Poll: the run first PRIMES (real fluid filling the pipe reads as flow), then stalls
+        // against the full sink once the column is packed.
+        helper.succeedWhen(() -> {
             var push = PipeProbe.probe(helper.getLevel(), helper.absolutePos(pushPipe));
             if (push.status() != PipeStatusPayload.STATUS_STALLED) {
                 helper.fail("expected STALLED on the push pipe, got status "
@@ -1621,7 +2138,6 @@ public class PipesNPhysicsGameTests {
             if (push.statusDetail() != PipeStatusPayload.DETAIL_SINK_FULL) {
                 helper.fail("expected SINK_FULL detail, got " + push.statusDetail() + dump(helper));
             }
-            helper.succeed();
         });
     }
 
@@ -1861,8 +2377,22 @@ public class PipesNPhysicsGameTests {
             drain(helper, tanks.get(0));
             drain(helper, tanks.get(1));
             fillFluid(helper, source, Fluids.LAVA, 8000);
+            // Pre-prime every pipe with lava: at viscous trickle rates a cold 11-cell line takes
+            // thousands of ticks to pack, and the load breakdown is a STEADY-STATE identity.
+            for (int x = 0; x < 16; x++)
+                for (int y = 0; y < 5; y++)
+                    for (int z = 0; z < 4; z++) {
+                        PipeStore.Store store = PipeStore.at(
+                                helper.getLevel(), helper.absolutePos(new BlockPos(x, y, z)));
+                        if (store != null) {
+                            store.insert(new FluidStack(Fluids.LAVA, PipeStore.capacityMb()),
+                                    PipeStore.capacityMb());
+                            store.flush();
+                        }
+                    }
 
-            helper.runAfterDelay(5, () -> {
+            // Poll: the reconstruction holds once the line reaches its steady operating point.
+            helper.succeedWhen(() -> {
                 var probe = PipeProbe.probe(helper.getLevel(), helper.absolutePos(pumpPos));
                 if (!probe.hasPumpLoad()) {
                     helper.fail("a running pump reported no load breakdown" + dump(helper, pumpPos));
@@ -1887,37 +2417,31 @@ public class PipesNPhysicsGameTests {
                 if (longDischarge && probe.pumpFrictionFactor() >= 0.95f) {
                     helper.fail("lava down a long run should be friction-limited, factor="
                             + probe.pumpFrictionFactor() + dump(helper, pumpPos));
-                    return;
                 }
-                helper.succeed();
             });
         });
     }
 
     /**
-     * With Create's own transport tick cancelled, the engine must drive the
-     * windowed-pipe fluid rendering itself: after fluid flows, a carrying pipe
-     * cell must hold a Create {@code Flow} of that fluid on one of its
-     * connections (what the client renders). Verifies the render bridge is wired
-     * into the engine tick.
+     * A moving run really holds its fluid: while the pump transfers, some pipe cell must store
+     * water ({@link PipeFluidCell} content — the only thing the client renders), of the right
+     * fluid. Verifies the transfer brigade fills the pipes it moves fluid through.
      */
     @GameTest(template = "piping/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
     public static void flowingPipesCarryRenderableFluid(GameTestHelper helper) {
         fill(helper, new BlockPos(0, 1, 1), 8000);
 
-        helper.runAfterDelay(4, () -> {
-            FluidStack rendered = pipesnphysics$findPipeFlow(helper);
-            if (rendered == null) {
-                helper.fail("no pipe cell carries a render Flow while fluid is moving"
-                        + dump(helper));
+        helper.succeedWhen(() -> {
+            Level level = helper.getLevel();
+            for (BlockPos rel : new BlockPos[] {new BlockPos(1, 1, 1), new BlockPos(3, 1, 1)}) {
+                PipeStore.Store store = PipeStore.at(level, helper.absolutePos(rel));
+                if (store == null || store.amount() <= 0) continue;
+                if (!FluidStack.isSameFluidSameComponents(store.fluid(), new FluidStack(Fluids.WATER, 1))) {
+                    helper.fail("pipe cell stores the wrong fluid: " + store.fluid().getHoverName().getString());
+                }
                 return;
             }
-            if (!FluidStack.isSameFluidSameComponents(rendered, new FluidStack(Fluids.WATER, 1))) {
-                helper.fail("pipe render Flow holds the wrong fluid: "
-                        + rendered.getHoverName().getString());
-                return;
-            }
-            helper.succeed();
+            helper.fail("no pipe cell stores fluid while the pump is moving water" + dump(helper));
         });
     }
 
@@ -1938,19 +2462,23 @@ public class PipesNPhysicsGameTests {
             int a = amount(helper, left);
             int b = amount(helper, right);
             if (Math.abs(a - b) > 800) helper.fail("not equalized yet: " + a + " vs " + b);
-            // Settled (near-zero flow) but the U-pipe under the tanks is still full.
-            if (pipesnphysics$findPipeFlow(helper) == null) {
-                helper.fail("equalized pipe lost its fluid render" + dump(helper, left));
-            }
+            // Settled (near-zero flow) but the U-pipe under the tanks still HOLDS its water —
+            // submerged cells below the waterline keep their real content at rest.
+            boolean anyWet = false;
+            for (int x = 0; x < 4 && !anyWet; x++)
+                for (int y = 0; y < 4 && !anyWet; y++)
+                    for (int z = 0; z < 2 && !anyWet; z++) {
+                        anyWet = cellMb(helper.getLevel(), helper.absolutePos(new BlockPos(x, y, z))) > 0;
+                    }
+            if (!anyWet) helper.fail("equalized pipe lost its stored fluid" + dump(helper, left));
         });
     }
 
     /**
      * A running pump dead-headed by a solid block on its push side leaves only ONE reservoir on the
-     * network (its supply tank). The solve used to bail at &lt;2 participants, so the SUBMERGED pull
-     * pipe between the full tank and the pump rendered EMPTY even though it sits below the tank's
-     * surface — the user's "no fluid in the pipe though the head is there". A single reservoir now
-     * still records the settled head + restFluids, so the resting water renders.
+     * network (its supply tank). The SUBMERGED pull pipe between the full tank and the pump sits
+     * below the tank's surface, so the settle pass must FILL it from the tank — the user's "no
+     * fluid in the pipe though the head is there" now means real stored fluid, not a render stamp.
      */
     @GameTest(template = "piping/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
     public static void deadEndedPumpRendersSubmergedSupplyPipe(GameTestHelper helper) {
@@ -1958,39 +2486,20 @@ public class PipesNPhysicsGameTests {
         fill(helper, new BlockPos(0, 1, 1), 8000);            // full source → pull pipe sits below it
         helper.setBlock(new BlockPos(3, 1, 1), Blocks.STONE); // cap the output: one reservoir left
 
-        helper.runAfterDelay(5, () -> {
-            Level level = helper.getLevel();
-            Graph graph = GraphBuilder.build(level, helper.absolutePos(pullPipe));
-            Solution sol = FlowSolver.solve(level, graph);
-            CreatePipeRendering.apply(level, graph, sol);
-
-            FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, helper.absolutePos(pullPipe));
-            boolean hasFluid = false;
-            if (pipe != null) {
-                for (Direction d : Direction.values()) {
-                    if (pipe.getConnection(d) instanceof PipeConnectionAccessor acc
-                            && acc.pipesnphysics$getFlow().isPresent()
-                            && !acc.pipesnphysics$getFlow().get().fluid.isEmpty()) {
-                        hasFluid = true;
-                        break;
-                    }
-                }
+        helper.succeedWhen(() -> {
+            if (cellMb(helper.getLevel(), helper.absolutePos(pullPipe)) <= 0) {
+                helper.fail("submerged supply pipe of a dead-headed pump holds no fluid" + dump(helper));
             }
-            if (!hasFluid) {
-                helper.fail("submerged supply pipe of a dead-headed pump rendered no fluid" + dump(helper));
-                return;
-            }
-            helper.succeed();
         });
     }
 
     /**
-     * A horizontal run capped by a solid block ends in a dead-end pipe cell — a JUNCTION NODE, which
-     * sits in no edge, so {@link CreatePipeRendering#restEdge} fills the run up to the last EDGE cell
-     * but leaves that terminal cell dry: the fluid stops one cell short of the block. With the tank
-     * surface above the run, the whole run (terminal cell included) must render full. Here the pump
-     * of the single_pump template is swapped for a plain pipe and the far cell capped, so the run is
-     * tank -> pipe -> dead-end pipe -> stone with NO pump — a pure HANDLER<->JUNCTION edge.
+     * A horizontal run capped by a solid block ends in a dead-end pipe cell — a JUNCTION NODE. With
+     * the tank surface above the run, the whole run INCLUDING that terminal cell must fill: the
+     * junction cell is a one-cell buffer on its node, and the settle pass tops it up through the
+     * adjacent edge cell, so the fluid no longer stops one cell short of the block. Here the pump
+     * of the single_pump template is swapped for a plain pipe and the far cell capped, so the run
+     * is tank -> pipe -> dead-end pipe -> stone with NO pump.
      */
     @GameTest(template = "piping/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200, batch = "levelRender")
     public static void deadEndJunctionCellRendersAgainstTheBlock(GameTestHelper helper) {
@@ -1999,123 +2508,71 @@ public class PipesNPhysicsGameTests {
         helper.setBlock(new BlockPos(3, 1, 1), Blocks.STONE); // cap the run: (2,1,1) becomes a dead-end junction
 
         helper.runAfterDelay(5, () -> {
-            Level level = helper.getLevel();
             BlockPos deadEnd = new BlockPos(2, 1, 1);
-            Graph graph = GraphBuilder.build(level, helper.absolutePos(new BlockPos(1, 1, 1)));
+            Graph graph = GraphBuilder.build(helper.getLevel(), helper.absolutePos(new BlockPos(1, 1, 1)));
             boolean hasJunction = graph.nodes().stream()
                     .anyMatch(n -> n.isJunction() && n.pos().equals(helper.absolutePos(deadEnd)));
             if (!hasJunction) {
                 helper.fail("capped run did not classify (2,1,1) as a dead-end JUNCTION" + dump(helper));
                 return;
             }
-            Solution sol = FlowSolver.solve(level, graph);
-            CreatePipeRendering.apply(level, graph, sol);
-
-            FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, helper.absolutePos(deadEnd));
-            boolean hasFluid = false;
-            if (pipe != null) {
-                for (Direction d : Direction.values()) {
-                    if (pipe.getConnection(d) instanceof PipeConnectionAccessor acc
-                            && acc.pipesnphysics$getFlow().isPresent()
-                            && !acc.pipesnphysics$getFlow().get().fluid.isEmpty()) {
-                        hasFluid = true;
-                        break;
-                    }
+            helper.succeedWhen(() -> {
+                if (cellMb(helper.getLevel(), helper.absolutePos(deadEnd)) <= 0) {
+                    helper.fail("dead-end junction cell against the block holds no fluid — the run "
+                            + "stops one cell short" + dump(helper));
                 }
-            }
-            if (!hasFluid) {
-                helper.fail("dead-end junction cell against the block rendered no fluid — the run "
-                        + "stops one cell short" + dump(helper));
-                return;
-            }
-            helper.succeed();
+            });
         });
     }
 
     /**
-     * The fluid in a RESTING run beside a pump must read the way the pump moves it — not flow into
-     * the tank it draws from. With the pump now carrying a display head (the stored-heads feature),
-     * both ends of its pull run tie, and the old fallback oriented the fill by graph node order,
-     * rendering pump->tank on half the runs (the reported "Edge B flows into the tank"). The fill
-     * now follows the pump's push/pull side: the PULL run shows fluid leaving the tank toward the
-     * pump (pump-side connection OUTBOUND), the PUSH run shows it leaving the pump (INBOUND).
+     * The waterline INSIDE a settled pipe must match the tank it connects to: with the tank half
+     * full, the pipe cells at the tank's base settle at the SAME surface elevation — the stored
+     * fraction equals the tank surface over the cell, neither painted full nor left dry. The pump
+     * is swapped for a plain pipe and the run capped, so it is a pure resting stub beside the tank.
      */
-    @GameTest(template = "piping/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
-    public static void restingPumpRunFollowsPushPullDirection(GameTestHelper helper) {
-        helper.runAfterDelay(5, () -> {
+    @GameTest(template = "piping/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 400)
+    public static void settledPipeMatchesTankWaterline(GameTestHelper helper) {
+        BlockPos tank = new BlockPos(0, 1, 1);
+        BlockPos cell = new BlockPos(1, 1, 1);
+        helper.setBlock(new BlockPos(2, 1, 1), AllBlocks.FLUID_PIPE.get().defaultBlockState());
+        helper.setBlock(new BlockPos(3, 1, 1), Blocks.STONE);
+        fill(helper, tank, 4000);
+
+        helper.succeedWhen(() -> {
             Level level = helper.getLevel();
-            Graph graph = GraphBuilder.build(level, helper.absolutePos(new BlockPos(1, 1, 1)));
-            if (graph.pumps().isEmpty()) { helper.fail("no pump in graph" + dump(helper)); return; }
-            var pump = graph.pumps().get(0);
-            if (pump.pumpFacing() == null) { helper.fail("pump facing unresolved" + dump(helper)); return; }
-
-            Edge pull = null, push = null;
-            for (Edge e : graph.edgesOf(pump.index())) {
-                if (e.pipes().isEmpty()) continue;
-                BlockPos adj = e.a() == pump.index()
-                        ? e.pipes().get(0) : e.pipes().get(e.pipes().size() - 1);
-                Direction d = Direction.fromDelta(adj.getX() - pump.pos().getX(),
-                        adj.getY() - pump.pos().getY(), adj.getZ() - pump.pos().getZ());
-                if (d == pump.pumpFacing()) push = e;
-                else if (d == pump.pumpFacing().getOpposite()) pull = e;
+            int capacity = PipeStore.capacityMb();
+            // The tank's current surface over the pipe cell's bottom, both measured from the tank
+            // base (tank and run share one Y level in this template).
+            double surface = amount(helper, tank) / 8000.0;
+            double expected = Math.clamp(surface, 0.0, 1.0);
+            double got = cellMb(level, helper.absolutePos(cell)) / (double) capacity;
+            if (Math.abs(got - expected) > 0.2) {
+                helper.fail("pipe waterline " + got + " does not match the tank surface "
+                        + expected + dump(helper, tank));
             }
-            if (pull == null || push == null) { helper.fail("pump lacks a push or pull run" + dump(helper)); return; }
-
-            Boolean pullInbound = pipesnphysics$restingPumpRimInbound(level, graph, pump.index(), pump.pos(), pull);
-            if (pullInbound == null) { helper.fail("pull run rendered no resting fluid" + dump(helper)); return; }
-            if (pullInbound) {
-                helper.fail("resting PULL run flows INTO the tank: the pump-side connection is inbound, "
-                        + "it should be outbound (fluid leaving the tank toward the pump)");
-                return;
+            if (got <= 0.05 || got >= 0.95) {
+                helper.fail("half-full tank left the pipe " + (got <= 0.05 ? "dry" : "painted full")
+                        + " (" + got + ")");
             }
-            Boolean pushInbound = pipesnphysics$restingPumpRimInbound(level, graph, pump.index(), pump.pos(), push);
-            if (pushInbound == null) { helper.fail("push run rendered no resting fluid" + dump(helper)); return; }
-            if (!pushInbound) {
-                helper.fail("resting PUSH run: the pump-side connection should be inbound (fluid leaving the pump)");
-                return;
-            }
-            helper.succeed();
         });
     }
 
     /**
-     * Apply a RESTING render solution (heads tied high enough to submerge the run) to {@code edge}
-     * and return the inbound flag of the pump-adjacent cell's pump-facing connection, or null if it
-     * rendered no fluid there. Outbound = fluid leaving the cell toward the pump.
+     * An open pipe mouth ABOVE the connected fluid, with the run at REST, must hold no fluid at the
+     * top of the riser: the mouth is a vent (a spill/intake threshold), not a surface fluid climbs
+     * to. Pre-fills the riser cells (as a dying flow would leave them) and asserts the settle pass
+     * drains the mouth cell — the fluid falls back down instead of hanging at the opening, so
+     * nothing renders (or drips particles) at the open end.
      */
-    private static Boolean pipesnphysics$restingPumpRimInbound(Level level, Graph graph,
-                                                               int pumpIndex, BlockPos pumpPos, Edge edge) {
-        double head = edge.pipes().get(0).getY() + 1.0;
-        for (BlockPos c : edge.pipes()) head = Math.max(head, c.getY() + 1.0);
-        Solution resting = pipesnphysics$renderSolution(graph, edge.index(),
-                EdgeFlow.Direction.NONE, head, head, false);
-        CreatePipeRendering.apply(level, graph, resting);
-
-        BlockPos nearPump = edge.a() == pumpIndex
-                ? edge.pipes().get(0) : edge.pipes().get(edge.pipes().size() - 1);
-        FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, nearPump);
-        Direction towardPump = Direction.fromDelta(pumpPos.getX() - nearPump.getX(),
-                pumpPos.getY() - nearPump.getY(), pumpPos.getZ() - nearPump.getZ());
-        if (pipe == null || towardPump == null) return null;
-        if (pipe.getConnection(towardPump) instanceof PipeConnectionAccessor acc
-                && acc.pipesnphysics$getFlow().isPresent()) {
-            return acc.pipesnphysics$getFlow().get().inbound;
-        }
-        return null;
-    }
-
-    /**
-     * An open pipe mouth ABOVE the connected reservoir's surface, with the run at REST, must
-     * render NO fluid up the riser: an open end is a vent pinned at its mouth (the spill/intake
-     * threshold), not a fluid surface, so interpolating a resting waterline up to it wrongly
-     * filled the top cells — and a full Flow on the mouth cell makes Create's tickFlowProgress
-     * pour liquid particles out of the open end. This is the user's "highest pipe shows water +
-     * particles though nothing flows" report. Feeds the render bridge the exact buggy inputs
-     * (idle edge, reservoir surface well below the mouth) and asserts the mouth cell stays dry.
-     */
-    @GameTest(template = "suck_from_cauldron", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
+    @GameTest(template = "suck_from_cauldron", templateNamespace = PipesNPhysics.ID, timeoutTicks = 400)
     public static void restingOpenEndAboveSurfaceRendersDry(GameTestHelper helper) {
         BlockPos seed = new BlockPos(1, 1, 0); // leave the mouth slot (0,3,0) as AIR: an open riser
+        // Swap the template's CREATIVE (brim-full) tank for a real half-filled one: the riser's
+        // fluid must have somewhere to fall back to — above a sealed FULL tank a column physically
+        // stays put, which is not the case under test.
+        helper.setBlock(new BlockPos(2, 1, 0), AllBlocks.FLUID_TANK.get().defaultBlockState());
+        helper.runAfterDelay(3, () -> fill(helper, new BlockPos(2, 1, 0), 4000));
         helper.runAfterDelay(5, () -> {
             Level level = helper.getLevel();
             Graph graph = GraphBuilder.build(level, helper.absolutePos(seed));
@@ -2130,192 +2587,214 @@ public class PipesNPhysicsGameTests {
             boolean aOpen = graph.node(riser.a()).isOpenEnd();
             BlockPos mouthCell = aOpen ? riser.pipes().get(0)
                     : riser.pipes().get(riser.pipes().size() - 1);
-
-            // A RESTING solution: the open end pinned at its MOUTH (high), the reservoir surface
-            // two blocks below every riser cell. The buggy waterline interpolates up to the mouth
-            // and fills the riser; the fix keeps it flat at the low surface, leaving the riser dry.
-            double mouthHead = graph.node(aOpen ? riser.a() : riser.b()).pos().getY() + 0.5;
-            double surfaceHead = mouthCell.getY() - 2.0;
-            Solution resting = pipesnphysics$renderSolution(graph, riser.index(),
-                    EdgeFlow.Direction.A_TO_B, aOpen ? mouthHead : surfaceHead,
-                    aOpen ? surfaceHead : mouthHead, false);
-
-            CreatePipeRendering.apply(level, graph, resting);
-
-            FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, mouthCell);
-            if (pipe != null) {
-                for (Direction d : Direction.values()) {
-                    if (pipe.getConnection(d) instanceof PipeConnectionAccessor acc
-                            && acc.pipesnphysics$getFlow().isPresent()
-                            && !acc.pipesnphysics$getFlow().get().fluid.isEmpty()) {
-                        helper.fail("open-end mouth cell rendered fluid while the run rests below "
-                                + "the mouth — Create would pour particles out of the open end");
-                        return;
-                    }
+            for (BlockPos cell : riser.pipes()) {
+                PipeStore.Store store = PipeStore.at(level, cell);
+                if (store != null) {
+                    store.insert(new FluidStack(Fluids.WATER, PipeStore.capacityMb()), PipeStore.capacityMb());
+                    store.flush();
                 }
             }
-            helper.succeed();
+            helper.succeedWhen(() -> {
+                if (cellMb(helper.getLevel(), mouthCell) > 0) {
+                    helper.fail("open-end mouth cell still holds fluid while the run rests below "
+                            + "the mouth — it would render (and drip) at the opening");
+                }
+            });
         });
     }
 
     /**
-     * The render fill threshold is the pipe's CENTRE, not its bottom face: a horizontal run sitting
-     * just above a low reservoir surface (the waterline barely entering the block) must read DRY, so
-     * a near-empty tank does not paint a full pipe — and a dry pipe shows no false "Reach limit".
-     * Probes {@link CreatePipeRendering#restingCellSubmerged} directly: a waterline 0.2 into the
-     * block is dry, one past the centre fills.
+     * CONSERVATION under transfer: from the first tick to the settled end state, the water in the
+     * two tanks plus the water stored in the pipes must always sum to what was poured in — the
+     * brigade may neither mint nor void a single mB while it primes, flows, and settles.
      */
-    @GameTest(template = "piping/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
-    public static void lowHeadLeavesPipeDry(GameTestHelper helper) {
-        helper.runAfterDelay(2, () -> {
-            Level level = helper.getLevel();
-            Graph graph = GraphBuilder.build(level, helper.absolutePos(new BlockPos(1, 1, 1)));
-            Edge edge = null;
-            for (Edge e : graph.edges()) {
-                if (!e.pipes().isEmpty()) { edge = e; break; }
-            }
-            if (edge == null) { helper.fail("no pipe run in graph" + dump(helper)); return; }
-            BlockPos cell = edge.pipes().get(0);
-            double bottom = cell.getY();          // SableCompat.getWorldY - 0.5
-            double belowCentre = bottom + 0.2;    // above the block bottom, below its centre (bottom+0.5)
-            double aboveCentre = bottom + 0.75;   // past the centre
+    @GameTest(template = "piping/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 600)
+    public static void fluidConservedThroughPriming(GameTestHelper helper) {
+        BlockPos source = new BlockPos(0, 1, 1);
+        BlockPos sink = new BlockPos(4, 1, 1);
+        fill(helper, source, 8000);
 
-            if (CreatePipeRendering.restingCellSubmerged(level, graph, edge, 0, belowCentre, belowCentre, false)) {
-                helper.fail("a waterline only 0.2 into the block still filled the pipe — must reach the centre");
-                return;
+        helper.succeedWhen(() -> {
+            int total = amount(helper, source) + amount(helper, sink)
+                    + pipesnphysics$areaPipeContent(helper, 6, 4, 4);
+            if (total != 8000) helper.fail("fluid not conserved: tanks+pipes=" + total);
+            if (amount(helper, source) > 0) helper.fail("source not fully drained yet");
+        });
+    }
+
+    /** Sum of all pipe-cell contents within the template-relative area. */
+    private static int pipesnphysics$areaPipeContent(GameTestHelper helper, int sx, int sy, int sz) {
+        int sum = 0;
+        for (int x = 0; x < sx; x++)
+            for (int y = 0; y < sy; y++)
+                for (int z = 0; z < sz; z++) {
+                    sum += cellMb(helper.getLevel(), helper.absolutePos(new BlockPos(x, y, z)));
+                }
+        return sum;
+    }
+
+    /**
+     * TRAVEL TIME: the sink must not receive its first drop before the pipe feeding it is full —
+     * fluid physically resides in the run while it primes, so delivery begins exactly when the
+     * column reaches the sink (what the player sees is what happens).
+     */
+    @GameTest(template = "piping/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 600)
+    public static void sinkFillsOnlyAfterPipePrimes(GameTestHelper helper) {
+        BlockPos source = new BlockPos(0, 1, 1);
+        BlockPos sink = new BlockPos(4, 1, 1);
+        BlockPos pushPipe = new BlockPos(3, 1, 1);
+        fill(helper, source, 8000);
+
+        helper.succeedWhen(() -> {
+            int delivered = amount(helper, sink);
+            int pushCell = cellMb(helper.getLevel(), helper.absolutePos(pushPipe));
+            if (delivered > 0 && pushCell < PipeStore.capacityMb()) {
+                helper.fail("sink received " + delivered + " mB while the pipe feeding it holds only "
+                        + pushCell + "/" + PipeStore.capacityMb() + " — delivery outran the fluid");
             }
-            if (!CreatePipeRendering.restingCellSubmerged(level, graph, edge, 0, aboveCentre, aboveCentre, false)) {
-                helper.fail("a waterline past the pipe centre failed to fill it");
-                return;
-            }
-            helper.succeed();
+            if (delivered <= 0) helper.fail("nothing delivered yet");
         });
     }
 
     /**
-     * Server-side data path for the in-pipe LEVEL render ({@code PIPE_LEVEL_RENDER}):
-     * a RESTING run fed exact heads must stamp each SUBMERGED cell's flow with a waterline marker whose
-     * decoded 0..1 fraction equals the head interpolated at that cell (clamped to the cell), and must
-     * leave UNSUBMERGED cells unmarked. The sloped head produces a gradient of partial fills, so a wrong
-     * interpolation, a missed clamp, or a stamped wrong cell is caught — not just an all-full pass. Uses
-     * the explicit-flag {@code apply} overload so no live config is mutated, and the synthetic-solution
-     * helper so the heads are exact (no dependence on tank geometry).
-     *
-     * Batch {@code "levelRender"}: the render-integration tests (this one and the other
-     * {@code apply(...,true)} / {@code fillDeadEndCell} drivers) stamp {@link PipeLevelData} and seed
-     * flows directly into the level. Left in the default batch that shared-level residue perturbs the
-     * live-engine timing tests running beside them (it hung {@code drainedPipeRecedesNotStuck}'s recede).
-     * A dedicated batch gives them their own level so they can't leak into the behavioural tests.
+     * A pump wedged DIRECTLY against a junction — zero pipe cells between them — must still
+     * deliver. The brigade tops a junction slot up from the feeding run's TAIL CELL; a zero-cell
+     * run has none, and a consumer past the junction only pulls from a FULL slot, so the slot
+     * never filled and the whole line read solved flow with zero actual (the coke-oven smokestack
+     * report: pumps flush under the junction row). Converts the template's push-side cell into a
+     * junction by hanging a tank off it, then asserts fluid really arrives past it.
      */
-    @GameTest(template = "piping/long_pipe", templateNamespace = PipesNPhysics.ID, timeoutTicks = 100, batch = "levelRender")
-    public static void pipeLevelRenderEncodesSolvedWaterline(GameTestHelper helper) {
-        helper.runAfterDelay(2, () -> {
-            Level level = helper.getLevel();
-            BlockPos seed = null;
-            for (int x = 0; x < 16 && seed == null; x++)
-                for (int y = 0; y < 6 && seed == null; y++)
-                    for (int z = 0; z < 6 && seed == null; z++) {
-                        BlockPos rel = new BlockPos(x, y, z);
-                        if (helper.getBlockState(rel).is(AllBlocks.FLUID_PIPE.get())) seed = rel;
-                    }
-            if (seed == null) { helper.fail("no pipe in template"); return; }
+    @GameTest(template = "piping/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 400)
+    public static void pumpAgainstJunctionSlotStillDelivers(GameTestHelper helper) {
+        helper.runAfterDelay(10, () -> { // let the kinetics spin the pump up and settle its FACING
+            BlockPos pumpRel = null;
+            for (int x = 0; x < 6 && pumpRel == null; x++)
+                for (int y = 0; y < 4 && pumpRel == null; y++)
+                    for (int z = 0; z < 4; z++)
+                        if (helper.getBlockState(new BlockPos(x, y, z)).getBlock() instanceof PumpBlock) {
+                            pumpRel = new BlockPos(x, y, z);
+                            break;
+                        }
+            if (pumpRel == null) { helper.fail("no pump in template"); return; }
+            Direction push = helper.getBlockState(pumpRel).getValue(PumpBlock.FACING);
+            BlockPos junctionRel = pumpRel.relative(push);
+            if (!pipeAt(helper, junctionRel)) { helper.fail("pump push side is not a pipe cell"); return; }
 
-            Graph graph = GraphBuilder.build(level, helper.absolutePos(seed));
-            Edge edge = null;
-            for (Edge e : graph.edges()) {
-                if (edge == null || e.pipes().size() > edge.pipes().size()) edge = e;
+            // A tank flush against the push-side cell gives it a third connection: the cell
+            // becomes a junction NODE and the pump→junction edge carries ZERO pipe cells.
+            BlockPos tankRel = null;
+            for (Direction side : Direction.values()) {
+                if (side.getAxis() == push.getAxis()) continue;
+                if (helper.getBlockState(junctionRel.relative(side)).isAir()) {
+                    tankRel = junctionRel.relative(side);
+                    break;
+                }
             }
-            if (edge == null || edge.pipes().isEmpty()) { helper.fail("no pipe run in graph" + dump(helper, seed)); return; }
+            if (tankRel == null) { helper.fail("no free face beside the junction cell"); return; }
+            helper.setBlock(tankRel, AllBlocks.FLUID_TANK.get().defaultBlockState());
 
-            // Feed UNEQUAL heads (a high stranded/empty end + a lower water surface): a RESTING run is
-            // flat at the LOWER level, so a higher endpoint must NOT pull a phantom waterline up the
-            // run (the empty-tank-above-a-full-tank bug). The lower head is partial up the run.
-            List<BlockPos> pipes = edge.pipes();
-            double baseY = pipes.get(0).getY();
-            for (BlockPos c : pipes) baseY = Math.min(baseY, c.getY());
-            double headA = baseY + 4.0;   // a stranded/empty endpoint, well above the water
-            double headB = baseY + 0.7;   // the actual water surface
-            Solution resting = pipesnphysics$renderSolution(graph, edge.index(),
-                    EdgeFlow.Direction.NONE, headA, headB, false);
-            CreatePipeRendering.apply(level, graph, resting, true);
+            fill(helper, new BlockPos(0, 1, 1), 8000); // source full
+            drain(helper, new BlockPos(4, 1, 1));      // sink empty -> the pump wants to move fluid
 
-            // The renderer anchors tank nodes to Create's RENDERED surface, then flattens a resting run
-            // to the LOWER (min) surface — expected values mirror that (displaySurface is a no-op for
-            // non-tank ends — pumps, junctions, open ends).
-            double dispA = CreatePipeRendering.displaySurface(level, graph.node(edge.a()).pos(), headA);
-            double dispB = CreatePipeRendering.displaySurface(level, graph.node(edge.b()).pos(), headB);
-            double waterline = Math.min(dispA, dispB);
-
-            int marked = 0;
-            boolean sawPartial = false;
-            for (int i = 0; i < pipes.size(); i++) {
-                BlockPos cell = pipes.get(i);
-                FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, cell);
-                if (pipe == null) continue;
-                Integer data = pipesnphysics$levelData(pipe);
-                boolean submerged = CreatePipeRendering.restingCellSubmerged(level, graph, edge, i, waterline, waterline, false);
-                if (!submerged) {
-                    if (data != null) {
-                        helper.fail("cell " + cell.toShortString() + " is above the waterline yet carries level data");
-                        return;
-                    }
-                    continue;
+            BlockPos sideTank = tankRel;
+            helper.succeedWhen(() -> {
+                if (amount(helper, sideTank) <= 0 && amount(helper, new BlockPos(4, 1, 1)) <= 0) {
+                    helper.fail("no fluid delivered past the zero-cell pump→junction edge");
                 }
-                if (data == null) {
-                    helper.fail("submerged cell " + cell.toShortString() + " carries no level data" + dump(helper, seed));
-                    return;
-                }
-                marked++;
-                double expected = Math.clamp(waterline - cell.getY(), 0.0, 1.0); // cell bottom == blockY on the main level
-                float decoded = CreatePipeRendering.levelFraction(data);
-                if (Math.abs(decoded - expected) > 0.01) {
-                    helper.fail("cell " + cell.toShortString() + " decoded waterline " + decoded
-                            + " but the solved head gives " + expected);
-                    return;
-                }
-                if (decoded > 0.02 && decoded < 0.98) sawPartial = true;
-            }
-            if (marked == 0) { helper.fail("no submerged cell received a level marker" + dump(helper, seed)); return; }
-            if (!sawPartial) { helper.fail("no PARTIAL waterline was encoded (all cells read full)"); return; }
-            helper.succeed();
+            });
         });
     }
 
-    /** The level-render field on a pipe (waterline + direction packed by {@code encodeLevel}), or null if unset. */
-    private static Integer pipesnphysics$levelData(FluidTransportBehaviour pipe) {
-        return pipe instanceof PipeLevelData d && d.pipesnphysics$getLevelData() != 0
-                ? d.pipesnphysics$getLevelData() : null;
-    }
+    /**
+     * A manifold's junction slots must serve their feeders FAIRLY. Several runs feeding one slot
+     * used to refill its freed room in fixed tick order, so on a chained manifold (junction row,
+     * one shared outlet) the first feeder monopolized the room every tick and a competing line
+     * starved indefinitely — the coke-oven row: one oven fed the smokestack, its neighbours never
+     * did. The brigade splits a slot's room among its feeders by proportional share (the planner's
+     * manifold rule, applied at the slot). Builds a gravity rig — three source tanks flush against
+     * a junction row draining through ONE outlet — and asserts every source contributes.
+     */
+    // Own batch: this test PINS the global PIPE_CONDUCTANCE at 5000 for a 60-tick window, and
+    // batches are the only isolation gametests have — in the default batch every concurrently
+    // running flow test solved with 42x conductance during that window (it masked the
+    // submerged-run top-up freeze as a false green, and can skew any rate-shaped assertion).
+    @GameTest(template = "piping/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 300, batch = "pinnedConfig")
+    public static void manifoldSlotServesAllFeeders(GameTestHelper helper) {
+        var level = helper.getLevel();
+        // Raze the template rig and build the manifold in its bounds (floor at y=0 stays).
+        for (int x = 0; x < 6; x++)
+            for (int y = 1; y < 4; y++)
+                for (int z = 0; z < 4; z++)
+                    helper.setBlock(new BlockPos(x, y, z), Blocks.AIR.defaultBlockState());
 
-    /** The engine-owned front field on a pipe cell ({@code encodeFront} packed), or null if unset. */
-    private static Integer pipesnphysics$frontData(Level level, BlockPos cell) {
-        FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, cell);
-        return pipe instanceof PipeLevelData d && d.pipesnphysics$getFrontData() != 0
-                ? d.pipesnphysics$getFrontData() : null;
-    }
+        // Junction row at y=2 with a full source tank ON TOP of each cell (full head, no side
+        // lip), draining through one outlet corner into a single sink below.
+        BlockPos sink = new BlockPos(0, 1, 0);
+        BlockPos outlet = new BlockPos(0, 2, 0);
+        List<BlockPos> junctionRow = List.of(
+                new BlockPos(0, 2, 1), new BlockPos(1, 2, 1), new BlockPos(2, 2, 1));
+        List<BlockPos> sources = List.of(
+                new BlockPos(0, 3, 1), new BlockPos(1, 3, 1), new BlockPos(2, 3, 1));
 
-    /** Whether every cell of an edge carries a FULL owned front. */
-    private static boolean pipesnphysics$edgeFrontFull(Level level, Edge edge) {
-        for (BlockPos cell : edge.pipes()) {
-            Integer data = pipesnphysics$frontData(level, cell);
-            if (data == null || CreatePipeRendering.frontFraction(data) < 1f) return false;
+        helper.setBlock(sink, AllBlocks.FLUID_TANK.get().defaultBlockState());
+        for (BlockPos tank : sources) helper.setBlock(tank, AllBlocks.FLUID_TANK.get().defaultBlockState());
+        for (BlockPos pipe : junctionRow) {
+            level.setBlockAndUpdate(helper.absolutePos(pipe), AllBlocks.FLUID_PIPE.getDefaultState());
         }
-        return true;
+        level.setBlockAndUpdate(helper.absolutePos(outlet), AllBlocks.FLUID_PIPE.getDefaultState());
+        // setBlock only re-shapes the NEIGHBOURS; recompute the placed cells' own connections too.
+        for (BlockPos pipe : junctionRow) {
+            BlockPos abs = helper.absolutePos(pipe);
+            level.setBlock(abs, Block.updateFromNeighbourShapes(level.getBlockState(abs), level, abs), 3);
+        }
+        BlockPos outletAbs = helper.absolutePos(outlet);
+        level.setBlock(outletAbs, Block.updateFromNeighbourShapes(level.getBlockState(outletAbs), level, outletAbs), 3);
+
+        for (BlockPos tank : sources) fill(helper, tank, 8000);
+
+        // Starvation needs SCARCITY: freed slot room per tick far below the feeders' solved
+        // budgets. In the wild it comes from a rate-limited sink (a venting smokestack); here the
+        // engine's own per-boundary ceiling manufactures it — solved rates cranked far above the
+        // one-cell-volume-per-tick cap, so every slot's room is a crumb the feeders compete for.
+        double priorConductance = PipesNPhysicsConfig.PIPE_CONDUCTANCE.get();
+        PipesNPhysicsConfig.PIPE_CONDUCTANCE.set(5000.0);
+
+        // Well before the sink fills: every source must have contributed a fair share, not the
+        // crumbs a monopolized slot leaks. The one whose feeder ticks first at its slot must not
+        // be the only real contributor.
+        helper.runAfterDelay(60, () -> {
+            PipesNPhysicsConfig.PIPE_CONDUCTANCE.set(priorConductance);
+            int[] given = new int[sources.size()];
+            int total = 0;
+            for (int i = 0; i < sources.size(); i++) {
+                given[i] = 8000 - amount(helper, sources.get(i));
+                total += given[i];
+            }
+            if (total < 1000) {
+                helper.fail("manifold barely moved: " + total + " mB total");
+                return;
+            }
+            for (int i = 0; i < given.length; i++) {
+                if (given[i] * 6 < total) {
+                    helper.fail("source " + i + " gave " + given[i] + " of " + total
+                            + " mB — starved by its junction slot's other feeders (gave "
+                            + given[0] + "/" + given[1] + "/" + given[2] + ")");
+                    return;
+                }
+            }
+            helper.succeed();
+        });
     }
 
     /**
-     * Fronts CHAIN across a shared pass-through node into one continuous travel: a flowing edge
-     * downstream of a junction holds its front at rest until the feeder edge's front has ARRIVED
-     * at that junction — without the chain, both runs crawled independently from their own
-     * upstream ends the moment the solve flowed (the "both pipes recrawl on their own" report).
-     * Splits the template's longest run with a pipe stub (the mid cell gains a third connection
-     * and becomes a junction), flows both halves through it, and drives the render bridge:
-     * the downstream half must stay UNSTARTED while the feeder crawls, start only after the
-     * feeder's front fills its whole run, and delivery to the far sink releases only after the
-     * full chained travel.
+     * Fluid crossing a junction traverses the junction CELL — it may not skip it: the cell fills
+     * (and renders) before anything continues into the downstream run, so a chain reads as one
+     * continuous travel. Splits the template's longest run with a pipe stub (the mid cell gains a
+     * third connection and becomes a junction), primes the feeder half, and drives the executor:
+     * the junction slot must go wet no later than the dependent run's first cell.
      */
     @GameTest(template = "piping/charging_max_range", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200, batch = "levelRender")
-    public static void levelRenderFrontChainsAcrossJunction(GameTestHelper helper) {
+    public static void junctionCellFillsBeforeDownstreamRun(GameTestHelper helper) {
         helper.runAfterDelay(5, () -> {
             var level = helper.getLevel();
             BlockPos seed = null;
@@ -2377,205 +2856,70 @@ public class PipesNPhysicsGameTests {
             }
             if (feeder == null || dependent == null) { helper.fail("junction did not split the run into two edges"); return; }
 
-            // Flow: feeder INTO the junction, dependent OUT of it, water on both.
+            // Flow: feeder INTO the junction, dependent OUT of it, water on both — as one FlowPass
+            // the executor runs. The feeder starts FULL (a primed line), everything past it dry.
             List<EdgeFlow> flows = new ArrayList<>();
+            double[] passFlow = new double[graph.edges().size()];
             for (Edge e : graph.edges()) {
                 if (e.index() == feeder.index()) {
-                    flows.add(new EdgeFlow(e.index(), e.b() == junction.index()
+                    boolean aToB = e.b() == junction.index();
+                    flows.add(new EdgeFlow(e.index(), aToB
                             ? EdgeFlow.Direction.A_TO_B : EdgeFlow.Direction.B_TO_A, 200));
+                    passFlow[e.index()] = aToB ? 200 : -200;
                 } else if (e.index() == dependent.index()) {
-                    flows.add(new EdgeFlow(e.index(), e.a() == junction.index()
+                    boolean aToB = e.a() == junction.index();
+                    flows.add(new EdgeFlow(e.index(), aToB
                             ? EdgeFlow.Direction.A_TO_B : EdgeFlow.Direction.B_TO_A, 200));
+                    passFlow[e.index()] = aToB ? 200 : -200;
                 } else {
                     flows.add(EdgeFlow.none(e.index()));
                 }
             }
             FluidStack water = new FluidStack(Fluids.WATER, 1);
-            Map<Integer, FluidStack> edgeFluids = new HashMap<>();
-            edgeFluids.put(feeder.index(), water);
-            edgeFluids.put(dependent.index(), water);
-            Map<Integer, Double> heads = new HashMap<>();
-            heads.put(feeder.a(), 0.0);
-            heads.put(feeder.b(), 0.0);
-            heads.put(dependent.a(), 0.0);
-            heads.put(dependent.b(), 0.0);
-            Solution flowing = new Solution(flows, List.of(), heads, Map.of(), Map.of(), edgeFluids,
-                    new HashMap<>(edgeFluids), Set.of(), Set.of(), Set.of(), Set.of(), Map.of(),
-                    Map.of(), true);
-            int feederFar = feeder.a() == junction.index() ? feeder.b() : feeder.a();
-            int dependentFar = dependent.a() == junction.index() ? dependent.b() : dependent.a();
-            Solution.Transfer toSink = new Solution.Transfer(graph.node(feederFar).pos(),
-                    graph.node(dependentFar).pos(), new FluidStack(Fluids.WATER, 200));
+            Solution flowing = new Solution(flows, List.of(),
+                    List.of(new Solution.FlowPass(water, passFlow)), new int[graph.edges().size()],
+                    Map.of(), Map.of(), Map.of(), Map.of(), Map.of(),
+                    Set.of(), Set.of(), Set.of(), Set.of(), Map.of(), Map.of(), true);
 
-            // Dry start: the live engine part-charged the template's flows during the warm-up.
-            for (BlockPos cell : feeder.pipes()) pipesnphysics$clearCellFlows(level, cell);
-            for (BlockPos cell : dependent.pipes()) pipesnphysics$clearCellFlows(level, cell);
-            pipesnphysics$clearCellFlows(level, mid);
-            pipesnphysics$clearCellFlows(level, stub);
-
-            CreatePipeRendering.apply(level, graph, flowing, true);
-            if (pipesnphysics$frontData(level, dependent.pipes().get(0)) != null
-                    || pipesnphysics$frontData(level, dependent.pipes().get(dependent.pipes().size() - 1)) != null) {
-                helper.fail("dependent run started crawling before the feeder front reached the junction");
-                return;
-            }
-
-            // No executed transfers in the synthetic solution → actualEdgeFlow is 0 on these bridge
-            // edges → the fronts crawl at the MIN-pressure rate (~52 ticks/cell); bound accordingly.
-            boolean released = false;
-            int totalCells = feeder.pipes().size() + dependent.pipes().size();
-            for (int i = 0; i < 60 * totalCells + 400 && !released; i++) {
-                if (!pipesnphysics$edgeFrontFull(level, feeder)) {
-                    for (BlockPos cell : dependent.pipes()) {
-                        if (pipesnphysics$frontData(level, cell) != null) {
-                            helper.fail("dependent cell " + cell.toShortString()
-                                    + " holds a front while the feeder is still crawling");
-                            return;
-                        }
-                    }
-                }
-                released = CreatePipeRendering.deliveryReady(level, graph, flowing, toSink, true);
-                if (!released) CreatePipeRendering.apply(level, graph, flowing, true);
-            }
-            if (!released) { helper.fail("delivery never released after the chained travel"); return; }
-            if (!pipesnphysics$edgeFrontFull(level, feeder) || !pipesnphysics$edgeFrontFull(level, dependent)) {
-                helper.fail("delivery released before both chained runs were full");
-                return;
-            }
-            helper.succeed();
-        });
-    }
-
-    /**
-     * The LEVEL-render path OWNS the travelling front: with the flag on, a flowing run's fill state
-     * lives in the pipes' own synced front field — integrated from the flow rate by the engine, NOT
-     * by Create's {@code tickFlowProgress} (owned cells skip it) — and {@code deliveryReady} gates
-     * the endpoint transfer on THAT field reading full across the whole run. Drives the render
-     * bridge a pass at a time with NO Create flow ticking in between: one pass leaves a partial
-     * front fraction on the first (upstream) cell and delivery gated; repeated passes advance it
-     * to the sink; delivery then releases with every cell's front full.
-     */
-    @GameTest(template = "piping/charging_max_range", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200, batch = "levelRender")
-    public static void levelRenderFrontGatesDeliveryWithoutCreateProgress(GameTestHelper helper) {
-        helper.runAfterDelay(5, () -> {
-            var level = helper.getLevel();
-            BlockPos seed = null;
-            for (int x = 0; x < 16 && seed == null; x++)
-                for (int y = 0; y < 5 && seed == null; y++)
-                    for (int z = 0; z < 4 && seed == null; z++) {
-                        BlockPos rel = new BlockPos(x, y, z);
-                        if (helper.getBlockState(rel).is(AllBlocks.FLUID_PIPE.get())) seed = rel;
-                    }
-            if (seed == null) { helper.fail("no pipe in template"); return; }
-
-            Graph graph = GraphBuilder.build(level, helper.absolutePos(seed));
-            Edge edge = null;
-            for (Edge e : graph.edges())
-                if (!e.pipes().isEmpty() && (edge == null || e.pipes().size() > edge.pipes().size())) edge = e;
-            if (edge == null || edge.pipes().size() < 3) { helper.fail("no multi-cell pipe run"); return; }
-
-            Solution flowing = pipesnphysics$renderSolution(
-                    graph, edge.index(), EdgeFlow.Direction.A_TO_B, 0, 0, true);
-            Solution.Transfer toSink = new Solution.Transfer(
-                    graph.node(edge.a()).pos(), graph.node(edge.b()).pos(), new FluidStack(Fluids.WATER, 200));
-
-            // Start from a genuinely DRY run: the live engine already part-charged the template's
-            // flows during the warm-up delay, and a primed cell deliberately re-derives as full
-            // (the reload rule) — which would skip the travelling fill this test pins down.
-            for (BlockPos cell : edge.pipes()) pipesnphysics$clearCellFlows(level, cell);
-
-            // One level-render pass: the upstream cell holds a PARTIAL owned front, delivery gated.
-            CreatePipeRendering.apply(level, graph, flowing, true);
-            Integer first = pipesnphysics$frontData(level, edge.pipes().get(0)); // a-side fills first
-            if (first == null) { helper.fail("no owned front on the first cell after one pass"); return; }
-            float frac = CreatePipeRendering.frontFraction(first);
-            if (frac <= 0 || frac >= 1) {
-                helper.fail("first pass left the front at " + frac + " — not a partial travelling fill");
-                return;
-            }
-            if (CreatePipeRendering.deliveryReady(level, graph, flowing, toSink, true)) {
-                helper.fail("delivery NOT gated while the owned front is mid-run");
-                return;
-            }
-
-            // Repeated passes alone must carry the front to the sink — no tickFlowProgress calls.
-            int cells = edge.pipes().size();
-            for (int i = 0; i < 60 * cells + 200
-                    && !CreatePipeRendering.deliveryReady(level, graph, flowing, toSink, true); i++) {
-                CreatePipeRendering.apply(level, graph, flowing, true);
-            }
-            if (!CreatePipeRendering.deliveryReady(level, graph, flowing, toSink, true)) {
-                helper.fail("delivery never released — the owned front did not reach the sink");
-                return;
-            }
-            for (BlockPos cell : edge.pipes()) {
-                Integer data = pipesnphysics$frontData(level, cell);
-                if (data == null || CreatePipeRendering.frontFraction(data) < 1f) {
-                    helper.fail("delivery released but cell " + cell.toShortString()
-                            + " front reads " + (data == null ? "unset" : CreatePipeRendering.frontFraction(data)));
-                    return;
+            int capacity = PipeStore.capacityMb();
+            for (BlockPos cell : feeder.pipes()) {
+                PipeStore.Store store = PipeStore.at(level, cell);
+                if (store != null) {
+                    store.extract(capacity);
+                    store.insert(new FluidStack(Fluids.WATER, capacity), capacity);
+                    store.flush();
                 }
             }
-            helper.succeed();
-        });
-    }
+            for (BlockPos cell : dependent.pipes()) {
+                PipeStore.Store store = PipeStore.at(level, cell);
+                if (store != null) { store.extract(capacity); store.flush(); }
+            }
+            PipeStore.Store slot = PipeStore.at(level, mid);
+            if (slot != null) { slot.extract(capacity); slot.flush(); }
 
-    /**
-     * A run receding through a BRIEF transient (a pump source that dipped dry, a drained tank-to-tank
-     * fall) is held full by {@code drainDeadEdge} — its cells stay charged so a flow restart resumes
-     * the front instead of re-crawling. On the LEVEL-render path that hold must ALSO keep the pipe's
-     * owned front/level fields stamped: skipping the headless edge cleared them, so {@code ownsAnimation}
-     * flipped false (Create's binary fill popped back in) and the client began a fade — and on an
-     * oscillating stop both cells blipped fade→re-stamp together ("both pipes recrawl at once and
-     * flicker"). Charges a run via the level path, drives one dry-source transient pass, and asserts the
-     * held cells keep their owned front rather than being blanked (mirrors the binary
-     * {@code drySourcePumpRunKeepsChargedPipe}, on the level fields).
-     */
-    @GameTest(template = "piping/charging_max_range", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200, batch = "levelRender")
-    public static void levelRenderDrainTransientKeepsOwnedFront(GameTestHelper helper) {
-        helper.runAfterDelay(5, () -> {
-            var level = helper.getLevel();
-            BlockPos seed = null;
-            for (int x = 0; x < 16 && seed == null; x++)
-                for (int y = 0; y < 5 && seed == null; y++)
-                    for (int z = 0; z < 4 && seed == null; z++) {
-                        BlockPos rel = new BlockPos(x, y, z);
-                        if (helper.getBlockState(rel).is(AllBlocks.FLUID_PIPE.get())) seed = rel;
+            // Drive the executor tick by tick: the junction CELL must fill before the dependent
+            // run's first cell sees anything — fluid traverses the junction, it never skips it.
+            int slotTick = -1;
+            int depTick = -1;
+            BlockPos depFirst = dependent.a() == junction.index()
+                    ? dependent.pipes().get(0) : dependent.pipes().get(dependent.pipes().size() - 1);
+            for (int i = 0; i < 40 && depTick < 0; i++) {
+                PipeFlowExecutor.run((ServerLevel) level, graph, flowing);
+                if (slotTick < 0 && cellMb(level, mid) > 0) {
+                    slotTick = i;
+                    // The goggle must READ that slot: a junction's probe reports its stored
+                    // content ("Holds: N mB") exactly like an edge cell's — it used to send 0.
+                    if (PipeProbe.probe((ServerLevel) level, mid).holdsMb() <= 0) {
+                        helper.fail("junction slot is wet but the goggle probe reads holds=0");
+                        return;
                     }
-            if (seed == null) { helper.fail("no pipe in template"); return; }
-
-            Graph graph = GraphBuilder.build(level, helper.absolutePos(seed));
-            Edge edge = null;
-            for (Edge e : graph.edges())
-                if (!e.pipes().isEmpty() && (edge == null || e.pipes().size() > edge.pipes().size())) edge = e;
-            if (edge == null || edge.pipes().size() < 3) { helper.fail("no multi-cell pipe run"); return; }
-
-            double baseY = edge.pipes().get(0).getY();
-            for (BlockPos cell : edge.pipes()) baseY = Math.max(baseY, cell.getY());
-            Solution flowing = pipesnphysics$renderSolution(
-                    graph, edge.index(), EdgeFlow.Direction.A_TO_B, baseY + 2.0, baseY + 1.0, true);
-
-            // Charge the whole run's owned front via the level path.
-            for (BlockPos cell : edge.pipes()) pipesnphysics$clearCellFlows(level, cell);
-            int cells = edge.pipes().size();
-            for (int i = 0; i < 60 * cells + 200 && !pipesnphysics$edgeFrontFull(level, edge); i++) {
-                CreatePipeRendering.apply(level, graph, flowing, true);
+                }
+                if (depTick < 0 && cellMb(level, depFirst) > 0) depTick = i;
             }
-            if (!pipesnphysics$edgeFrontFull(level, edge)) { helper.fail("level run never fully charged"); return; }
-
-            // Source dips dry: no flow, no heads → drainDeadEdge holds the run. The owned front must
-            // survive on the held cells (the recede heartbeat may release the single top cell, so allow
-            // one blank) rather than the whole run being blanked (the flicker).
-            CreatePipeRendering.apply(level, graph,
-                    pipesnphysics$idleSourceDrySolution(graph, edge.index()), true);
-            int kept = 0;
-            for (BlockPos cell : edge.pipes()) {
-                Integer data = pipesnphysics$frontData(level, cell);
-                if (data != null && CreatePipeRendering.frontFraction(data) >= 1f) kept++;
-            }
-            if (kept < cells - 1) {
-                helper.fail("dry-source transient blanked the level-owned front (" + kept + "/" + cells
-                        + " cells kept) — the client would fade and re-crawl on resume");
+            if (depTick < 0) { helper.fail("flow never crossed the junction into the dependent run"); return; }
+            if (slotTick < 0 || slotTick > depTick) {
+                helper.fail("fluid skipped the junction cell (slot wet at tick " + slotTick
+                        + ", dependent at " + depTick + ")");
                 return;
             }
             helper.succeed();
@@ -2583,44 +2927,31 @@ public class PipesNPhysicsGameTests {
     }
 
     /**
-     * The level-render metadata (waterline + flow direction) is DEDICATED render data that must reach
-     * the client but NEVER the world SAVE — it is re-derived from the solve every tick, and persisting
-     * it is exactly the trap the amount-hack fell into. It lives in memory (and on the client packet),
-     * but the disk-save path ({@code clientPacket=false}) omits it. Stamps a cell, confirms the field
-     * is live in memory, then saves the BE (the on-disk path) and asserts the "PnpLevel" key is absent.
+     * The pipe's stored fluid is REAL volume, so it must survive the world save: the disk path
+     * writes the content key, and reading the saved tag back yields the same stack — a reload
+     * resumes with the exact in-transit fluid. The cosmetic flow stamp (direction/rate) is
+     * re-derived every tick and must NOT be saved.
      */
     @GameTest(template = "piping/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 100, batch = "levelRender")
-    public static void levelDataNeverPersistsToSave(GameTestHelper helper) {
+    public static void contentPersistsToSaveButFlowStampDoesNot(GameTestHelper helper) {
         fill(helper, new BlockPos(0, 1, 1), 8000);
-        helper.runAfterDelay(10, () -> {
+        helper.succeedWhen(() -> {
             Level level = helper.getLevel();
-            Graph graph = GraphBuilder.build(level, helper.absolutePos(new BlockPos(1, 1, 1)));
-            Solution sol = FlowSolver.solve(level, graph);
-            CreatePipeRendering.apply(level, graph, sol, true); // stamp the render field
-
-            BlockPos marked = null;
-            for (Edge e : graph.edges()) {
-                for (BlockPos c : e.pipes()) {
-                    FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, c);
-                    if (pipe != null && pipesnphysics$levelData(pipe) != null) { marked = c; break; }
-                }
-                if (marked != null) break;
+            BlockPos wet = null;
+            for (BlockPos rel : new BlockPos[] {new BlockPos(1, 1, 1), new BlockPos(3, 1, 1)}) {
+                if (cellMb(level, helper.absolutePos(rel)) > 0) { wet = helper.absolutePos(rel); break; }
             }
-            if (marked == null) { helper.fail("no level-rendered pipe cell to test" + dump(helper)); return; }
+            if (wet == null) { helper.fail("no pipe cell holds fluid yet"); return; }
 
-            var be = level.getBlockEntity(marked);
-            if (be == null) { helper.fail("no BE at level-rendered cell"); return; }
-
-            // The DISK path (saveWithoutMetadata → saveAdditional → write(clientPacket=false)) must
-            // omit ALL the render fields entirely — the mixin only writes them on the client packet.
+            var be = level.getBlockEntity(wet);
+            if (be == null) { helper.fail("no BE at wet cell"); return; }
             CompoundTag saved = be.saveWithoutMetadata(level.registryAccess());
-            for (String key : new String[] {"PnpLevel", "PnpFront", "PnpFluid"}) {
-                if (pipesnphysics$containsKey(saved, key)) {
-                    helper.fail("level-render field (" + key + ") was written to the world save");
-                    return;
-                }
+            if (!pipesnphysics$containsKey(saved, "PnpContent")) {
+                helper.fail("stored pipe fluid was NOT written to the world save — it would vanish on reload");
             }
-            helper.succeed();
+            if (pipesnphysics$containsKey(saved, "PnpFlow")) {
+                helper.fail("the cosmetic flow stamp was written to the world save");
+            }
         });
     }
 
@@ -2658,26 +2989,28 @@ public class PipesNPhysicsGameTests {
                 }
             }
             if (pipeCell == null) { helper.fail("no tank-to-tank pipe in graph" + dump(helper)); return; }
+            BlockPos probeCell = pipeCell;
 
-            PipeStatusPayload settled = PipeProbe.probe(helper.getLevel(), pipeCell);
-            if (settled.status() != PipeStatusPayload.STATUS_NO_FLOW || settled.fluid().isEmpty()) {
-                helper.fail("expected a settled NO_FLOW pipe with resting fluid, got status "
-                        + settled.status() + dump(helper));
-                return;
-            }
-            if (PipeStatusText.showsReach(settled)) {
-                helper.fail("settled idle pipe still shows the reach line (a balanced run would read "
-                        + "a false 'Reach limit')");
-                return;
-            }
-            PipeStatusPayload flowing = new PipeStatusPayload(BlockPos.ZERO,
-                    PipeStatusPayload.STATUS_FLOWING, 100, null, new FluidStack(Fluids.WATER, 1),
-                    true, 1f, true, 3f, 5f, PipeStatusPayload.DETAIL_NONE, false, 0, false, 0, 0);
-            if (!PipeStatusText.showsReach(flowing)) {
-                helper.fail("a flowing pipe with headroom must still show the reach line");
-                return;
-            }
-            helper.succeed();
+            // Poll: the run first PRIMES with real fluid (reads as flow), then settles.
+            helper.succeedWhen(() -> {
+                PipeStatusPayload settled = PipeProbe.probe(helper.getLevel(), probeCell);
+                if (settled.status() != PipeStatusPayload.STATUS_NO_FLOW || settled.fluid().isEmpty()) {
+                    helper.fail("expected a settled NO_FLOW pipe with resting fluid, got status "
+                            + settled.status() + dump(helper));
+                    return;
+                }
+                if (PipeStatusText.showsReach(settled)) {
+                    helper.fail("settled idle pipe still shows the reach line (a balanced run would read "
+                            + "a false 'Reach limit')");
+                    return;
+                }
+                PipeStatusPayload flowing = new PipeStatusPayload(BlockPos.ZERO,
+                        PipeStatusPayload.STATUS_FLOWING, 100, null, new FluidStack(Fluids.WATER, 1),
+                        true, 1f, true, 3f, 5f, PipeStatusPayload.DETAIL_NONE, false, 0, false, 0, 0, 0);
+                if (!PipeStatusText.showsReach(flowing)) {
+                    helper.fail("a flowing pipe with headroom must still show the reach line");
+                }
+            });
         });
     }
 
@@ -2724,18 +3057,20 @@ public class PipesNPhysicsGameTests {
                     return;
                 }
 
-                PipeStatusPayload top = PipeProbe.probe(level, highest);
-                PipeStatusPayload bottom = PipeProbe.probe(level, lowest);
-                if (!top.fluid().isEmpty()) {
-                    helper.fail("dry riser cell above the surface still reports fluid — the goggle "
-                            + "would call an empty pipe 'settled, levels balanced'");
-                    return;
-                }
-                if (bottom.fluid().isEmpty()) {
-                    helper.fail("submerged riser cell below the surface lost its resting fluid");
-                    return;
-                }
-                helper.succeed();
+                // Poll: the settle pass needs a few ticks to draw the submerged cell's fill in.
+                BlockPos dry = highest;
+                BlockPos wet = lowest;
+                helper.succeedWhen(() -> {
+                    PipeStatusPayload top = PipeProbe.probe(level, dry);
+                    PipeStatusPayload bottom = PipeProbe.probe(level, wet);
+                    if (!top.fluid().isEmpty()) {
+                        helper.fail("dry riser cell above the surface still reports fluid — the goggle "
+                                + "would call an empty pipe 'settled, levels balanced'");
+                    }
+                    if (bottom.fluid().isEmpty()) {
+                        helper.fail("submerged riser cell below the surface lost its resting fluid");
+                    }
+                });
             });
         });
     }
@@ -2778,136 +3113,9 @@ public class PipesNPhysicsGameTests {
     }
 
     /**
-     * Render and delivery stay IN STEP: a flowing run fills as a travelling FRONT (progressive,
-     * NOT instant), and `deliveryReady` holds the endpoint transfer until that front reaches the
-     * sink — so the sink receives only once the fluid visually arrives, and the two match. Drives
-     * the render bridge a tick at a time on the longest run: one pass leaves the front mid-pipe
-     * (delivery gated), then the front crawls to the sink and delivery is released.
-     */
-    @GameTest(template = "piping/charging_max_range", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
-    public static void deliveryGatedUntilFrontReachesSink(GameTestHelper helper) {
-        helper.runAfterDelay(5, () -> {
-            var level = helper.getLevel();
-            BlockPos seed = null;
-            for (int x = 0; x < 16 && seed == null; x++)
-                for (int y = 0; y < 5 && seed == null; y++)
-                    for (int z = 0; z < 4 && seed == null; z++) {
-                        BlockPos rel = new BlockPos(x, y, z);
-                        if (helper.getBlockState(rel).is(AllBlocks.FLUID_PIPE.get())) seed = rel;
-                    }
-            if (seed == null) { helper.fail("no pipe in template"); return; }
-
-            Graph graph = GraphBuilder.build(level, helper.absolutePos(seed));
-            Edge edge = null; // the longest run, where the travelling front is clearest
-            for (Edge e : graph.edges()) {
-                if (!e.pipes().isEmpty() && (edge == null || e.pipes().size() > edge.pipes().size())) edge = e;
-            }
-            if (edge == null || edge.pipes().size() < 3) { helper.fail("no multi-cell pipe run"); return; }
-            int cells = edge.pipes().size();
-
-            Solution flowing = pipesnphysics$renderSolution(
-                    graph, edge.index(), EdgeFlow.Direction.A_TO_B, 0, 0, true);
-            Solution.Transfer toSink = new Solution.Transfer(
-                    graph.node(edge.a()).pos(), graph.node(edge.b()).pos(), new FluidStack(Fluids.WATER, 200));
-
-            // One pass: the front is still mid-pipe (progressive, not instant) -> delivery gated.
-            CreatePipeRendering.apply(level, graph, flowing);
-            if (pipesnphysics$countChargedEdgeCells(level, edge) >= cells) {
-                helper.fail("whole run charged in ONE pass — fill is instant, not a travelling front");
-                return;
-            }
-            if (CreatePipeRendering.deliveryReady(level, graph, flowing, toSink)) {
-                helper.fail("delivery NOT gated while the front is still crawling to the sink");
-                return;
-            }
-
-            // Let the front crawl to the sink; delivery must then release.
-            for (int i = 0; i < 40 * cells + 80
-                    && !CreatePipeRendering.deliveryReady(level, graph, flowing, toSink); i++) {
-                CreatePipeRendering.apply(level, graph, flowing);
-                pipesnphysics$tickEdgePipes(level, edge);
-            }
-            if (!CreatePipeRendering.deliveryReady(level, graph, flowing, toSink)) {
-                helper.fail("delivery never released after the front had time to reach the sink");
-                return;
-            }
-            helper.succeed();
-        });
-    }
-
-    /**
-     * The delivery gate tracks the WHOLE travelling front, not just the sink-adjacent cell. A run
-     * fully charged (every cell complete) delivers at once; but if a DRY gap opens at the SOURCE end
-     * while the sink-side cells stay complete — a freshly-restarted flow whose standing downstream
-     * fluid {@code preserveStandingFluid} keeps — delivery must be HELD until the front re-crawls the
-     * gap. The old gate keyed off only the terminal cell and released early, so the sink filled while
-     * the visible front was still crawling: the in-pipe-level-render decoupling this fixes.
-     */
-    @GameTest(template = "piping/charging_max_range", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
-    public static void deliveryGatedUntilWholeFrontContiguous(GameTestHelper helper) {
-        helper.runAfterDelay(5, () -> {
-            var level = helper.getLevel();
-            BlockPos seed = null;
-            for (int x = 0; x < 16 && seed == null; x++)
-                for (int y = 0; y < 5 && seed == null; y++)
-                    for (int z = 0; z < 4 && seed == null; z++) {
-                        BlockPos rel = new BlockPos(x, y, z);
-                        if (helper.getBlockState(rel).is(AllBlocks.FLUID_PIPE.get())) seed = rel;
-                    }
-            if (seed == null) { helper.fail("no pipe in template"); return; }
-
-            Graph graph = GraphBuilder.build(level, helper.absolutePos(seed));
-            Edge edge = null;
-            for (Edge e : graph.edges())
-                if (!e.pipes().isEmpty() && (edge == null || e.pipes().size() > edge.pipes().size())) edge = e;
-            if (edge == null || edge.pipes().size() < 3) { helper.fail("no multi-cell pipe run"); return; }
-            int cells = edge.pipes().size();
-
-            Solution flowing = pipesnphysics$renderSolution(
-                    graph, edge.index(), EdgeFlow.Direction.A_TO_B, 0, 0, true);
-            Solution.Transfer toSink = new Solution.Transfer(
-                    graph.node(edge.a()).pos(), graph.node(edge.b()).pos(), new FluidStack(Fluids.WATER, 200));
-
-            // Charge the run until the front reaches the sink (delivery released). That guarantees
-            // every cell's toward-sink connection is complete — a fully-primed continuous column.
-            for (int i = 0; i < 60 * cells + 200
-                    && !CreatePipeRendering.deliveryReady(level, graph, flowing, toSink); i++) {
-                CreatePipeRendering.apply(level, graph, flowing);
-                pipesnphysics$tickEdgePipes(level, edge);
-            }
-            if (!CreatePipeRendering.deliveryReady(level, graph, flowing, toSink)) {
-                helper.fail("delivery never released after the front had time to reach the sink"); return;
-            }
-            if (pipesnphysics$countChargedEdgeCells(level, edge) < cells) {
-                helper.fail("front reached sink but not every cell holds fluid"); return;
-            }
-
-            // Open a DRY gap at the source end (node a, the A->B upstream): the sink-side cells stay
-            // complete. Delivery must now be held — the front is no longer contiguous to the sink.
-            pipesnphysics$clearCellFlows(level, edge.pipes().get(0));
-            if (CreatePipeRendering.deliveryReady(level, graph, flowing, toSink)) {
-                helper.fail("delivery released with a DRY source-side gap — gate ignored the whole front");
-                return;
-            }
-            helper.succeed();
-        });
-    }
-
-    /** Clear every Create Flow on one pipe cell (open a dry gap the travelling front must refill). */
-    private static void pipesnphysics$clearCellFlows(Level level, BlockPos cell) {
-        FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, cell);
-        if (pipe == null) return;
-        for (Direction dir : Direction.values()) {
-            if (pipe.getConnection(dir) instanceof PipeConnectionAccessor accessor) {
-                accessor.pipesnphysics$setFlow(Optional.empty());
-            }
-        }
-    }
-
-    /**
-     * Fluid travels down a pipe as a front, NOT a pop-fill: the number of fully-charged cells
-     * GROWS over ticks while a long run fills, and the fill speed scales with the flow
-     * (`flowPressure`). End-to-end with a real pump pushing water down the long discharge run.
+     * Fluid travels down a pipe as a front, NOT a pop-fill: the number of cells holding fluid
+     * GROWS over ticks while a long run primes — the front is the real stored volume advancing.
+     * End-to-end with a real pump pushing water down the long discharge run.
      */
     @GameTest(template = "piping/charging_max_range", templateNamespace = PipesNPhysics.ID, timeoutTicks = 400)
     public static void fluidFrontAdvancesOverTime(GameTestHelper helper) {
@@ -2954,25 +3162,13 @@ public class PipesNPhysicsGameTests {
         });
     }
 
-    /** Count pipe cells that are fully charged (have a complete fluid Flow). */
+    /** Count pipe cells that hold stored fluid. */
     private static int pipesnphysics$countChargedPipes(GameTestHelper helper) {
         int count = 0;
         for (int x = 0; x < 16; x++) {
             for (int y = 0; y < 5; y++) {
                 for (int z = 0; z < 4; z++) {
-                    var pipe = FluidPropagator.getPipe(
-                            helper.getLevel(), helper.absolutePos(new BlockPos(x, y, z)));
-                    if (pipe == null) continue;
-                    for (Direction dir : Direction.values()) {
-                        var conn = pipe.getConnection(dir);
-                        if (conn instanceof PipeConnectionAccessor accessor) {
-                            var flow = accessor.pipesnphysics$getFlow();
-                            if (flow.isPresent() && flow.get().complete && !flow.get().fluid.isEmpty()) {
-                                count++;
-                                break;
-                            }
-                        }
-                    }
+                    if (cellMb(helper.getLevel(), helper.absolutePos(new BlockPos(x, y, z))) > 0) count++;
                 }
             }
         }
@@ -2986,25 +3182,34 @@ public class PipesNPhysicsGameTests {
      * solve state to report WHY if it reverted.
      */
     /**
-     * A raised tank draining into a lower one leaves the connecting pipe above the
-     * lower waterline. That fluid must recede into the lower tank — a dead (no
-     * longer solved) tank-to-tank run must still drain to empty rather than stay
-     * stuck full (the failure mode if the drain freezes when the network sleeps).
-     * The recede is gradual; this guards the end state, the feel is visual.
+     * A raised tank draining into a lower one: the upper tank must empty COMPLETELY, and every
+     * drop is accounted for — what is not yet in the lower tank still resides in the pipes
+     * (settling down over time), never voided. The recede is gradual; this guards the end state
+     * and conservation, the feel is visual.
      */
     @GameTest(template = "gravity/2_drop_fall", templateNamespace = PipesNPhysics.ID, timeoutTicks = 1000)
     public static void drainedPipeRecedesNotStuck(GameTestHelper helper) {
         BlockPos top = new BlockPos(0, 4, 0);
         fill(helper, top, 8000);
 
-        // POLL until the end state holds (tank drained AND the pipe has fully receded). The drain
-        // and the gradual recede finish at a time that varies tick-to-tick, so a one-shot check at
-        // a fixed tick was flaky; succeedWhen retries each tick until both hold (or the timeout).
         helper.succeedWhen(() -> {
             if (amount(helper, top) != 0) {
                 helper.fail("upper tank has not drained yet: " + amount(helper, top));
-            } else if (pipesnphysics$findPipeFlow(helper) != null) {
-                helper.fail("connecting pipe stayed full after the upper tank drained");
+                return;
+            }
+            int pipes = pipesnphysics$areaPipeContent(helper, 4, 6, 4);
+            BlockPos lower = null;
+            for (int x = 0; x < 4 && lower == null; x++)
+                for (int y = 0; y < 6 && lower == null; y++)
+                    for (int z = 0; z < 4 && lower == null; z++) {
+                        BlockPos rel = new BlockPos(x, y, z);
+                        if (!rel.equals(top) && helper.getBlockState(rel).is(AllBlocks.FLUID_TANK.get())) {
+                            lower = rel;
+                        }
+                    }
+            int lowerMb = lower == null ? 0 : amount(helper, lower);
+            if (lowerMb + pipes != 8000) {
+                helper.fail("fluid lost while draining down: lower=" + lowerMb + " pipes=" + pipes);
             }
         });
     }
@@ -3067,19 +3272,14 @@ public class PipesNPhysicsGameTests {
             for (BlockPos t : tanks) drain(helper, t);
             for (BlockPos t : tanks) fill(helper, t, 2000);
 
-            helper.runAfterDelay(3, () -> {
-                // Force one render against a fresh solve so the result reflects the
-                // resting state directly (the live engine may be asleep with stale
-                // flows left over from the brief equalization).
-                var graph = GraphBuilder.build(helper.getLevel(), helper.absolutePos(tanks.get(0)));
-                var sol = FlowSolver.solve(helper.getLevel(), graph);
-                CreatePipeRendering.apply(helper.getLevel(), graph, sol);
-
-                if (pipesnphysics$findPipeFlow(helper) == null) {
-                    helper.fail("flat resting pipe (surface inside the cell) rendered empty");
-                    return;
+            // The connecting cells settle at the shared waterline INSIDE them: partial content,
+            // neither drained dry nor painted full.
+            helper.succeedWhen(() -> {
+                int wet = 0;
+                for (int x = 0; x < 12; x++) for (int y = 0; y < 5; y++) for (int z = 0; z < 12; z++) {
+                    if (cellMb(helper.getLevel(), helper.absolutePos(new BlockPos(x, y, z))) > 0) wet++;
                 }
-                helper.succeed();
+                if (wet == 0) helper.fail("flat resting pipe (surface inside the cell) holds no fluid");
             });
         });
     }
@@ -3095,190 +3295,11 @@ public class PipesNPhysicsGameTests {
      * whole fill backward. This drives that exact sequence on a real pipe and asserts
      * the charged cells stay charged.
      */
-    @GameTest(template = "gravity/long_equalization", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
-    public static void equalizedPipeDoesNotRevertWhenFlowRunsTowardA(GameTestHelper helper) {
-        helper.runAfterDelay(2, () -> {
-            BlockPos tank = null;
-            for (int x = 0; x < 12 && tank == null; x++)
-                for (int y = 0; y < 5 && tank == null; y++)
-                    for (int z = 0; z < 12 && tank == null; z++) {
-                        BlockPos rel = new BlockPos(x, y, z);
-                        if (helper.getBlockState(rel).is(AllBlocks.FLUID_TANK.get())) tank = rel;
-                    }
-            if (tank == null) { helper.fail("no tank in template"); return; }
-
-            var level = helper.getLevel();
-            Graph graph = GraphBuilder.build(level, helper.absolutePos(tank));
-            Edge edge = null;
-            for (Edge e : graph.edges()) {
-                if (graph.node(e.a()).isHandler() && graph.node(e.b()).isHandler() && !e.pipes().isEmpty()) {
-                    edge = e;
-                    break;
-                }
-            }
-            if (edge == null) { helper.fail("no tank-to-tank pipe edge in graph"); return; }
-
-            // Heads that submerge every pipe cell, with b HIGHER than a so the fluid runs
-            // B->A: the orientation restEdge used to get wrong.
-            double baseY = edge.pipes().get(0).getY();
-            for (BlockPos cell : edge.pipes()) baseY = Math.max(baseY, cell.getY());
-            double headA = baseY + 1.0;
-            double headB = baseY + 2.0;
-            Solution flowBtoA = pipesnphysics$renderSolution(
-                    graph, edge.index(), EdgeFlow.Direction.B_TO_A, headA, headB, true);
-            Solution resting = pipesnphysics$renderSolution(
-                    graph, edge.index(), EdgeFlow.Direction.NONE, headA, headB, false);
-
-            // Charge the front fully (chargeEdge seeds, the kept tickFlowProgress advances).
-            // Each cell takes ~18 ticks to fill both halves, so cap well above run length.
-            int cells = edge.pipes().size();
-            for (int i = 0; i < 40 * cells + 80
-                    && pipesnphysics$countChargedEdgeCells(level, edge) < cells; i++) {
-                CreatePipeRendering.apply(level, graph, flowBtoA);
-                pipesnphysics$tickEdgePipes(level, edge);
-            }
-            int charged = pipesnphysics$countChargedEdgeCells(level, edge);
-            if (charged < cells) {
-                helper.fail("front never charged: " + charged + "/" + cells);
-                return;
-            }
-
-            CreatePipeRendering.apply(level, graph, resting);   // settle: must stay full
-            CreatePipeRendering.apply(level, graph, flowBtoA);  // brief re-flow: must NOT recede
-            int after = pipesnphysics$countChargedEdgeCells(level, edge);
-            if (after < charged) {
-                helper.fail("pipe reverted across flowing->resting->flowing: charged="
-                        + charged + " after=" + after);
-                return;
-            }
-            helper.succeed();
-        });
-    }
-
     /**
-     * When a settled run STARTS flowing, the travelling front charges from the dry upstream end — but
-     * the already-settled fluid downstream must NOT be swept before the front reaches it. That sweep
-     * despawns the standing column and re-crawls (re-gating delivery). The guard (preserveStandingFluid)
-     * was wired only into the in-pipe level renderer. This drives the DEFAULT binary renderer on a
-     * U (two tanks above a dipping run): the BOTTOM of the U rests full while the risers are dry, and a
-     * flow starting down a dry riser must leave the settled bottom cells charged across the first tick.
-     */
-    @GameTest(template = "gravity/simple_fluid_leveling", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
-    public static void flowStartKeepsStandingSinkFluid(GameTestHelper helper) {
-        helper.runAfterDelay(2, () -> {
-            var level = helper.getLevel();
-            BlockPos seed = null;
-            for (int x = 0; x < 3 && seed == null; x++)
-                for (int y = 0; y < 4 && seed == null; y++)
-                    if (helper.getBlockState(new BlockPos(x, y, 0)).is(AllBlocks.FLUID_TANK.get()))
-                        seed = new BlockPos(x, y, 0);
-            if (seed == null) { helper.fail("no tank in template"); return; }
-
-            Graph graph = GraphBuilder.build(level, helper.absolutePos(seed));
-            Edge edge = null;
-            for (Edge e : graph.edges()) {
-                if (graph.node(e.a()).isHandler() && graph.node(e.b()).isHandler() && e.pipes().size() >= 3) {
-                    edge = e;
-                    break;
-                }
-            }
-            if (edge == null) { helper.fail("no tank-to-tank U edge in template"); return; }
-
-            // A flat waterline at the BOTTOM cells' level: it submerges the U floor (threshold = the
-            // cell's BOTTOM face) but leaves the risers one block up dry — the dry upstream the front
-            // stops short of. The tanks sit ABOVE the run, so their rendered surface (displaySurface,
-            // which preserveStandingFluid uses) clears the floor cells too — a genuine standing column.
-            int floorY = Integer.MAX_VALUE;
-            for (BlockPos c : edge.pipes()) floorY = Math.min(floorY, c.getY());
-            double waterline = floorY;
-
-            // Settle: the U floor fills to complete resting flows (restEdge seeds them full at once).
-            Solution resting = pipesnphysics$renderSolution(
-                    graph, edge.index(), EdgeFlow.Direction.NONE, waterline, waterline, false);
-            for (int i = 0; i < 20; i++) {
-                CreatePipeRendering.apply(level, graph, resting);
-                pipesnphysics$tickEdgePipes(level, edge);
-            }
-            int settled = pipesnphysics$countChargedEdgeCells(level, edge);
-            if (settled < 2) { helper.fail("U floor never settled full at rest (" + settled + ")"); return; }
-
-            // Flow starts down a dry riser (the front charges from node a's end), so the settled floor
-            // cells are downstream and un-reached this tick. One apply must not sweep them.
-            Solution flowing = pipesnphysics$renderSolution(
-                    graph, edge.index(), EdgeFlow.Direction.A_TO_B, waterline, waterline, true);
-            CreatePipeRendering.apply(level, graph, flowing);
-
-            int after = pipesnphysics$countChargedEdgeCells(level, edge);
-            if (after < settled) {
-                helper.fail("flow start swept the settled fluid (" + settled + " -> " + after
-                        + "): preserveStandingFluid is not run for the binary renderer");
-                return;
-            }
-            helper.succeed();
-        });
-    }
-
-    /**
-     * No-flow rendering depends on WHY there is no flow. A stall whose source is dry is
-     * phantom flow — nothing can feed the pipe — so it must render EMPTY. A sink-full
-     * stall has fluid genuinely backed up in the pipe and must keep rendering it. Drives
-     * the render bridge with both stalled solutions on the same pipe and checks each.
-     */
-    @GameTest(template = "gravity/long_equalization", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
-    public static void drySourceStallRendersEmptyButSinkFullKeepsFluid(GameTestHelper helper) {
-        helper.runAfterDelay(2, () -> {
-            BlockPos tank = null;
-            for (int x = 0; x < 12 && tank == null; x++)
-                for (int y = 0; y < 5 && tank == null; y++)
-                    for (int z = 0; z < 12 && tank == null; z++) {
-                        BlockPos rel = new BlockPos(x, y, z);
-                        if (helper.getBlockState(rel).is(AllBlocks.FLUID_TANK.get())) tank = rel;
-                    }
-            if (tank == null) { helper.fail("no tank in template"); return; }
-
-            var level = helper.getLevel();
-            Graph graph = GraphBuilder.build(level, helper.absolutePos(tank));
-            Edge edge = null;
-            for (Edge e : graph.edges()) {
-                if (graph.node(e.a()).isHandler() && graph.node(e.b()).isHandler() && !e.pipes().isEmpty()) {
-                    edge = e;
-                    break;
-                }
-            }
-            if (edge == null) { helper.fail("no tank-to-tank pipe edge in graph"); return; }
-
-            double baseY = edge.pipes().get(0).getY();
-            for (BlockPos cell : edge.pipes()) baseY = Math.max(baseY, cell.getY());
-            double headA = baseY + 1.0;
-            double headB = baseY + 2.0;
-
-            // SINK_FULL: pressurized with fluid present -> must keep rendering.
-            CreatePipeRendering.apply(level, graph,
-                    pipesnphysics$stalledSolution(graph, edge.index(), Solution.Reason.SINK_FULL, headA, headB));
-            if (!pipesnphysics$edgeHasAnyFlow(level, edge)) {
-                helper.fail("SINK_FULL stall rendered the pipe empty (fluid should stay)");
-                return;
-            }
-
-            // SOURCE_DRY: pressurized but no source -> must render nothing (sweep clears
-            // the cell charged just above).
-            CreatePipeRendering.apply(level, graph,
-                    pipesnphysics$stalledSolution(graph, edge.index(), Solution.Reason.SOURCE_DRY, headA, headB));
-            if (pipesnphysics$edgeHasAnyFlow(level, edge)) {
-                helper.fail("SOURCE_DRY stall still rendered fluid (source is dry, show nothing)");
-                return;
-            }
-            helper.succeed();
-        });
-    }
-
-    /**
-     * A pump pushing into a full basin backs the pipe up with NO flow this tick (it rounds
-     * to zero / the pump is dead-headed). The pump-to-sink run is not tank-to-tank, so it
-     * misses the gradual-drain path and used to get swept blank — meaning when the basin
-     * makes room the front had to re-travel the whole pipe (the flow "delayed all over
-     * again"). It must instead stay charged. Charges a pump-to-handler run, then drives it
-     * with a flowless SINK_FULL and a flowless NO_HEAD solution and asserts the fluid stays.
+     * A pump pushing into a full sink backs the pipe up with NO flow this tick. The backed-up run
+     * (a SINK_FULL stall or a dead-headed NO_HEAD pump) must KEEP its stored fluid — the settle
+     * pass may not drain a column a running pump is holding, so when the sink makes room the flow
+     * resumes instantly instead of re-priming the whole run.
      */
     @GameTest(template = "piping/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
     public static void backedUpStallKeepsChargedPipe(GameTestHelper helper) {
@@ -3304,29 +3325,33 @@ public class PipesNPhysicsGameTests {
                 }
             }
             if (edge == null) { helper.fail("no pump-to-handler pipe edge in graph"); return; }
+            Edge run = edge;
 
-            double baseY = edge.pipes().get(0).getY();
-            for (BlockPos cell : edge.pipes()) baseY = Math.max(baseY, cell.getY());
-            Solution charging = pipesnphysics$renderSolution(
-                    graph, edge.index(), EdgeFlow.Direction.A_TO_B, baseY + 2.0, baseY + 1.0, true);
-            int cells = edge.pipes().size();
-            for (int i = 0; i < 40 * cells + 80
-                    && pipesnphysics$countChargedEdgeCells(level, edge) < cells; i++) {
-                CreatePipeRendering.apply(level, graph, charging);
-                pipesnphysics$tickEdgePipes(level, edge);
-            }
-            if (pipesnphysics$countChargedEdgeCells(level, edge) < cells) {
-                helper.fail("could not charge the pump-to-handler run to test the backed-up case");
-                return;
+            // Both tanks brim-full, so the live engine's settle can't siphon the held column away
+            // between the synthetic executor passes below.
+            fill(helper, new BlockPos(0, 1, 1), 8000);
+            fill(helper, new BlockPos(4, 1, 1), 8000);
+
+            int capacity = PipeStore.capacityMb();
+            for (BlockPos cell : run.pipes()) {
+                PipeStore.Store store = PipeStore.at(level, cell);
+                if (store != null) {
+                    store.insert(new FluidStack(Fluids.WATER, capacity), capacity);
+                    store.flush();
+                }
             }
 
             for (boolean noHead : new boolean[]{false, true}) {
-                CreatePipeRendering.apply(level, graph,
-                        pipesnphysics$backedUpSolution(graph, edge.index(), noHead));
-                if (!pipesnphysics$edgeHasAnyFlow(level, edge)) {
-                    helper.fail("backed-up " + (noHead ? "NO_HEAD" : "SINK_FULL")
-                            + " stall blanked the charged pipe — front would re-travel");
-                    return;
+                for (int i = 0; i < 10; i++) {
+                    PipeFlowExecutor.run((ServerLevel) level, graph,
+                            pipesnphysics$backedUpSolution(graph, run.index(), noHead));
+                }
+                for (BlockPos cell : run.pipes()) {
+                    if (cellMb(level, cell) < capacity) {
+                        helper.fail("backed-up " + (noHead ? "NO_HEAD" : "SINK_FULL")
+                                + " stall drained the held column at " + cell.toShortString());
+                        return;
+                    }
                 }
             }
             helper.succeed();
@@ -3334,90 +3359,36 @@ public class PipesNPhysicsGameTests {
     }
 
     /**
-     * A pump run whose SOURCE briefly runs dry (e.g. a basin fed in recipe-sized chunks, empty
-     * between outputs) carries no flow this tick, isn't backed up against a sink, and — being a
-     * pump run (not tank-to-tank) with no pump-junction head to settle a waterline — used to miss
-     * every preservation guard and get swept blank. The travelling front then had to re-crawl the
-     * whole run when the source refilled, so a LONG pipe delivered in bursts ("pumps every N ticks
-     * then a big slug"). It must instead keep its charged cells. Charges a pump-to-handler run, then
-     * drives it with an idle source-dry solution and asserts the fluid stays (vs being blanked).
-     * Uses the long-discharge template so receding the single top cell per heartbeat still leaves
-     * a charged run behind — exactly the long-pipe case where the burst was visible.
+     * BREAK-SPILL: a broken pipe cell's stored fluid is pushed back into the network (adjacent
+     * cells and tanks with room), not voided — tearing down a wet line gives the fluid back.
      */
-    @GameTest(template = "piping/charging_max_range", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
-    public static void drySourcePumpRunKeepsChargedPipe(GameTestHelper helper) {
+    @GameTest(template = "piping/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 100)
+    public static void brokenPipeSpillsContentBackIntoNetwork(GameTestHelper helper) {
+        BlockPos tank = new BlockPos(0, 1, 1);
+        BlockPos cell = new BlockPos(1, 1, 1);
+        fill(helper, tank, 4000);
         helper.runAfterDelay(5, () -> {
             var level = helper.getLevel();
-            BlockPos seed = null;
-            for (int x = 0; x < 16 && seed == null; x++)
-                for (int y = 0; y < 5 && seed == null; y++)
-                    for (int z = 0; z < 4 && seed == null; z++) {
-                        BlockPos rel = new BlockPos(x, y, z);
-                        if (helper.getBlockState(rel).is(AllBlocks.FLUID_PIPE.get())) seed = rel;
-                    }
-            if (seed == null) { helper.fail("no pipe in template"); return; }
+            int capacity = PipeStore.capacityMb();
+            PipeStore.Store store = PipeStore.at(level, helper.absolutePos(cell));
+            if (store == null) { helper.fail("no pipe store at the pull cell"); return; }
+            store.extract(capacity);
+            store.insert(new FluidStack(Fluids.WATER, capacity), capacity);
+            store.flush();
+            int before = amount(helper, tank) + capacity;
 
-            Graph graph = GraphBuilder.build(level, helper.absolutePos(seed));
-            Edge edge = null; // the LONGEST pump-to-handler run (the discharge side)
-            for (Edge e : graph.edges()) {
-                var a = graph.node(e.a());
-                var b = graph.node(e.b());
-                boolean pumpRun = (a.isPump() && b.isHandler()) || (a.isHandler() && b.isPump());
-                if (pumpRun && (edge == null || e.pipes().size() > edge.pipes().size())) edge = e;
-            }
-            if (edge == null || edge.pipes().size() < 2) {
-                helper.fail("no multi-cell pump-to-handler run in graph");
-                return;
-            }
+            FluidStack content = store.fluid().copy();
+            helper.setBlock(cell, Blocks.AIR.defaultBlockState());
+            NetworkEditHandler.spillBrokenPipe((ServerLevel) level, helper.absolutePos(cell), content);
 
-            double baseY = edge.pipes().get(0).getY();
-            for (BlockPos cell : edge.pipes()) baseY = Math.max(baseY, cell.getY());
-            Solution charging = pipesnphysics$renderSolution(
-                    graph, edge.index(), EdgeFlow.Direction.A_TO_B, baseY + 2.0, baseY + 1.0, true);
-            int cells = edge.pipes().size();
-            for (int i = 0; i < 40 * cells + 80
-                    && pipesnphysics$countChargedEdgeCells(level, edge) < cells; i++) {
-                CreatePipeRendering.apply(level, graph, charging);
-                pipesnphysics$tickEdgePipes(level, edge);
-            }
-            if (pipesnphysics$countChargedEdgeCells(level, edge) < cells) {
-                helper.fail("could not charge the pump-to-handler run to test the dry-source case");
-                return;
-            }
-
-            // Source dries: idle, no flow, and no pump-junction head -> falls to drainDeadEdge,
-            // which must KEEP the charged cells (receding gradually) rather than sweep them blank.
-            CreatePipeRendering.apply(level, graph,
-                    pipesnphysics$idleSourceDrySolution(graph, edge.index()));
-            if (!pipesnphysics$edgeHasAnyFlow(level, edge)) {
-                helper.fail("dry-source idle run was blanked — the long-pipe front would re-crawl");
+            int after = amount(helper, tank);
+            if (after != before) {
+                helper.fail("broken pipe voided its content: tank holds " + after
+                        + " mB, expected " + before);
                 return;
             }
             helper.succeed();
         });
-    }
-
-    /** Build a one-edge render Solution carrying water, with the two endpoint heads set. */
-    private static Solution pipesnphysics$renderSolution(Graph graph, int edgeIndex,
-                                                         EdgeFlow.Direction direction,
-                                                         double headA, double headB, boolean flowing) {
-        Edge target = graph.edge(edgeIndex);
-        List<EdgeFlow> flows = new ArrayList<>();
-        for (Edge e : graph.edges()) {
-            flows.add(e.index() == edgeIndex
-                    ? new EdgeFlow(edgeIndex, direction, flowing ? 200 : 0)
-                    : EdgeFlow.none(e.index()));
-        }
-        FluidStack water = new FluidStack(Fluids.WATER, 1);
-        Map<Integer, FluidStack> restFluids = new HashMap<>();
-        restFluids.put(edgeIndex, water);
-        Map<Integer, FluidStack> edgeFluids = new HashMap<>();
-        if (flowing) edgeFluids.put(edgeIndex, water);
-        Map<Integer, Double> heads = new HashMap<>();
-        heads.put(target.a(), headA);
-        heads.put(target.b(), headB);
-        return new Solution(flows, List.of(), heads, Map.of(), Map.of(), edgeFluids, restFluids,
-                Set.of(), Set.of(), Set.of(), Set.of(), Map.of(), Map.of(), flowing);
     }
 
     /** A flowless solution where the edge is backed up against a blockage (no fluid carried). */
@@ -3433,118 +3404,9 @@ public class PipesNPhysicsGameTests {
             stalled.add(edgeIndex);
             reasons.put(edgeIndex, Solution.Reason.SINK_FULL);
         }
-        return new Solution(flows, List.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(),
+        return new Solution(flows, List.of(), List.of(), new int[graph.edges().size()],
+                Map.of(), Map.of(), Map.of(), Map.of(), Map.of(),
                 Set.of(), stalled, noHeadEdges, Set.of(), reasons, Map.of(), true);
-    }
-
-    /**
-     * A flowless, head-less solution standing in for a pump run whose source just ran dry: no
-     * flow, no stall flags, and NO node heads (the idle pump junction develops none), so the edge
-     * falls past restEdge to the gradual-drain guard instead of being swept. restFluids is set to
-     * mirror the real solve (the sink-side fluid is still sampled onto the assembled branch).
-     */
-    private static Solution pipesnphysics$idleSourceDrySolution(Graph graph, int edgeIndex) {
-        List<EdgeFlow> flows = new ArrayList<>();
-        for (Edge e : graph.edges()) flows.add(EdgeFlow.none(e.index()));
-        Map<Integer, FluidStack> restFluids = new HashMap<>();
-        restFluids.put(edgeIndex, new FluidStack(Fluids.WATER, 1));
-        return new Solution(flows, List.of(), Map.of(), Map.of(), Map.of(), Map.of(), restFluids,
-                Set.of(), Set.of(), Set.of(), Set.of(), Map.of(), Map.of(), false);
-    }
-
-    /** Advance the kept fill animation on every connection of an edge's pipe cells. */
-    private static void pipesnphysics$tickEdgePipes(Level level, Edge edge) {
-        for (BlockPos cell : edge.pipes()) {
-            FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, cell);
-            if (pipe == null) continue;
-            for (Direction dir : Direction.values()) {
-                PipeConnection conn = pipe.getConnection(dir);
-                if (conn != null) conn.tickFlowProgress(level, cell);
-            }
-        }
-    }
-
-    /** Count an edge's pipe cells that hold a complete (full) water Flow. */
-    private static int pipesnphysics$countChargedEdgeCells(Level level, Edge edge) {
-        int count = 0;
-        for (BlockPos cell : edge.pipes()) {
-            FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, cell);
-            if (pipe == null) continue;
-            for (Direction dir : Direction.values()) {
-                if (pipe.getConnection(dir) instanceof PipeConnectionAccessor accessor) {
-                    var flow = accessor.pipesnphysics$getFlow();
-                    if (flow.isPresent() && flow.get().complete && !flow.get().fluid.isEmpty()) {
-                        count++;
-                        break;
-                    }
-                }
-            }
-        }
-        return count;
-    }
-
-    /** A one-edge Solution that is pressurized (carries a direction + fluid) yet stalled. */
-    private static Solution pipesnphysics$stalledSolution(Graph graph, int edgeIndex,
-                                                          Solution.Reason reason,
-                                                          double headA, double headB) {
-        Edge target = graph.edge(edgeIndex);
-        List<EdgeFlow> flows = new ArrayList<>();
-        for (Edge e : graph.edges()) {
-            flows.add(e.index() == edgeIndex
-                    ? new EdgeFlow(edgeIndex, EdgeFlow.Direction.A_TO_B, 50)
-                    : EdgeFlow.none(e.index()));
-        }
-        FluidStack water = new FluidStack(Fluids.WATER, 1);
-        Map<Integer, FluidStack> edgeFluids = new HashMap<>();
-        edgeFluids.put(edgeIndex, water);
-        Map<Integer, FluidStack> restFluids = new HashMap<>();
-        restFluids.put(edgeIndex, water);
-        Map<Integer, Double> heads = new HashMap<>();
-        heads.put(target.a(), headA);
-        heads.put(target.b(), headB);
-        Map<Integer, Solution.Reason> reasons = new HashMap<>();
-        reasons.put(edgeIndex, reason);
-        return new Solution(flows, List.of(), heads, Map.of(), Map.of(), edgeFluids, restFluids,
-                Set.of(), Set.of(edgeIndex), Set.of(), Set.of(), reasons, Map.of(), true);
-    }
-
-    /** Whether any of an edge's pipe cells currently holds a non-empty Create Flow. */
-    private static boolean pipesnphysics$edgeHasAnyFlow(Level level, Edge edge) {
-        for (BlockPos cell : edge.pipes()) {
-            FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, cell);
-            if (pipe == null) continue;
-            for (Direction dir : Direction.values()) {
-                if (pipe.getConnection(dir) instanceof PipeConnectionAccessor accessor) {
-                    var flow = accessor.pipesnphysics$getFlow();
-                    if (flow.isPresent() && !flow.get().fluid.isEmpty()) return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    /** First non-empty Create pipe Flow found anywhere in the test structure, or null. */
-    private static FluidStack pipesnphysics$findPipeFlow(GameTestHelper helper) {
-        for (int x = 0; x < 8; x++) {
-            for (int y = 0; y < 4; y++) {
-                for (int z = 0; z < 4; z++) {
-                    var pipe = FluidPropagator.getPipe(
-                            helper.getLevel(), helper.absolutePos(new BlockPos(x, y, z)));
-                    if (pipe == null) continue;
-                    for (Direction dir : Direction.values()) {
-                        var conn = pipe.getConnection(dir);
-                        if (!(conn instanceof PipeConnectionAccessor accessor)) {
-                            continue;
-                        }
-                        var flow = accessor.pipesnphysics$getFlow();
-                        if (flow.isPresent() && !flow.get().fluid.isEmpty()) {
-                            return flow.get().fluid;
-                        }
-                    }
-                }
-            }
-        }
-        return null;
     }
 
     /**
@@ -3799,25 +3661,14 @@ public class PipesNPhysicsGameTests {
         helper.runAfterDelay(160, () -> {
             if (run.isEmpty()) { helper.fail("no run cells captured"); return; }
             for (BlockPos abs : run) {
-                if (!pipeCellRendersFluidAbs(level, abs)) {
-                    helper.fail("backed-up run cell rendered empty (never seeded) at " + helper.relativePos(abs));
+                if (cellMb(level, abs) <= 0) {
+                    helper.fail("backed-up run cell holds no fluid (never filled from the full tank) at "
+                            + helper.relativePos(abs));
                     return;
                 }
             }
             helper.succeed();
         });
-    }
-
-    private static boolean pipeCellRendersFluidAbs(Level level, BlockPos abs) {
-        FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, abs);
-        if (pipe == null) return false;
-        for (Direction dir : Direction.values()) {
-            if (pipe.getConnection(dir) instanceof PipeConnectionAccessor a) {
-                var flow = a.pipesnphysics$getFlow();
-                if (flow.isPresent() && flow.get().complete && !flow.get().fluid.isEmpty()) return true;
-            }
-        }
-        return false;
     }
 
     /**
@@ -3867,136 +3718,17 @@ public class PipesNPhysicsGameTests {
         helper.runAfterDelay(160, () -> {
             if (runToFull.isEmpty()) { helper.fail("no run captured"); return; }
             for (BlockPos abs : runToFull) {
-                if (!pipeCellRendersFluidAbs(level, abs)) {
-                    helper.fail("blocked run from the FULL tank rendered empty at " + helper.relativePos(abs));
+                if (cellMb(level, abs) <= 0) {
+                    helper.fail("blocked run from the FULL tank holds no fluid at " + helper.relativePos(abs));
                     return;
                 }
             }
             // The far run (to the drained tank) must stay dry — no phantom water past the off pump.
             for (BlockPos abs : runToEmpty) {
-                if (pipeCellRendersFluidAbs(level, abs)) {
-                    helper.fail("run to the EMPTY tank wrongly rendered water past the off pump at " + helper.relativePos(abs));
+                if (cellMb(level, abs) > 0) {
+                    helper.fail("run to the EMPTY tank wrongly holds water past the off pump at " + helper.relativePos(abs));
                     return;
                 }
-            }
-            helper.succeed();
-        });
-    }
-
-    /**
-     * The dead-end fill: a pipe run capped by a solid block renders full because the client renderer,
-     * asking for the (pruned) block-facing flow, is handed a synthetic complete flow derived from the
-     * network side ({@code CreatePipeRendering.deadEndFillFlow}). The actual pixels are client-side and
-     * not GameTestable, but the SYNTH LOGIC runs server-side and is what decides whether the block half
-     * fills — assert it fires for a true solid dead end and stays null for the network side (which has
-     * a real flow) so it never double-fills.
-     */
-    @GameTest(template = "piping/long_pipe", templateNamespace = PipesNPhysics.ID, timeoutTicks = 300)
-    public static void deadEndFillFlowSynthesizesTheCappedHalf(GameTestHelper helper) {
-        Level level = helper.getLevel();
-        BlockPos[] junctionAndBlock = new BlockPos[2]; // [junction cell, block]
-        helper.runAfterDelay(10, () -> {
-            BlockPos seed = null;
-            for (int x = 0; x <= 8 && seed == null; x++) for (int y = 0; y <= 2 && seed == null; y++)
-                for (int z = 0; z <= 2 && seed == null; z++) {
-                    BlockPos abs = helper.absolutePos(new BlockPos(x, y, z));
-                    if (FluidPropagator.getPipe(level, abs) != null) seed = abs;
-                }
-            if (seed == null) { helper.fail("no pipe seed"); return; }
-            Graph g = GraphBuilder.build(level, seed);
-            BlockPos pump = null;
-            List<BlockPos> tanks = new ArrayList<>();
-            for (Node n : g.nodes()) { if (n.isPump()) pump = n.pos(); else if (n.isHandler()) tanks.add(n.pos()); }
-            if (pump == null || tanks.size() < 2) { helper.fail("layout not found: " + tanks); return; }
-            BlockPos near = tanks.get(0).distManhattan(pump) >= tanks.get(1).distManhattan(pump) ? tanks.get(0) : tanks.get(1);
-            BlockPos far = near.equals(tanks.get(0)) ? tanks.get(1) : tanks.get(0);
-            // The last pipe next to the pump spot becomes the dead-end junction once blocked.
-            junctionAndBlock[0] = pump.relative(net.minecraft.core.Direction.fromDelta(
-                    Integer.signum(near.getX() - pump.getX()), 0, Integer.signum(near.getZ() - pump.getZ())));
-            junctionAndBlock[1] = pump;
-            for (Direction d : Direction.values()) {
-                var st = level.getBlockState(pump.relative(d));
-                if (!st.is(AllBlocks.FLUID_PIPE.get()) && !st.isAir()) level.setBlockAndUpdate(pump.relative(d), Blocks.AIR.defaultBlockState());
-            }
-            level.setBlockAndUpdate(far, Blocks.AIR.defaultBlockState());
-            level.setBlockAndUpdate(pump, Blocks.STONE.defaultBlockState());
-            IFluidHandler h = pipesnphysics$sideFallback(level, near);
-            if (h != null) h.fill(new FluidStack(Fluids.WATER, 8000), IFluidHandler.FluidAction.EXECUTE);
-        });
-        helper.runAfterDelay(160, () -> {
-            BlockPos cell = junctionAndBlock[0], block = junctionAndBlock[1];
-            FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, cell);
-            if (pipe == null) { helper.fail("no junction pipe"); return; }
-            Direction toBlock = de.devin.pipesnphysics.engine.PipeGeometry.between(cell, block);
-            if (toBlock == null) { helper.fail("junction not adjacent to block"); return; }
-            var synth = CreatePipeRendering.deadEndFillFlow(pipe, toBlock);
-            if (synth == null || !synth.complete || synth.fluid.isEmpty()) {
-                helper.fail("deadEndFillFlow did not synthesize the capped half toward the block");
-                return;
-            }
-            // The network side has a REAL flow, so the synth must stay null there (no double-fill).
-            if (CreatePipeRendering.deadEndFillFlow(pipe, toBlock.getOpposite()) != null) {
-                helper.fail("deadEndFillFlow wrongly synthesized on the network side");
-                return;
-            }
-            helper.succeed();
-        });
-    }
-
-    /**
-     * With the CUSTOM in-pipe renderer ({@code PIPE_LEVEL_RENDER}) on, Create's fill is hidden and the
-     * renderer draws only from each cell's synced {@link PipeLevelData}. A dead-end junction cell sits
-     * in NO edge, so stampWaterlines never reaches it — it was left blank against the block (the real
-     * "block still broken" case, since the user runs the custom renderer). {@code fillDeadEndCell} now
-     * stamps it FULL. Drives {@code apply(..., levelRender=true)} and asserts the junction cell carries
-     * a full level marker. Batch {@code levelRender} (stamps the synced field).
-     */
-    @GameTest(template = "piping/long_pipe", templateNamespace = PipesNPhysics.ID, timeoutTicks = 300, batch = "levelRender")
-    public static void deadEndJunctionStampedFullForCustomRenderer(GameTestHelper helper) {
-        Level level = helper.getLevel();
-        BlockPos[] junctionHolder = new BlockPos[1];
-        helper.runAfterDelay(10, () -> {
-            BlockPos seed = null;
-            for (int x = 0; x <= 8 && seed == null; x++) for (int y = 0; y <= 2 && seed == null; y++)
-                for (int z = 0; z <= 2 && seed == null; z++) {
-                    BlockPos abs = helper.absolutePos(new BlockPos(x, y, z));
-                    if (FluidPropagator.getPipe(level, abs) != null) seed = abs;
-                }
-            if (seed == null) { helper.fail("no pipe seed"); return; }
-            Graph g = GraphBuilder.build(level, seed);
-            BlockPos pump = null;
-            List<BlockPos> tanks = new ArrayList<>();
-            for (Node n : g.nodes()) { if (n.isPump()) pump = n.pos(); else if (n.isHandler()) tanks.add(n.pos()); }
-            if (pump == null || tanks.size() < 2) { helper.fail("layout not found: " + tanks); return; }
-            BlockPos near = tanks.get(0).distManhattan(pump) >= tanks.get(1).distManhattan(pump) ? tanks.get(0) : tanks.get(1);
-            BlockPos far = near.equals(tanks.get(0)) ? tanks.get(1) : tanks.get(0);
-            junctionHolder[0] = pump.relative(net.minecraft.core.Direction.fromDelta(
-                    Integer.signum(near.getX() - pump.getX()), 0, Integer.signum(near.getZ() - pump.getZ())));
-            for (Direction d : Direction.values()) {
-                var st = level.getBlockState(pump.relative(d));
-                if (!st.is(AllBlocks.FLUID_PIPE.get()) && !st.isAir()) level.setBlockAndUpdate(pump.relative(d), Blocks.AIR.defaultBlockState());
-            }
-            level.setBlockAndUpdate(far, Blocks.AIR.defaultBlockState());
-            level.setBlockAndUpdate(pump, Blocks.STONE.defaultBlockState());
-            IFluidHandler h = pipesnphysics$sideFallback(level, near);
-            if (h != null) h.fill(new FluidStack(Fluids.WATER, 8000), IFluidHandler.FluidAction.EXECUTE);
-        });
-        helper.runAfterDelay(160, () -> {
-            BlockPos cell = junctionHolder[0];
-            FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, cell);
-            if (pipe == null) { helper.fail("no junction pipe"); return; }
-            Graph g = GraphBuilder.build(level, cell);
-            Solution sol = FlowSolver.solve(level, g);
-            CreatePipeRendering.apply(level, g, sol, true); // force the custom level-render path
-            Integer data = pipesnphysics$levelData(pipe);
-            if (data == null) {
-                helper.fail("dead-end junction cell got no level marker — the custom renderer would blank it");
-                return;
-            }
-            float frac = CreatePipeRendering.levelFraction(data);
-            if (frac < 0.98f) {
-                helper.fail("dead-end junction stamped only " + frac + " full (expected ~1.0 against the block)");
-                return;
             }
             helper.succeed();
         });

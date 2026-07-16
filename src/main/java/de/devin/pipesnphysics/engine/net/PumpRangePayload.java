@@ -29,6 +29,11 @@ public record PumpRangePayload(BlockPos pumpPos, List<RangePath> paths)
     @Override
     public Type<? extends CustomPacketPayload> type() { return TYPE; }
 
+    /**
+     * One run of positions out from the pump, as packed {@link BlockPos#asLong} longs with
+     * one reachability flag per position (parallel lists, same length). {@code pull} marks a
+     * path on the pump's pull (suction) side.
+     */
     public record RangePath(List<Long> points, List<Boolean> reachable, boolean pull) {
         public static final StreamCodec<RegistryFriendlyByteBuf, RangePath> CODEC =
                 StreamCodec.composite(

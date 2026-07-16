@@ -41,7 +41,12 @@ public final class PipeStatusText {
      * deliver. The "No Flow: settled…" reason line already explains that state.
      */
     public static boolean showsReach(PipeStatusPayload data) {
-        return data.hasHeadroom() && data.status() != PipeStatusPayload.STATUS_NO_FLOW;
+        // An air break is bound by the CREST height, not by how much a pump can lift, so the generic
+        // "Lift left / Reach limit" number is noise on a crest-broken run — the crest action line
+        // (lower the crest / raise the supply / add a pump) replaces it.
+        return data.hasHeadroom()
+                && data.status() != PipeStatusPayload.STATUS_NO_FLOW
+                && data.statusDetail() != PipeStatusPayload.DETAIL_CREST;
     }
 
     private static String noFlowKey(PipeStatusPayload data) {

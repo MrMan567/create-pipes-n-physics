@@ -27,6 +27,7 @@ public final class PipeStatusClient {
         lastRequestedAt = 0;
     }
 
+    /** The single write path for the cache: every arriving payload lands here, stamped with its tick. */
     public static void receive(PipeStatusPayload payload, long gameTime) {
         latest = payload;
         latestReceivedAt = gameTime;

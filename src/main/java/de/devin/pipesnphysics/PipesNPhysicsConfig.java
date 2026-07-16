@@ -1,6 +1,6 @@
 package de.devin.pipesnphysics;
 
-import de.devin.pipesnphysics.engine.ValveCharacteristic;
+import de.devin.pipesnphysics.engine.valve.ValveCharacteristic;
 import net.neoforged.neoforge.common.ModConfigSpec;
 
 /**
@@ -17,6 +17,7 @@ public class PipesNPhysicsConfig {
     public static final ModConfigSpec.DoubleValue PUMP_HEAD_PER_RPM;
     public static final ModConfigSpec.DoubleValue PUMP_FLOW_PER_RPM;
     public static final ModConfigSpec.IntValue MAX_FLOW_PER_ENDPOINT;
+    public static final ModConfigSpec.IntValue PIPE_VOLUME_PER_CELL;
     public static final ModConfigSpec.DoubleValue SUCTION_LIMIT;
     public static final ModConfigSpec.BooleanValue PUMP_DRAIN_ANY_LEVEL;
     public static final ModConfigSpec.BooleanValue ENABLE_OPEN_END_INTAKE;
@@ -51,7 +52,6 @@ public class PipesNPhysicsConfig {
     public static final ModConfigSpec.BooleanValue ENABLE_PIPE_SWAP;
     public static final ModConfigSpec.BooleanValue PIPE_LEVEL_RENDER;
     public static final ModConfigSpec.DoubleValue PIPE_LEVEL_FLOW_SPEED;
-    public static final ModConfigSpec.BooleanValue PIPE_FLOW_PARTIAL_FILL;
     public static final ModConfigSpec.BooleanValue FLUID_TILT_ENABLED;
     public static final ModConfigSpec.BooleanValue FLUID_WAVE_MESH;
     public static final ModConfigSpec.IntValue FLUID_SURFACE_RESOLUTION;
@@ -81,6 +81,15 @@ public class PipesNPhysicsConfig {
         MAX_FLOW_PER_ENDPOINT = server
                 .comment("Hard cap on fluid moved into or out of a single tank or machine per tick, in mB.")
                 .defineInRange("maxFlowPerEndpoint", 256, 1, 8192);
+        PIPE_VOLUME_PER_CELL = server
+                .comment("How much fluid one pipe block holds, in mB. Fluid really resides in the pipes:",
+                        "a starting flow drains the source while the pipe fills, the sink only receives",
+                        "what exits the pipe, and idle runs settle their contents back into the tanks",
+                        "they can reach (only real traps - a U-dip below the waterline - keep fluid, and",
+                        "breaking a pipe spills what it holds). Higher values mean more working volume",
+                        "and slower visible fronts at a given flow; 0 disables in-pipe volume entirely",
+                        "(instant endpoint-to-endpoint transfers, as before this feature).")
+                .defineInRange("pipeVolumePerCell", 250, 0, 8000);
         SUCTION_LIMIT = server
                 .comment("How many blocks the head at a pipe's highest point may sit below that point",
                         "before the liquid column breaks (the siphon / cavitation limit).")
@@ -271,26 +280,16 @@ public class PipesNPhysicsConfig {
         client.pop();
         client.push("pipeRendering");
         PIPE_LEVEL_RENDER = client
-                .comment("Draw fluid inside pipes at its actual waterline (a partial fill at the solved",
-                        "surface) instead of Create's binary full-or-empty fill. Resting fluid in straight",
-                        "glass pipes only. The per-cell waterline is computed server-side onto the synced pipe",
-                        "flow; in singleplayer the integrated server reads this client flag directly, so it",
-                        "works without a per-world server-config edit. (The server-side encode is gated on the",
-                        "CLIENT being present, so it takes effect in singleplayer only for now.) When false,",
-                        "pipes render exactly as stock Create.")
+                .comment("Draw the fluid inside (glass) pipes. What is drawn is the pipe's REAL stored",
+                        "content, synced from the server, so the fill always matches the actual fluid",
+                        "state. Turning this off only hides the fluid on your client - the pipes still",
+                        "hold and move it.")
                 .define("pipeLevelRender", true);
         PIPE_LEVEL_FLOW_SPEED = client
                 .comment("Speed multiplier for the in-pipe fluid scroll animation (the level renderer above).",
                         "1.0 = default; lower it to calm a fast flow, raise it to make it livelier. Only the",
                         "animation speed changes, not the actual fluid transfer.")
                 .defineInRange("pipeLevelFlowSpeed", 1.0, 0.0, 10.0);
-        PIPE_FLOW_PARTIAL_FILL = client
-                .comment("Needs the level renderer above: draw a FLOWING horizontal pipe at its head WATERLINE",
-                        "(like a resting pipe), so the fill rises as the head rises instead of always brimming",
-                        "the tube. A display metric, not physics (a pressurised pipe is really full); pump",
-                        "risers / crests pressurised above the line stay full, and vertical runs fill their bore.",
-                        "When false, a flowing pipe fills the whole tube as before.")
-                .define("pipeFlowPartialFill", true);
         client.pop();
         client.push("sableFluidPhysics");
         FLUID_TILT_ENABLED = client

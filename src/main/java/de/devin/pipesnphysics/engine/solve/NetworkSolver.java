@@ -7,22 +7,18 @@ import java.util.List;
  * Pure hydraulic network solver. Has no Minecraft dependencies so it can be
  * unit-tested directly.
  *
- * The network is modeled as an electrical-circuit analogue:
- * <ul>
- *   <li><b>Nodes</b> carry a hydraulic head (fluid surface height, in blocks).
- *       Nodes with positive capacitance are reservoirs (tanks/basins): capacitance
- *       is the volume in mB needed to raise their head by one block. Nodes with
- *       zero capacitance are junctions or pumps — pure Kirchhoff nodes whose head
- *       is solved from flow conservation.</li>
- *   <li><b>Branches</b> are pipe runs: a conductance (mB/tick of flow per block of
- *       head difference), an optional EMF (a pump's head boost, in blocks, driving
- *       a→b when positive), an optional one-way constraint (check valve), and an
- *       optional crest gate (the highest cell of the run; flow is cut when the
- *       interpolated head at the crest falls more than the suction limit below it —
- *       the siphon/cavitation rule).</li>
- * </ul>
+ * The network is modeled as an electrical-circuit analogue. Nodes carry a hydraulic
+ * head (fluid surface height, in blocks): nodes with positive capacitance are
+ * reservoirs (tanks/basins), where capacitance is the volume in mB needed to raise
+ * their head by one block, while nodes with zero capacitance are junctions or
+ * pumps — pure Kirchhoff nodes whose head is solved from flow conservation.
+ * Branches are pipe runs: a conductance (mB/tick of flow per block of head
+ * difference), an optional EMF (a pump's head boost, in blocks, driving a→b when
+ * positive), an optional one-way constraint (check valve), and an optional crest
+ * gate (the highest cell of the run; flow is cut when the interpolated head at the
+ * crest falls more than the suction limit below it — the siphon/cavitation rule).
  *
- * One call advances the network by one tick using an <b>implicit Euler</b> step:
+ * One call advances the network by one tick using an implicit Euler step:
  * the linear system {@code (C/dt + L) h' = (C/dt) h + emf terms} is solved for the
  * end-of-tick heads, and branch flows are read off the solved heads. Implicit Euler
  * is unconditionally stable: reservoir heads converge monotonically toward
@@ -71,7 +67,7 @@ public final class NetworkSolver {
     /**
      * One node of the solver network.
      *
-     * <p>A reservoir carries box limits on its end-of-tick head: {@code floor} (the head
+     * A reservoir carries box limits on its end-of-tick head: {@code floor} (the head
      * when empty) and {@code ceiling} (the head when full). The active-set loop treats a
      * capacitor whose solved head would cross a bound as SATURATED and constrains its
      * branches — a full column may only GIVE, an empty one may only RECEIVE — so no
@@ -96,22 +92,33 @@ public final class NetworkSolver {
     /**
      * One branch of the solver network.
      *
-     * @param a, b         endpoint node indices
+     * @param a            first endpoint node index
+     * @param b            second endpoint node index
      * @param conductance  mB/tick of flow per block of head difference; ≤ 0 disables the branch
      * @param emf          pump head in blocks, driving a→b flow when positive
      * @param allowedSign  +1 = only a→b flow allowed, -1 = only b→a, 0 = bidirectional
      * @param crestHeight  highest cell elevation along the run (blocks), or NaN for no gate
      * @param crestPos     fractional position of the crest along the run, 0 (at a) .. 1 (at b)
+     * @param crestWet     whether the crest cell actually HOLDS fluid. Suction can hold an
+     *                     existing column, never create one: a DRY crest above the reachable
+     *                     potential gates the branch instead of letting it self-prime.
      */
     public record BranchSpec(int a, int b, double conductance, double emf, int allowedSign,
-                             double crestHeight, double crestPos) {
+                             double crestHeight, double crestPos, boolean crestWet) {
+        /** Primed-column convenience (crestWet = true) — the shape every pre-priming test models. */
+        public BranchSpec(int a, int b, double conductance, double emf, int allowedSign,
+                          double crestHeight, double crestPos) {
+            this(a, b, conductance, emf, allowedSign, crestHeight, crestPos, true);
+        }
+
         public static BranchSpec passive(int a, int b, double conductance) {
             return new BranchSpec(a, b, conductance, 0, 0, Double.NaN, 0);
         }
     }
 
     /**
-     * Solver output.
+     * Solver output. One Result is produced per active-set solve and consumed by
+     * {@code FlowSolver}, which records the branch flows and plans transfers from it.
      *
      * @param heads           end-of-tick head per node
      * @param flows           flow per branch in mB/tick, positive = a→b
@@ -217,25 +224,22 @@ public final class NetworkSolver {
 
     /**
      * Solve heads and flows under BOTH the static one-way constraints (check valves,
-     * pumps, lips) and the dynamic capacity box: solve, then
-     * <ul>
-     *   <li>deactivate any branch whose flow opposes its EFFECTIVE one-way sign
-     *       (static sign combined with the saturation of its endpoints), and</li>
-     *   <li>clamp any free reservoir whose solved head crossed a box bound — a node
-     *       over its ceiling becomes {@code +1} (full → give-only), one under its floor
-     *       {@code -1} (empty → receive-only).</li>
-     * </ul>
-     * re-solving until no branch changes. Deactivation is MONOTONE — a branch is only ever
-     * dropped, never restored — so the loop terminates in at most {@code |branches|} rounds.
+     * pumps, lips) and the dynamic capacity box: solve, then deactivate any branch whose
+     * flow opposes its EFFECTIVE one-way sign (static sign combined with the saturation
+     * of its endpoints), clamp any free reservoir whose solved head crossed a box bound —
+     * a node over its ceiling becomes {@code +1} (full → give-only), one under its floor
+     * {@code -1} (empty → receive-only) — and re-solve until no branch changes.
+     * Deactivation is MONOTONE — a branch is only ever dropped, never restored — so the
+     * loop terminates in at most {@code |branches|} rounds.
      *
-     * <p>Saturation is seeded ONCE from the START-of-tick heads: a reservoir sitting at (or
+     * Saturation is seeded ONCE from the START-of-tick heads: a reservoir sitting at (or
      * past) a box bound before the step is clamped, one with room is not. The end-of-tick
      * head legitimately overshoots a bound within a single implicit-Euler step (a near-full
      * tank a strong pump fills past 100% this tick); the transfer layer clamps that MAGNITUDE
      * to the real remaining room, so walling on the solved overshoot would freeze a tank
      * short of full forever. Direction is the solver's job, magnitude the transfer layer's.
      *
-     * <p>The saturation constraint is a per-BRANCH direction wall, not a head clamp on the
+     * The saturation constraint is a per-BRANCH direction wall, not a head clamp on the
      * node: fixing a full node's head and letting the QP REJECT the surplus inflow would be
      * non-conservative — it lets an upstream tank bleed into a full sink instead of backing
      * up. Blocking the branch is what makes the fluid back up into a reservoir with room.
@@ -355,6 +359,13 @@ public final class NetworkSolver {
 
         double deficit = br.crestHeight() - headAtCrest;
         if (deficit <= 0) return 1;
+        // Suction can HOLD a column over a crest, never CREATE one: with the crest DRY and above
+        // every reachable potential, nothing pushes the fluid up the empty leg — an unprimed
+        // siphon must not climb by itself (it used to: the sink drained at the solved trickle
+        // while the "flow" just filled the ascending leg). A pump's EMF raises the potential
+        // profile, so a powered line still primes over the rise; once fluid tops the crest the
+        // normal taper takes over and the siphon sustains pump-less.
+        if (!br.crestWet()) return 0;
         double taperBand = Math.max(0.5, suctionLimit * CREST_TAPER_FRACTION);
         return Math.clamp((suctionLimit - deficit) / taperBand, 0, 1);
     }
@@ -508,9 +519,9 @@ public final class NetworkSolver {
 
         // Fold each active branch into the diagonal + rhs, and record its off-diagonal stamp (a,b,c)
         // for the matvec: A·p = diag∘p − Σ c·(p_b·e_a + p_a·e_b).
-        int[] ea = new int[m];
-        int[] eb = new int[m];
-        double[] ec = new double[m];
+        int[] edgeNodeA = new int[m];
+        int[] edgeNodeB = new int[m];
+        double[] edgeConductance = new double[m];
         int edges = 0;
         for (int e = 0; e < m; e++) {
             if (!active[e]) continue;
@@ -520,9 +531,9 @@ public final class NetworkSolver {
             diag[br.b()] += c;
             rhs[br.a()] -= c * br.emf();
             rhs[br.b()] += c * br.emf();
-            ea[edges] = br.a();
-            eb[edges] = br.b();
-            ec[edges] = c;
+            edgeNodeA[edges] = br.a();
+            edgeNodeB[edges] = br.b();
+            edgeConductance[edges] = c;
             edges++;
         }
         for (int i = 0; i < n; i++) {
@@ -541,13 +552,13 @@ public final class NetworkSolver {
             z[i] = r[i] / diag[i];
             p[i] = z[i];
         }
-        double rzOld = dot(r, z);
+        double rzOld = dot(r, z); // preconditioned residual inner product r·z
 
         for (int iter = 0; iter < 20 * n && rzOld > 0; iter++) {
             for (int i = 0; i < n; i++) ap[i] = diag[i] * p[i];
             for (int e = 0; e < edges; e++) {
-                ap[ea[e]] -= ec[e] * p[eb[e]];
-                ap[eb[e]] -= ec[e] * p[ea[e]];
+                ap[edgeNodeA[e]] -= edgeConductance[e] * p[edgeNodeB[e]];
+                ap[edgeNodeB[e]] -= edgeConductance[e] * p[edgeNodeA[e]];
             }
             double pap = dot(p, ap);
             if (pap <= 0) break;

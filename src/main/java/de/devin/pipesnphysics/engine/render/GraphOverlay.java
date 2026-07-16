@@ -82,8 +82,8 @@ public final class GraphOverlay {
      * REFRESH — update its data in place and keep its lifetime — otherwise it is a new overlay.
      */
     public static void receive(GraphOverlayPayload payload) {
-        for (ActiveOverlay a : ACTIVE) {
-            if (a.payload.seed() == payload.seed()) { a.payload = payload; return; }
+        for (ActiveOverlay overlay : ACTIVE) {
+            if (overlay.payload.seed() == payload.seed()) { overlay.payload = payload; return; }
         }
         ACTIVE.add(new ActiveOverlay(payload, System.currentTimeMillis()));
         // Cap memory: only keep the 4 most recent snapshots.
@@ -96,15 +96,15 @@ public final class GraphOverlay {
         if (ACTIVE.isEmpty()) return;
 
         long now = System.currentTimeMillis();
-        ACTIVE.removeIf(a -> (now - a.firstSeenMs) > LIFETIME_TICKS * 50L);
+        ACTIVE.removeIf(overlay -> (now - overlay.firstSeenMs) > LIFETIME_TICKS * 50L);
         if (ACTIVE.isEmpty()) return;
 
         // Keep each overlay live: periodically ask the server to re-solve its network so a bursty
         // flow tracks (arrows blink with the bursts) instead of freezing on the command's tick.
-        for (ActiveOverlay a : ACTIVE) {
-            if (now - a.lastRequestMs >= REQUEST_INTERVAL_MS) {
-                a.lastRequestMs = now;
-                PacketDistributor.sendToServer(new GraphOverlayRequest(a.payload.seed()));
+        for (ActiveOverlay overlay : ACTIVE) {
+            if (now - overlay.lastRequestMs >= REQUEST_INTERVAL_MS) {
+                overlay.lastRequestMs = now;
+                PacketDistributor.sendToServer(new GraphOverlayRequest(overlay.payload.seed()));
             }
         }
 
@@ -125,27 +125,57 @@ public final class GraphOverlay {
         // the first's buffer — finish (endBatch) the lines BEFORE asking for the quads buffer, or the
         // next lines.addVertex throws "Not building!".
         VertexConsumer lines = buffers.getBuffer(RenderType.lines());
-        for (ActiveOverlay a : ACTIVE) {
-            drawNodes(pose, lines, a.payload, lifeFraction(a, now));
+        for (ActiveOverlay overlay : ACTIVE) {
+            drawNodes(pose, lines, overlay.payload, lifeFraction(overlay, now));
+            drawFlag(pose, lines, overlay.payload, lifeFraction(overlay, now));
         }
         buffers.endBatch(RenderType.lines());
 
         // Edges are thin extruded squares drawn through the pipe — the no-depth quad batch so they
         // stay visible inside opaque pipes.
         VertexConsumer rods = buffers.getBuffer(ROD_RENDER_TYPE);
-        for (ActiveOverlay a : ACTIVE) {
-            drawEdges(pose, rods, a.payload, lifeFraction(a, now));
+        for (ActiveOverlay overlay : ACTIVE) {
+            drawEdges(pose, rods, overlay.payload, lifeFraction(overlay, now));
         }
         buffers.endBatch(ROD_RENDER_TYPE);
 
         pose.popPose();
 
-        for (ActiveOverlay a : ACTIVE) {
-            float fade = lifeFraction(a, now);
-            drawEdgeLabels(buffers, a.payload, fade);
-            drawNodeLabels(buffers, a.payload, fade);
+        for (ActiveOverlay overlay : ACTIVE) {
+            float fade = lifeFraction(overlay, now);
+            drawEdgeLabels(buffers, overlay.payload, fade);
+            drawNodeLabels(buffers, overlay.payload, fade);
+            drawFlagLabel(buffers, overlay.payload, fade);
         }
         buffers.endBatch();
+    }
+
+    /** The gold-flag color shared by the flagged cell's box and its floating coordinates. */
+    private static final Rgb FLAG_COLOR = new Rgb(255, 210, 60);
+
+    /**
+     * A gold box around the FLAGGED cell — the crosshair position /pipegraph was run on. A
+     * mid-run pipe is otherwise anonymous in the overlay (its edge rod threads straight through),
+     * so this is what ties the command back to the exact pipe the player was aiming at.
+     */
+    private static void drawFlag(PoseStack pose, VertexConsumer buf,
+                                 GraphOverlayPayload payload, float alpha) {
+        BlockPos p = BlockPos.of(payload.seed());
+        drawBox(pose.last().pose(), buf, p.getX() + 0.5f, p.getY() + 0.5f, p.getZ() + 0.5f,
+                0.4f, FLAG_COLOR, alpha);
+    }
+
+    /**
+     * The flagged cell's coordinates floating above it, SEE-THROUGH (unlike the occluded node and
+     * edge labels) — the flag must be findable through walls, that is its whole job.
+     */
+    private static void drawFlagLabel(MultiBufferSource buffers,
+                                      GraphOverlayPayload payload, float fade) {
+        BlockPos p = BlockPos.of(payload.seed());
+        int alpha = (int) (255 * Math.max(0.25f, fade));
+        DebugRenderer.renderFloatingText(new PoseStack(), buffers, "⚑ " + p.toShortString(),
+                p.getX() + 0.5, p.getY() + 1.6, p.getZ() + 0.5,
+                (alpha << 24) | 0xFFD23C, 0.025f, true, 0, true);
     }
 
     /**
@@ -205,25 +235,28 @@ public final class GraphOverlay {
         };
     }
 
-    private static float lifeFraction(ActiveOverlay a, long now) {
-        long age = now - a.firstSeenMs;
-        long max = LIFETIME_TICKS * 50L;
-        return 1f - Math.min(1f, age / (float) max);
+    /** An overlay's remaining life as 1→0 across the 30 s lifetime — the fade every drawer scales by. */
+    private static float lifeFraction(ActiveOverlay overlay, long now) {
+        long age = now - overlay.firstSeenMs;
+        long lifetimeMs = LIFETIME_TICKS * 50L;
+        return 1f - Math.min(1f, age / (float) lifetimeMs);
     }
+
+    /** One overlay color, 0–255 per channel. */
+    private record Rgb(int r, int g, int b) {}
 
     /** Node markers — a small wireframe box per node, colored by kind (depth-tested lines). */
     private static void drawNodes(PoseStack pose, VertexConsumer buf,
                                   GraphOverlayPayload payload, float alpha) {
         Matrix4f m = pose.last().pose();
         for (var n : payload.nodes()) {
-            int r, g, b;
-            switch (n.kind()) {
-                case GraphOverlayPayload.NodeEntry.KIND_HANDLER  -> { r = 64; g = 220; b = 64; }
-                case GraphOverlayPayload.NodeEntry.KIND_PUMP     -> { r = 250; g = 140; b = 30; }
-                case GraphOverlayPayload.NodeEntry.KIND_OPEN_END -> { r = 80; g = 180; b = 255; }
-                default                                          -> { r = 255; g = 255; b = 255; }
-            }
-            drawBox(m, buf, n.x() + 0.5f, n.y() + 0.5f, n.z() + 0.5f, 0.25f, r, g, b, alpha);
+            Rgb color = switch (n.kind()) {
+                case GraphOverlayPayload.NodeEntry.KIND_HANDLER -> new Rgb(64, 220, 64);
+                case GraphOverlayPayload.NodeEntry.KIND_PUMP -> new Rgb(250, 140, 30);
+                case GraphOverlayPayload.NodeEntry.KIND_OPEN_END -> new Rgb(80, 180, 255);
+                default -> new Rgb(255, 255, 255);
+            };
+            drawBox(m, buf, n.x() + 0.5f, n.y() + 0.5f, n.z() + 0.5f, 0.25f, color, alpha);
         }
     }
 
@@ -243,20 +276,20 @@ public final class GraphOverlay {
             List<Float> pressures = e.pressures();
             // A HELD column is drawn solid magenta (no gradient) so the stored head reads at a glance.
             boolean gradient = !held && pressures.size() == pts.size() && pts.size() >= 2;
-            int[] fallback = held ? HELD_EDGE_COLOR : DRY_EDGE_COLOR;
+            Rgb fallback = held ? HELD_EDGE_COLOR : DRY_EDGE_COLOR;
 
             for (int i = 1; i < pts.size(); i++) {
                 BlockPos p0 = BlockPos.of(pts.get(i - 1));
                 BlockPos p1 = BlockPos.of(pts.get(i));
-                int[] c0 = gradient ? pressureColor(pressures.get(i - 1)) : fallback;
-                int[] c1 = gradient ? pressureColor(pressures.get(i)) : fallback;
+                Rgb startColor = gradient ? pressureColor(pressures.get(i - 1)) : fallback;
+                Rgb endColor = gradient ? pressureColor(pressures.get(i)) : fallback;
                 rodSegment(m, buf,
                         p0.getX() + 0.5f, p0.getY() + 0.5f, p0.getZ() + 0.5f,
                         p1.getX() + 0.5f, p1.getY() + 0.5f, p1.getZ() + 0.5f,
-                        c0, c1, alpha);
+                        startColor, endColor, alpha);
             }
             if (flowing && pts.size() >= 2) {
-                int[] tip = gradient ? pressureColor(pressures.get(pts.size() - 1)) : fallback;
+                Rgb tip = gradient ? pressureColor(pressures.get(pts.size() - 1)) : fallback;
                 BlockPos last = BlockPos.of(pts.get(pts.size() - 1));
                 BlockPos prev = BlockPos.of(pts.get(pts.size() - 2));
                 drawArrowheadRod(m, buf, prev, last, tip, alpha);
@@ -269,18 +302,20 @@ public final class GraphOverlay {
      * suction, amber near ambient, green for a healthy column, cyan when strongly
      * pressurized. The ramp spans -8 (the suction limit) to +16 blocks of head.
      */
-    private static int[] pressureColor(float pressureBlocks) {
+    private static Rgb pressureColor(float pressureBlocks) {
         float t = Math.clamp((pressureBlocks + 8f) / 24f, 0f, 1f);
         return hsvToRgb(t * 0.5f, 0.85f, 1f);
     }
 
     /** Dry runs (no reservoir can reach them) are dim gray — no pressure to show. */
-    private static final int[] DRY_EDGE_COLOR = { 150, 150, 150 };
+    private static final Rgb DRY_EDGE_COLOR = new Rgb(150, 150, 150);
 
     /** A pump's HELD/stored column (dead-headed by a shut valve): magenta, distinct from the ramp. */
-    private static final int[] HELD_EDGE_COLOR = { 220, 80, 220 };
+    private static final Rgb HELD_EDGE_COLOR = new Rgb(220, 80, 220);
 
-    private static int[] hsvToRgb(float h, float s, float v) {
+    /** HSV → RGB; hue, saturation, and value each in 0..1, channels out in 0..255. */
+    private static Rgb hsvToRgb(float h, float s, float v) {
+        // The standard hue-sector (hexcone) HSV conversion.
         float i = (float) Math.floor(h * 6f);
         float f = h * 6f - i;
         float p = v * (1f - s);
@@ -295,12 +330,12 @@ public final class GraphOverlay {
             case 4 -> { r = t; g = p; b = v; }
             default -> { r = v; g = p; b = q; }
         }
-        return new int[] { (int) (r * 255), (int) (g * 255), (int) (b * 255) };
+        return new Rgb((int) (r * 255), (int) (g * 255), (int) (b * 255));
     }
 
     /** Two short backward-flaring rods at the run's end forming an arrowhead along the flow. */
     private static void drawArrowheadRod(Matrix4f m, VertexConsumer buf,
-                                         BlockPos from, BlockPos to, int[] c, float a) {
+                                         BlockPos from, BlockPos to, Rgb color, float alpha) {
         float fx = from.getX() + 0.5f, fy = from.getY() + 0.5f, fz = from.getZ() + 0.5f;
         float tx = to.getX() + 0.5f, ty = to.getY() + 0.5f, tz = to.getZ() + 0.5f;
         float dx = tx - fx, dy = ty - fy, dz = tz - fz;
@@ -313,8 +348,8 @@ public final class GraphOverlay {
         float px, py, pz;
         if (Math.abs(dy) > 0.9f) { px = 1; py = 0; pz = 0; }
         else { px = 0; py = 1; pz = 0; }
-        rodSegment(m, buf, tx, ty, tz, bx + px * side, by + py * side, bz + pz * side, c, c, a);
-        rodSegment(m, buf, tx, ty, tz, bx - px * side, by - py * side, bz - pz * side, c, c, a);
+        rodSegment(m, buf, tx, ty, tz, bx + px * side, by + py * side, bz + pz * side, color, color, alpha);
+        rodSegment(m, buf, tx, ty, tz, bx - px * side, by - py * side, bz - pz * side, color, color, alpha);
     }
 
     /**
@@ -325,47 +360,47 @@ public final class GraphOverlay {
     private static void rodSegment(Matrix4f m, VertexConsumer buf,
                                    float x0, float y0, float z0,
                                    float x1, float y1, float z1,
-                                   int[] c0, int[] c1, float a) {
+                                   Rgb startColor, Rgb endColor, float alpha) {
         float[][] offs = crossSection(x1 - x0, y1 - y0, z1 - z0);
         if (offs == null) return;
-        int alpha = (int) (255 * Math.max(0.25f, a));
+        int alphaByte = (int) (255 * Math.max(0.25f, alpha));
         for (int i = 0; i < 4; i++) {
             float[] o0 = offs[i];
             float[] o1 = offs[(i + 1) % 4];
             // One side face of the square prism, wound p0.o0 → p0.o1 → p1.o1 → p1.o0.
-            quadVertex(m, buf, x0, y0, z0, o0, c0, alpha);
-            quadVertex(m, buf, x0, y0, z0, o1, c0, alpha);
-            quadVertex(m, buf, x1, y1, z1, o1, c1, alpha);
-            quadVertex(m, buf, x1, y1, z1, o0, c1, alpha);
+            quadVertex(m, buf, x0, y0, z0, o0, startColor, alphaByte);
+            quadVertex(m, buf, x0, y0, z0, o1, startColor, alphaByte);
+            quadVertex(m, buf, x1, y1, z1, o1, endColor, alphaByte);
+            quadVertex(m, buf, x1, y1, z1, o0, endColor, alphaByte);
         }
     }
 
     /** One rod vertex at a corner offset (scaled to {@link #ROD_HALF}); POSITION_COLOR, no normal. */
     private static void quadVertex(Matrix4f m, VertexConsumer buf,
-                                   float cx, float cy, float cz, float[] off, int[] c, int alpha) {
+                                   float cx, float cy, float cz, float[] off, Rgb color, int alphaByte) {
         buf.addVertex(m, cx + off[0] * ROD_HALF, cy + off[1] * ROD_HALF, cz + off[2] * ROD_HALF)
-                .setColor(c[0], c[1], c[2], alpha);
+                .setColor(color.r(), color.g(), color.b(), alphaByte);
     }
 
     private static void drawBox(Matrix4f m, VertexConsumer buf,
                                 float cx, float cy, float cz, float s,
-                                int r, int g, int b, float a) {
+                                Rgb color, float alpha) {
         float x0 = cx - s, x1 = cx + s;
         float y0 = cy - s, y1 = cy + s;
         float z0 = cz - s, z1 = cz + s;
         // 12 edges of a cube.
-        line(m, buf, x0, y0, z0, x1, y0, z0, r, g, b, a);
-        line(m, buf, x1, y0, z0, x1, y0, z1, r, g, b, a);
-        line(m, buf, x1, y0, z1, x0, y0, z1, r, g, b, a);
-        line(m, buf, x0, y0, z1, x0, y0, z0, r, g, b, a);
-        line(m, buf, x0, y1, z0, x1, y1, z0, r, g, b, a);
-        line(m, buf, x1, y1, z0, x1, y1, z1, r, g, b, a);
-        line(m, buf, x1, y1, z1, x0, y1, z1, r, g, b, a);
-        line(m, buf, x0, y1, z1, x0, y1, z0, r, g, b, a);
-        line(m, buf, x0, y0, z0, x0, y1, z0, r, g, b, a);
-        line(m, buf, x1, y0, z0, x1, y1, z0, r, g, b, a);
-        line(m, buf, x1, y0, z1, x1, y1, z1, r, g, b, a);
-        line(m, buf, x0, y0, z1, x0, y1, z1, r, g, b, a);
+        line(m, buf, x0, y0, z0, x1, y0, z0, color, alpha);
+        line(m, buf, x1, y0, z0, x1, y0, z1, color, alpha);
+        line(m, buf, x1, y0, z1, x0, y0, z1, color, alpha);
+        line(m, buf, x0, y0, z1, x0, y0, z0, color, alpha);
+        line(m, buf, x0, y1, z0, x1, y1, z0, color, alpha);
+        line(m, buf, x1, y1, z0, x1, y1, z1, color, alpha);
+        line(m, buf, x1, y1, z1, x0, y1, z1, color, alpha);
+        line(m, buf, x0, y1, z1, x0, y1, z0, color, alpha);
+        line(m, buf, x0, y0, z0, x0, y1, z0, color, alpha);
+        line(m, buf, x1, y0, z0, x1, y1, z0, color, alpha);
+        line(m, buf, x1, y0, z1, x1, y1, z1, color, alpha);
+        line(m, buf, x0, y0, z1, x0, y1, z1, color, alpha);
     }
 
     /**
@@ -403,23 +438,26 @@ public final class GraphOverlay {
     private static void line(Matrix4f m, VertexConsumer buf,
                              float x0, float y0, float z0,
                              float x1, float y1, float z1,
-                             int r, int g, int b, float a) {
-        gradientLine(m, buf, x0, y0, z0, x1, y1, z1,
-                new int[] { r, g, b }, new int[] { r, g, b }, a);
+                             Rgb color, float alpha) {
+        gradientLine(m, buf, x0, y0, z0, x1, y1, z1, color, color, alpha);
     }
 
     /** A line whose vertex colors differ; the GPU interpolates the gradient between them. */
     private static void gradientLine(Matrix4f m, VertexConsumer buf,
                                      float x0, float y0, float z0,
                                      float x1, float y1, float z1,
-                                     int[] c0, int[] c1, float a) {
+                                     Rgb startColor, Rgb endColor, float alpha) {
         float dx = x1 - x0, dy = y1 - y0, dz = z1 - z0;
         float len = (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
         if (len < 1e-5f) return;
         float nx = dx / len, ny = dy / len, nz = dz / len;
-        int alpha = (int) (255 * Math.max(0.15f, a));
-        buf.addVertex(m, x0, y0, z0).setColor(c0[0], c0[1], c0[2], alpha).setNormal(nx, ny, nz);
-        buf.addVertex(m, x1, y1, z1).setColor(c1[0], c1[1], c1[2], alpha).setNormal(nx, ny, nz);
+        int alphaByte = (int) (255 * Math.max(0.15f, alpha));
+        buf.addVertex(m, x0, y0, z0)
+                .setColor(startColor.r(), startColor.g(), startColor.b(), alphaByte)
+                .setNormal(nx, ny, nz);
+        buf.addVertex(m, x1, y1, z1)
+                .setColor(endColor.r(), endColor.g(), endColor.b(), alphaByte)
+                .setNormal(nx, ny, nz);
     }
 
     /**

@@ -7,12 +7,13 @@ import com.simibubi.create.foundation.item.TooltipModifier;
 import de.devin.pipesnphysics.compat.SableCompat;
 import de.devin.pipesnphysics.display.PnpDisplaySources;
 import de.devin.pipesnphysics.engine.EngineTickHandler;
-import de.devin.pipesnphysics.engine.GraphCache;
-import de.devin.pipesnphysics.engine.OpenEndPipes;
-import de.devin.pipesnphysics.engine.RelayDetector;
+import de.devin.pipesnphysics.engine.boundary.OpenEndPipes;
+import de.devin.pipesnphysics.engine.boundary.RelayDetector;
 import de.devin.pipesnphysics.engine.command.PipeGraphCommand;
+import de.devin.pipesnphysics.engine.graph.GraphCache;
 import de.devin.pipesnphysics.engine.net.EnginePackets;
 import de.devin.pipesnphysics.handler.NetworkEditHandler;
+import de.devin.pipesnphysics.handler.PipeContentCarry;
 import de.devin.pipesnphysics.handler.PipeSwapHandler;
 import de.devin.pipesnphysics.recipe.CentrifugeRecipes;
 import net.createmod.catnip.lang.FontHelper;
@@ -88,6 +89,7 @@ public class PipesNPhysics {
             EngineTickHandler.clear();
             OpenEndPipes.clear();
             RelayDetector.clear();
+            PipeContentCarry.clear();
             TestSideHandlers.clear();
         });
     }

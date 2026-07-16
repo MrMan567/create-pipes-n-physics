@@ -1,8 +1,14 @@
 package de.devin.pipesnphysics.engine;
 
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
-import de.devin.pipesnphysics.compat.CreatePipeRendering;
 import de.devin.pipesnphysics.compat.SableCompat;
+import de.devin.pipesnphysics.engine.graph.Graph;
+import de.devin.pipesnphysics.engine.graph.GraphBuilder;
+import de.devin.pipesnphysics.engine.graph.GraphCache;
+import de.devin.pipesnphysics.engine.graph.Node;
+import de.devin.pipesnphysics.engine.motion.CentrifugeProcessor;
+import de.devin.pipesnphysics.engine.motion.MomentumField;
+import de.devin.pipesnphysics.engine.probe.SublevelSpinProbe;
 import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.level.ServerLevel;
@@ -10,10 +16,8 @@ import net.minecraft.world.level.Level;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
 
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -61,6 +65,7 @@ public final class EngineTickHandler {
 
     private static final Map<ResourceKey<Level>, Set<BlockPos>> DIRTY = new HashMap<>();
     private static final Map<ResourceKey<Level>, Set<BlockPos>> URGENT = new HashMap<>();
+    /** Per dimension: pos → game time until which its network sleeps. */
     private static final Map<ResourceKey<Level>, Map<BlockPos, Long>> QUIET = new HashMap<>();
 
     private EngineTickHandler() {}
@@ -176,57 +181,20 @@ public final class EngineTickHandler {
             Long sleepUntil = quiet.get(pos);
             if (sleepUntil != null && sleepUntil > now) return;
         }
-        // Cached-network fast path: any coverage cell resolves the whole graph, skipping both
-        // findSeed's neighbor ring and the BFS rebuild. Topology wakes (markChanged) evicted their
-        // networks at mark time, so a hit here is a network nothing reshaped.
-        Graph graph = GraphCache.get(level, pos, now);
-        if (graph == null) {
-            BlockPos seed = GraphBuilder.findSeed(level, pos);
-            if (seed == null || covered.contains(seed)) return;
-            if (!wake) {
-                Long sleepUntil = quiet.get(seed);
-                if (sleepUntil != null && sleepUntil > now) return;
-            }
-            graph = GraphCache.get(level, seed, now);
-            if (graph == null) {
-                graph = GraphBuilder.build(level, seed);
-                if (graph.isEmpty()) return;
-                GraphCache.store(level, graph, now);
-                // A silently placed pipe (schematicannon — no event, no eviction) can extend or
-                // bridge a network that ALREADY solved this tick off its stale cached graph: this
-                // fresh build then contains already-solved cells, and solving it too would move up
-                // to double the per-endpoint cap in one tick. Store it (next tick's lookup gets the
-                // merged shape, displacing the stale halves) but skip this tick's solve, preserving
-                // the one-solve-per-network-per-tick rule. Only exclusive cells count as overlap:
-                // an open-end space block or per-face handler is legitimately shared between two
-                // live networks and must not starve the second one's rebuild.
-                if (overlapsSolved(graph, covered)) {
-                    covered.addAll(graph.coverage());
-                    return;
-                }
-            }
-        }
+        Graph graph = resolveGraph(level, pos, covered, quiet, now, wake);
+        if (graph == null) return;
         covered.addAll(graph.coverage());
 
         Solution solution = FlowSolver.solve(level, graph);
 
-        // Advance the visual fronts FIRST, then deliver only the transfers whose fluid
-        // has actually reached its sink: a freshly started flow fills the source-side
-        // pipe before the sink begins to fill (travel time). A receding equalization
-        // hump has no flow yet still needs per-tick updates, so keep the network awake
-        // until its drain animation finishes.
-        boolean draining = CreatePipeRendering.apply(level, graph, solution);
-
-        List<Solution.Transfer> ready = new ArrayList<>();
-        for (Solution.Transfer transfer : solution.transfers()) {
-            if (CreatePipeRendering.deliveryReady(level, graph, solution, transfer)) {
-                ready.add(transfer);
-            }
-        }
-        FluidEngine.apply(level, ready);
+        // Execute the solved flows as conserved plug flow through the pipes' stored volume:
+        // travel time, backpressure, and the idle settle-back are all real fluid movement now,
+        // so there is no separate render pass or delivery gate. A still-settling network stays
+        // awake until its contents come to rest.
+        PipeFlowExecutor.Actuals actuals = FluidEngine.apply(level, graph, solution);
         CentrifugeProcessor.process(level, graph, now);
 
-        boolean busy = solution.active() || solution.hasTransfer() || draining;
+        boolean busy = solution.active() || actuals.movedAny() || actuals.settling();
         boolean armed = hasRunningPump(level, graph);
         // Busy/armed networks get the fast graph-cache TTL: they are the ones that would route
         // fluid over a silently edited run, so their stale-shape window stays at the armed cadence.
@@ -240,6 +208,46 @@ public final class EngineTickHandler {
             long until = Math.min(now + recheckTicks(solution, armed), GraphCache.expiry(level, graph));
             for (BlockPos cell : graph.coverage()) quiet.put(cell, until);
         }
+    }
+
+    /**
+     * The graph this seed's network should solve against: the cached one when fresh, else a
+     * resolved-seed cache hit, else a fresh build (which is stored). Null means skip this seed —
+     * no network here, already solved or still sleeping under its resolved seed, or a fresh build
+     * that overlaps a network which already solved this tick (marked covered so later seeds skip
+     * it too).
+     */
+    private static Graph resolveGraph(ServerLevel level, BlockPos pos, Set<BlockPos> covered,
+                                      Map<BlockPos, Long> quiet, long now, boolean wake) {
+        // Cached-network fast path: any coverage cell resolves the whole graph, skipping both
+        // findSeed's neighbor ring and the BFS rebuild. Topology wakes (markChanged) evicted their
+        // networks at mark time, so a hit here is a network nothing reshaped.
+        Graph graph = GraphCache.get(level, pos, now);
+        if (graph != null) return graph;
+        BlockPos seed = GraphBuilder.findSeed(level, pos);
+        if (seed == null || covered.contains(seed)) return null;
+        if (!wake) {
+            Long sleepUntil = quiet.get(seed);
+            if (sleepUntil != null && sleepUntil > now) return null;
+        }
+        graph = GraphCache.get(level, seed, now);
+        if (graph != null) return graph;
+        graph = GraphBuilder.build(level, seed);
+        if (graph.isEmpty()) return null;
+        GraphCache.store(level, graph, now);
+        // A silently placed pipe (schematicannon — no event, no eviction) can extend or
+        // bridge a network that ALREADY solved this tick off its stale cached graph: this
+        // fresh build then contains already-solved cells, and solving it too would move up
+        // to double the per-endpoint cap in one tick. Store it (next tick's lookup gets the
+        // merged shape, displacing the stale halves) but skip this tick's solve, preserving
+        // the one-solve-per-network-per-tick rule. Only exclusive cells count as overlap:
+        // an open-end space block or per-face handler is legitimately shared between two
+        // live networks and must not starve the second one's rebuild.
+        if (overlapsSolved(graph, covered)) {
+            covered.addAll(graph.coverage());
+            return null;
+        }
+        return graph;
     }
 
     /** Whether any of the graph's EXCLUSIVE cells (pipes, pumps, junctions) already solved this tick. */

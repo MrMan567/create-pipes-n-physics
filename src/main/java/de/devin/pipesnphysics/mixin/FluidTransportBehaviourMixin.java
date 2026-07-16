@@ -1,8 +1,7 @@
 package de.devin.pipesnphysics.mixin;
 
 import com.simibubi.create.content.fluids.FluidTransportBehaviour;
-import de.devin.pipesnphysics.compat.CreatePipeRendering;
-import de.devin.pipesnphysics.compat.PipeLevelData;
+import de.devin.pipesnphysics.engine.store.PipeFluidCell;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
 import net.neoforged.neoforge.fluids.FluidStack;
@@ -13,85 +12,60 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
- * Adds the in-pipe LEVEL renderer's per-cell metadata to Create's pipe behaviour as dedicated,
- * client-synced-but-not-saved fields ({@link PipeLevelData}) — the honest channel that replaced
- * smuggling the waterline into the flow's fluid amount. Three fields: the waterline level, the
- * engine-owned travelling-front state (which replaced reading Create's {@code Flow.progress}),
- * and the rendered fluid (which replaced reading Create's {@code Flow.fluid}).
+ * Adds the engine's per-cell fluid state to Create's pipe behaviour ({@link PipeFluidCell}).
  *
- * Create serializes each behaviour via {@code write}/{@code read} with a {@code clientPacket} flag
- * ({@code true} for the sync packet, {@code false} for the disk save). We write the fields ONLY on
- * the sync path, so they reach the client (which renders them) but never hit the world save — they
- * are re-stamped from the solve every tick, so a saved value would be stale render junk. Unlike the
- * old amount hack these are small opaque values, never read as a volume, so even a leaked copy
- * cannot dupe fluid. (Create captures a block entity's {@code clientPacket=true} update tag into
- * CONTRAPTION data, so a stamped pipe glued to an assembling contraption can carry the fields
- * along; harmless — they are re-stamped once the sub-level solves and are not volumes.)
+ * The CONTENT is real, conserved volume, so unlike the old render-only fields it is written on
+ * BOTH serialization paths: the disk save (reload resumes with the exact in-transit fluid; a
+ * contraption assembly captures it into its data and disassembly restores it) and the client
+ * packet (the client renderer draws pipes directly from it). The FLOW stamp is cosmetic
+ * (direction + rate for the scroll animation), re-derived every tick, and rides only the client
+ * packet — a saved copy would be stale by the first solve.
  */
 @Mixin(value = FluidTransportBehaviour.class, remap = false)
-public class FluidTransportBehaviourMixin implements PipeLevelData {
+public class FluidTransportBehaviourMixin implements PipeFluidCell {
     @Unique
-    private int pipesnphysics$levelData = 0;
-
-    @Unique
-    private int pipesnphysics$frontData = 0;
+    private FluidStack pipesnphysics$content = FluidStack.EMPTY;
 
     @Unique
-    private FluidStack pipesnphysics$renderFluid = FluidStack.EMPTY;
+    private int pipesnphysics$flowData = 0;
 
     @Override
-    public int pipesnphysics$getLevelData() {
-        return pipesnphysics$levelData;
+    public FluidStack pipesnphysics$content() {
+        return pipesnphysics$content;
     }
 
     @Override
-    public void pipesnphysics$setLevelData(int data) {
-        pipesnphysics$levelData = data;
+    public void pipesnphysics$setContent(FluidStack content) {
+        pipesnphysics$content = content;
     }
 
     @Override
-    public int pipesnphysics$getFrontData() {
-        return pipesnphysics$frontData;
+    public int pipesnphysics$flowData() {
+        return pipesnphysics$flowData;
     }
 
     @Override
-    public void pipesnphysics$setFrontData(int data) {
-        pipesnphysics$frontData = data;
-    }
-
-    @Override
-    public FluidStack pipesnphysics$getRenderFluid() {
-        return pipesnphysics$renderFluid;
-    }
-
-    @Override
-    public void pipesnphysics$setRenderFluid(FluidStack fluid) {
-        pipesnphysics$renderFluid = fluid;
+    public void pipesnphysics$setFlowData(int data) {
+        pipesnphysics$flowData = data;
     }
 
     @Inject(method = "write", at = @At("TAIL"))
-    private void pipesnphysics$writeLevel(CompoundTag nbt, HolderLookup.Provider registries,
-                                          boolean clientPacket, CallbackInfo ci) {
-        // Sync the render fields only while the flag is on. Turned off (the default), they are left
-        // OUT of the packet, so a client holding stale values reads them as absent on the next sync
-        // and stops rendering them — they self-clear instead of lingering, since apply no longer
-        // runs resetLevelData once level render is off.
-        if (!clientPacket || !CreatePipeRendering.levelRenderEnabled()) return;
-        if (pipesnphysics$levelData != 0) nbt.putInt("PnpLevel", pipesnphysics$levelData);
-        if (pipesnphysics$frontData != 0) nbt.putInt("PnpFront", pipesnphysics$frontData);
-        if (!pipesnphysics$renderFluid.isEmpty()) {
-            nbt.put("PnpFluid", pipesnphysics$renderFluid.saveOptional(registries));
+    private void pipesnphysics$writeContent(CompoundTag nbt, HolderLookup.Provider registries,
+                                            boolean clientPacket, CallbackInfo ci) {
+        if (!pipesnphysics$content.isEmpty()) {
+            nbt.put("PnpContent", pipesnphysics$content.saveOptional(registries));
+        }
+        if (clientPacket && pipesnphysics$flowData != 0) {
+            nbt.putInt("PnpFlow", pipesnphysics$flowData);
         }
     }
 
     @Inject(method = "read", at = @At("TAIL"))
-    private void pipesnphysics$readLevel(CompoundTag nbt, HolderLookup.Provider registries,
-                                         boolean clientPacket, CallbackInfo ci) {
-        if (!clientPacket) return;
-        pipesnphysics$levelData = nbt.getInt("PnpLevel"); // 0 when absent
-        pipesnphysics$frontData = nbt.getInt("PnpFront");
-        pipesnphysics$renderFluid = nbt.contains("PnpFluid")
-                ? FluidStack.parseOptional(registries, nbt.getCompound("PnpFluid"))
+    private void pipesnphysics$readContent(CompoundTag nbt, HolderLookup.Provider registries,
+                                           boolean clientPacket, CallbackInfo ci) {
+        pipesnphysics$content = nbt.contains("PnpContent")
+                ? FluidStack.parseOptional(registries, nbt.getCompound("PnpContent"))
                 : FluidStack.EMPTY;
+        if (clientPacket) pipesnphysics$flowData = nbt.getInt("PnpFlow"); // 0 when absent
     }
 }
