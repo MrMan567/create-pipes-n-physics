@@ -21,16 +21,18 @@ public final class PipeWindow {
     /** Bore height — the 6/16 window a horizontal pipe draws its fluid in. */
     public static final double BORE_HEIGHT = 2 * (3.0 / 16);
     /**
-     * Opening LIP as a block-local offset — the pipe's INNER bore floor (owner-specified: the
-     * outer shell bottom at 4/16 plus the 1-pixel wall; the opening itself is 2 pixels shorter
-     * than the shell, one wall each side, but only its bottom gates flow). Compared against the
-     * RENDERED surface — the fluid the player sees — never the liquid head (§5a lip rule).
+     * Opening LIP as a block-local offset — the bottom of the pipe's connection APERTURE, the
+     * 4×4-pixel window fluid actually enters through (owner-specified: it sits one pixel above
+     * Create's tank fluid floor, the 5/16 render inset — so 6/16). Compared against the RENDERED
+     * surface — the fluid the player sees — never the liquid head (§5a lip rule). Sitting a
+     * pixel ABOVE the tank render floor is what lets a base-row tank keep its visible puddle:
+     * at 5/16 the lip coincided with the render floor and every tank drained to nothing.
      */
-    public static final double LIP_BOTTOM = 5.0 / 16;
+    public static final double LIP_BOTTOM = 6.0 / 16;
 
     private PipeWindow() {}
 
-    /** World-Y of the draw LIP of an opening through this cell: the inner bore floor for a bore cell, the block bottom for a riser. */
+    /** World-Y of the draw LIP of an opening through this cell: the aperture bottom for a bore cell, the block bottom for a riser. */
     public static double lipY(Level level, BlockPos pos) {
         double cellBottom = SableCompat.getWorldY(level, pos) - 0.5;
         return fillsFullBlock(level, pos) ? cellBottom : cellBottom + LIP_BOTTOM;

@@ -159,6 +159,11 @@ public final class PipeStore {
             dirty = true;
         }
 
+        /** The packed cosmetic flow stamp (0 = at rest). */
+        public int flowData() {
+            return cell.pipesnphysics$flowData();
+        }
+
         /** Clear the flow stamp (cell at rest). */
         public void clearFlow() {
             if (cell.pipesnphysics$flowData() == 0) return;

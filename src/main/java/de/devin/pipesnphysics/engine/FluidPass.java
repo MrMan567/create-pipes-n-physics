@@ -494,7 +494,12 @@ final class FluidPass {
      */
     private boolean canDrawFrom(Node handlerNode, BoundaryColumn column, BlockPos opening, double lip) {
         if (column.isOpenEnd() || column.isInfiniteSource()) return true;
-        if (column.renderedSurface() <= lip) return false;
+        // Wall one millibucket early: drains are integer mB and the lip cap zeroes fractionally
+        // at the lip, so a surface resting less than 1 mB above it can never actually give — an
+        // open gate there is a PERMANENT phantom flow (solved q, SOURCE_DRY stall, scrolling
+        // pipes, nothing moving) at exactly the equilibrium every gravity drain ends on.
+        double oneMb = 1.0 / Math.max(column.capacitance(), 1);
+        if (column.renderedSurface() <= lip + oneMb) return false;
         return SableCompat.canFluidReachPipe(level, handlerNode.pos(), opening, column.fillFraction());
     }
 

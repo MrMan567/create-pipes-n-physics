@@ -563,13 +563,12 @@ public class PipesNPhysicsGameTests {
 
     /**
      * Gravity flow leaves a tank only through an opening its RENDERED surface reaches — the lip
-     * (the pipe's inner bore floor, block + 5/16) is judged against the fluid the player SEES,
-     * which Create draws inset. A 2-tall source with its opening on the TOP row must stop giving
-     * when its visible waterline rests at that lip: rendered = base + 0.3125 + f·1.4375 = 2.3125
-     * → ~11.1k of 16000 mB stays. (A BASE-row opening's lip coincides with Create's 0.3125
-     * render floor, which any visible fluid sits above, so such a tank drains out completely —
-     * pipeGravityRigDrainsTheRaisedTank.) A PUMP actively pulling still reaches the block floor
-     * (pumpMovesAllFluidOnFlatGround).
+     * (the pipe's 4x4 px connection aperture bottom, block + 6/16) is judged against the fluid
+     * the player SEES, which Create draws inset. A 2-tall source with its opening on the TOP row
+     * must stop giving when its visible waterline rests at that lip: rendered = base + 0.3125 +
+     * f·1.4375 = 2.375 → ~11.8k of 16000 mB stays. (A BASE-row opening keeps just the puddle
+     * below the aperture — pipeGravityRigDrainsTheRaisedTank.) A PUMP actively pulling still
+     * reaches the block floor (pumpMovesAllFluidOnFlatGround).
      */
     @GameTest(template = "piping/empty_canvas", templateNamespace = PipesNPhysics.ID, timeoutTicks = 600)
     public static void gravityFlowStopsAtThePipeLip(GameTestHelper helper) {
@@ -587,23 +586,25 @@ public class PipesNPhysicsGameTests {
             if (left + moved + pipes != 16000 && left + moved + pipes != 0) {
                 helper.fail("fluid not conserved: " + left + " + " + moved + " + pipes " + pipes);
             }
-            if (left < 10950 || left > 11350) {
+            if (left < 11650 || left > 12050) {
                 helper.fail("source at " + left + " mB — its VISIBLE waterline must rest at the"
-                        + " top-row pipe lip (~11130)");
+                        + " top-row pipe aperture (~11826)");
             }
-            if (moved < 4200) helper.fail("sink only got " + moved + " mB");
+            if (moved < 3500) helper.fail("sink only got " + moved + " mB");
         });
     }
 
     /**
      * The owner's three-tank repro (assets/ponder/physics/pipe_gravity, copied into the test
      * structures): a raised 3-tall tank feeds two lower tanks through runs leaving its BASE
-     * block. Every gravity gate keys on the RENDERED surface, and a base-row lip (base + 5/16)
-     * coincides with Create's 0.3125 render floor, which ANY visible fluid sits above — so the
-     * raised tank must drain out COMPLETELY, reach BOTH sinks, and leave only waterline films in
-     * the pipes. Regression: the gates used to compare the LIQUID surface, which sat 2 mB under
-     * the lip while the rendered one stood a quarter block over it — "why does this pipegraph
-     * not flow? The fluid inside the tank is higher than the lip of the pipe, like a lot higher".
+     * block. Every gravity gate keys on the RENDERED surface, and the lip is the pipe's 4x4 px
+     * connection aperture, whose bottom sits ONE pixel above Create's tank fluid floor (6/16 vs
+     * the 5/16 render inset) — so the raised tank drains until its visible puddle rests at the
+     * aperture bottom (~615 mB of 24000 at 3-tall), reaches BOTH sinks, and never empties out.
+     * Regressions both ways: gates on the LIQUID surface walled the tank while its rendered
+     * fluid stood a quarter block over the pipe ("why does this pipegraph not flow?"), and a
+     * 5/16 lip coincided with the render floor and drained it to nothing ("the tank drains
+     * fully empty still, which shouldnt happen").
      */
     @GameTest(template = "piping/pipe_gravity", templateNamespace = PipesNPhysics.ID, timeoutTicks = 800)
     public static void pipeGravityRigDrainsTheRaisedTank(GameTestHelper helper) {
@@ -656,11 +657,22 @@ public class PipesNPhysicsGameTests {
                 if (raisedMb + sinkSum + pipeMb != 6000) {
                     helper.fail("fluid not conserved: " + raisedMb + " + " + sinkSum + " + pipes " + pipeMb);
                 }
-                if (raisedMb > 100) {
-                    helper.fail("raised tank still holds " + raisedMb + " mB — its base-row lip sits"
-                            + " below the render floor, it must drain out");
+                // Rendered puddle rests at the aperture bottom: 24000·(0.0625/2.4375) ≈ 615 mB.
+                if (raisedMb < 450 || raisedMb > 800) {
+                    helper.fail("raised tank holds " + raisedMb + " mB — its visible puddle must"
+                            + " rest at the pipe aperture (~615), neither stuck high nor drained out");
                 }
                 if (sinkMin < 1000) helper.fail("a sink only got " + sinkMin + " mB");
+                // And the network must actually COME TO REST: a source stranded a hair over its
+                // lip used to keep a solved-but-undrainable flow alive forever (SOURCE_DRY every
+                // tick, flow stamps scrolling on the pipes while nothing moved).
+                for (BlockPos rel : pipes) {
+                    PipeStore.Store cell = PipeStore.at(level, helper.absolutePos(rel));
+                    if (cell != null && cell.flowData() != 0) {
+                        helper.fail("pipe " + rel.toShortString() + " still carries a flow stamp"
+                                + " after the drain settled — phantom flow at the lip equilibrium");
+                    }
+                }
             });
         });
     }
@@ -672,7 +684,7 @@ public class PipesNPhysicsGameTests {
 
     /**
      * The same rig with the source filled INTO the weir band — its RENDERED surface between the
-     * side cell's lip (2.3125) and centre (2.5) — and every pipe DRY. The supply reaches into
+     * side cell's lip (2.375) and centre (2.5) — and every pipe DRY. The supply reaches into
      * the dry crest cell, so plain gravity wets it and pours over (weir flow); the old
      * centre-height dry-crest gate declared an air break and locked the run out, which is how a
      * momentarily idle run whose crest cell the settle had drained froze mid-drain forever.
@@ -682,7 +694,7 @@ public class PipesNPhysicsGameTests {
         BlockPos source = new BlockPos(1, 2, 1);
         BlockPos sink = new BlockPos(4, 1, 1);
         List<BlockPos> run = buildOwnLevelDrainRig(helper);
-        helper.runAfterDelay(5, () -> fill(helper, source, 3400)); // rendered 2.498, lip 2.3125
+        helper.runAfterDelay(5, () -> fill(helper, source, 3400)); // rendered 2.498, lip 2.375
 
         helper.succeedWhen(() -> {
             int left = amount(helper, source);
@@ -3456,7 +3468,9 @@ public class PipesNPhysicsGameTests {
                 helper.succeed(); // wire mode / degenerate capacity: no partial depth to observe
                 return;
             }
-            fill(helper, sourceRel, 3000);
+            // Plenty above the source's draw lip: this test measures the DEPTH gates, and the
+            // 100-iteration drain must never dip into the lip cap's taper zone near the aperture.
+            fill(helper, sourceRel, 6000);
 
             Graph graph = GraphBuilder.build(level, helper.absolutePos(feederCell));
             Node source = graph.nodeAt(helper.absolutePos(sourceRel));
@@ -3518,21 +3532,30 @@ public class PipesNPhysicsGameTests {
                         + rate + " — the depth gates throttled or burst the throughput");
                 return;
             }
+            // The FEEDER cell sits below the source's waterline, so the flowing top-up
+            // legitimately fills it toward the tank's rendered line (the depth is a FLOOR gate,
+            // never a target) and fill-only keeps the high-water mark from the starting fill.
+            // Every cell past the junction has no reservoir line and rides at the depth itself.
+            double sourceLine = tankRenderedSurface(1.0, 1, 6000, 8000);
+            int feederTarget = (int) Math.round(
+                    Math.clamp((sourceLine - (1.0 + 0.5 - 3.0 / 16)) / (2 * (3.0 / 16)), 0, 1) * cap);
             int held = 0;
             for (BlockPos rel : List.of(feederCell, junctionRel, midCell, deliveryCell)) {
                 int mb = pipeAmount(helper, rel); // the junction slot is a cell like any other here
                 held += mb;
-                if (mb < depth - rate || mb > depth + rate) {
+                int bound = rel.equals(feederCell) ? Math.max(depth, feederTarget) : depth;
+                if (mb < depth - rate || mb > bound + rate) {
                     helper.fail("flowing cell " + rel.toShortString() + " holds " + mb
                             + " mB in steady state, expected the flow depth " + depth
-                            + " — the run packed toward full or smeared below the plug");
+                            + " (bound " + bound
+                            + ") — the run packed toward full or smeared below the plug");
                     return;
                 }
             }
             int total = amount(helper, sourceRel) + amount(helper, sinkRel) + held
                     + pipeAmount(helper, stubRel);
-            if (total != 3000) {
-                helper.fail("fluid not conserved through depth-gated flow: " + total + "/3000");
+            if (total != 6000) {
+                helper.fail("fluid not conserved through depth-gated flow: " + total + "/6000");
                 return;
             }
             helper.succeed();

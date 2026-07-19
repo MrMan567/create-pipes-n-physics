@@ -266,19 +266,19 @@ class NetworkSolverTest {
      */
     @Test
     void dryCrestFlowsOnceTheSupplyReachesItsFloor() {
-        // Crest cell centred at 60.5 with its lip (inner bore floor) at 60.3125 — the side cell
-        // of a tank whose base block sits at 60. The far-side interpolation drags the head AT the
-        // crest below the supply either way; only the supply-vs-floor comparison decides.
-        BranchSpec dryAtTankLevel = new BranchSpec(0, 1, 40, 0, 0, 60.5, 60.3125, 0.2, false);
+        // Crest cell centred at 60.5 with its lip (the connection aperture bottom) at 60.375 —
+        // the side cell of a tank whose base block sits at 60. The far-side interpolation drags
+        // the head AT the crest below the supply either way; only supply-vs-floor decides.
+        BranchSpec dryAtTankLevel = new BranchSpec(0, 1, 40, 0, 0, 60.5, 60.375, 0.2, false);
 
         List<NodeSpec> supplyAtTheLip = List.of(
-                new NodeSpec(TANK_CAPACITANCE, 60.4),
+                new NodeSpec(TANK_CAPACITANCE, 60.45),
                 new NodeSpec(TANK_CAPACITANCE, 50));
         assertTrue(step(supplyAtTheLip, List.of(dryAtTankLevel)).flows()[0] > 0,
                 "a supply reaching the dry crest's lip pours over it");
 
         List<NodeSpec> supplyUnderTheLip = List.of(
-                new NodeSpec(TANK_CAPACITANCE, 60.25),
+                new NodeSpec(TANK_CAPACITANCE, 60.3),
                 new NodeSpec(TANK_CAPACITANCE, 50));
         Result gated = step(supplyUnderTheLip, List.of(dryAtTankLevel));
         assertEquals(0, gated.flows()[0], 1e-9, "below the crest's lip a dry crest still gates");
