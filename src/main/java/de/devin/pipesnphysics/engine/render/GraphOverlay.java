@@ -127,6 +127,7 @@ public final class GraphOverlay {
         VertexConsumer lines = buffers.getBuffer(RenderType.lines());
         for (ActiveOverlay overlay : ACTIVE) {
             drawNodes(pose, lines, overlay.payload, lifeFraction(overlay, now));
+            drawSurfaceMarkers(pose, lines, overlay.payload, lifeFraction(overlay, now));
             drawFlag(pose, lines, overlay.payload, lifeFraction(overlay, now));
         }
         buffers.endBatch(RenderType.lines());
@@ -145,6 +146,7 @@ public final class GraphOverlay {
             float fade = lifeFraction(overlay, now);
             drawEdgeLabels(buffers, overlay.payload, fade);
             drawNodeLabels(buffers, overlay.payload, fade);
+            drawSurfaceLabels(buffers, overlay.payload, fade);
             drawFlagLabel(buffers, overlay.payload, fade);
         }
         buffers.endBatch();
@@ -244,6 +246,45 @@ public final class GraphOverlay {
 
     /** One overlay color, 0–255 per channel. */
     private record Rgb(int r, int g, int b) {}
+
+    /** Cyan — the engine's computed reservoir surface, drawn distinct from every kind's box. */
+    private static final Rgb SURFACE_COLOR = new Rgb(0, 230, 230);
+
+    /**
+     * A cyan horizontal square at each reservoir's ENGINE-computed surface elevation
+     * ({@code baseY + fill}), spanning the block footprint. This is the height a settled pipe
+     * equalizes to; drawing it in-world lets you compare it against Create's own rendered tank
+     * fluid, which can sit at a different height — so a "pipe doesn't match the tank" gap is visibly
+     * either the pipe (our bug) or Create's tank render being bumped off our surface.
+     */
+    private static void drawSurfaceMarkers(PoseStack pose, VertexConsumer buf,
+                                           GraphOverlayPayload payload, float alpha) {
+        Matrix4f m = pose.last().pose();
+        for (var n : payload.nodes()) {
+            if (Float.isNaN(n.surfaceY())) continue;
+            float y = n.surfaceY();
+            // Slightly overhang the block so the line clears the tank walls and stays visible.
+            float x0 = n.x() - 0.05f, x1 = n.x() + 1.05f;
+            float z0 = n.z() - 0.05f, z1 = n.z() + 1.05f;
+            line(m, buf, x0, y, z0, x1, y, z0, SURFACE_COLOR, alpha);
+            line(m, buf, x1, y, z0, x1, y, z1, SURFACE_COLOR, alpha);
+            line(m, buf, x1, y, z1, x0, y, z1, SURFACE_COLOR, alpha);
+            line(m, buf, x0, y, z1, x0, y, z0, SURFACE_COLOR, alpha);
+        }
+    }
+
+    /** The surface elevation value floating at the marker, SEE-THROUGH so it reads against the tank. */
+    private static void drawSurfaceLabels(MultiBufferSource buffers,
+                                          GraphOverlayPayload payload, float fade) {
+        for (var n : payload.nodes()) {
+            if (Float.isNaN(n.surfaceY())) continue;
+            int alpha = (int) (255 * Math.max(0.25f, fade));
+            DebugRenderer.renderFloatingText(new PoseStack(), buffers,
+                    String.format("surface %.2f", n.surfaceY()),
+                    n.x() + 0.5, n.surfaceY() + 0.05, n.z() + 0.5,
+                    (alpha << 24) | 0x00E6E6, 0.02f, true, 0, true);
+        }
+    }
 
     /** Node markers — a small wireframe box per node, colored by kind (depth-tested lines). */
     private static void drawNodes(PoseStack pose, VertexConsumer buf,

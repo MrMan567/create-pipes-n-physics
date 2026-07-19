@@ -50,6 +50,7 @@ public final class OpenEndPipes {
 
     /** Record that an open mouth just spilled into the world (called when a spill executes). */
     public static void markSpilled(Level level, BlockPos spacePos) {
+        if (level.isClientSide()) return; // ponder runs don't drive Create's spill/intake latches
         SPILL_TICKS.computeIfAbsent(level.dimension(), k -> new HashMap<>())
                 .put(spacePos.immutable(), level.getGameTime());
     }
@@ -59,6 +60,7 @@ public final class OpenEndPipes {
      * pruned on read so the map stays bounded to recently-active mouths.
      */
     public static boolean recentlySpilled(Level level, BlockPos spacePos, int cooldown) {
+        if (level.isClientSide()) return false;
         Map<BlockPos, Long> ticks = SPILL_TICKS.get(level.dimension());
         if (ticks == null) return false;
         Long when = ticks.get(spacePos);
@@ -70,11 +72,13 @@ public final class OpenEndPipes {
 
     /** Pin a hose pulley into output mode (called when a deposit-out-to-world transfer executes). */
     public static void markPulleyOutput(Level level, BlockPos pulleyPos) {
+        if (level.isClientSide()) return;
         PULLEY_OUTPUT.computeIfAbsent(level.dimension(), k -> new HashSet<>()).add(pulleyPos.immutable());
     }
 
     /** Whether this pulley is in output mode (has deposited and not since been removed). */
     public static boolean isPulleyOutput(Level level, BlockPos pulleyPos) {
+        if (level.isClientSide()) return false;
         Set<BlockPos> output = PULLEY_OUTPUT.get(level.dimension());
         return output != null && output.contains(pulleyPos);
     }
@@ -92,6 +96,7 @@ public final class OpenEndPipes {
      * having run. A cached instance whose pipe orientation changed is rebuilt for the current mouth.
      */
     public static IFluidHandler handler(Level level, BlockPos spacePos, Direction faceTowardPipe) {
+        if (level.isClientSide()) return null; // no Create world interaction (spill/intake) on a ponder run
         Map<BlockPos, OpenEndedPipe> map = PIPE_BY_SPACE.computeIfAbsent(level.dimension(), k -> new HashMap<>());
         BlockPos expectedPipe = spacePos.relative(faceTowardPipe);
         OpenEndedPipe pipe = map.get(spacePos);
@@ -120,6 +125,7 @@ public final class OpenEndPipes {
      * break spill entirely.
      */
     public static FluidStack bufferedIntake(Level level, BlockPos spacePos) {
+        if (level.isClientSide()) return FluidStack.EMPTY;
         Map<BlockPos, OpenEndedPipe> pipes = PIPE_BY_SPACE.get(level.dimension());
         if (pipes == null) return FluidStack.EMPTY;
         OpenEndedPipe pipe = pipes.get(spacePos);

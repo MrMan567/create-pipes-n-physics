@@ -98,6 +98,51 @@ public final class PipeFluidRenderer {
         return PipesNPhysicsConfig.ENABLE_ENGINE.get() && !pipe.blockEntity.isVirtual();
     }
 
+    /**
+     * Draw one PONDER pipe cell's stored fluid straight into the scene buffer at the block-entity
+     * renderer's (block-local) pose. The main-world path is camera-relative and its {@link CellAnim}
+     * cache is keyed by BlockPos — which would collide with real pipes at the same coords — so ponder
+     * gets its own cache-free waterline (no scroll/plug smoothing; the engine already updates the
+     * content every scene tick). Called from the pipe BER mixin, which runs during ponder's render.
+     */
+    public static void drawPonderCell(StraightPipeBlockEntity be, PoseStack ms, MultiBufferSource buffer, int light) {
+        if (!PipesNPhysicsConfig.ENABLE_ENGINE.get() || !PipesNPhysicsConfig.ENABLE_PONDER_ENGINE.get()) return;
+        int capacity = PipeStore.capacityMb();
+        if (capacity <= 0) return;
+        BlockState state = be.getBlockState();
+        if (!state.hasProperty(AxisPipeBlock.AXIS)) return;
+        FluidTransportBehaviour pipe = be.getBehaviour(FluidTransportBehaviour.TYPE);
+        if (!(pipe instanceof PipeFluidCell holder)) return;
+        FluidStack content = holder.pipesnphysics$content();
+        if (content.isEmpty()) return;
+
+        float frac = Math.min((float) content.getAmount() / capacity, 1f);
+        boolean gas = content.getFluid().getFluidType().isLighterThanAir();
+        Direction.Axis axis = state.getValue(AxisPipeBlock.AXIS);
+        float lo = 0.5f - PIPE_RADIUS;
+        float hi = 0.5f + PIPE_RADIUS;
+        float x0, y0, z0, x1, y1, z1;
+        switch (axis) {
+            case Y -> {
+                x0 = lo; z0 = lo; x1 = hi; z1 = hi;
+                if (gas) { y0 = 1f - frac; y1 = 1f; } else { y0 = 0f; y1 = frac; }
+            }
+            case X -> {
+                x0 = 0f; x1 = 1f; z0 = lo; z1 = hi;
+                float bore = hi - lo;
+                if (gas) { y0 = hi - frac * bore; y1 = hi; } else { y0 = lo; y1 = lo + frac * bore; }
+            }
+            default -> {
+                z0 = 0f; z1 = 1f; x0 = lo; x1 = hi;
+                float bore = hi - lo;
+                if (gas) { y0 = hi - frac * bore; y1 = hi; } else { y0 = lo; y1 = lo + frac * bore; }
+            }
+        }
+        if (y1 <= y0) return;
+        renderBox(content, x0, y0, z0, x1, y1, z1, light, axis, 0f, ms,
+                FluidRenderHelper.getFluidBuilder(buffer));
+    }
+
     @SubscribeEvent
     public static void onRenderLevel(RenderLevelStageEvent event) {
         if (event.getStage() != RenderLevelStageEvent.Stage.AFTER_TRANSLUCENT_BLOCKS) return;
@@ -231,7 +276,8 @@ public final class PipeFluidRenderer {
         int light = LevelRenderer.getLightColor(level, cellPos);
         poseStack.pushPose();
         poseStack.translate(cellPos.getX() - camera.x, cellPos.getY() - camera.y, cellPos.getZ() - camera.z);
-        renderBox(fluid, x0, y0, z0, x1, y1, z1, light, axis, anim.phase(), poseStack);
+        renderBox(fluid, x0, y0, z0, x1, y1, z1, light, axis, anim.phase(), poseStack,
+                FluidRenderHelper.getFluidBuilder(OWN_BUFFER));
         poseStack.popPose();
         return true;
     }
@@ -245,14 +291,13 @@ public final class PipeFluidRenderer {
      */
     private static void renderBox(FluidStack stack, float x0, float y0, float z0,
                                   float x1, float y1, float z1, int light, Direction.Axis grainAxis,
-                                  float scroll, PoseStack ms) {
+                                  float scroll, PoseStack ms, VertexConsumer builder) {
         IClientFluidTypeExtensions ext = IClientFluidTypeExtensions.of(stack.getFluid());
         TextureAtlasSprite sprite = Minecraft.getInstance().getTextureAtlas(InventoryMenu.BLOCK_ATLAS)
                 .apply(ext.getStillTexture(stack));
         int color = ext.getTintColor(stack);
         int luminosity = Math.max((light >> 4) & 0xF, stack.getFluid().getFluidType().getLightLevel(stack));
         int lightOut = (light & 0xF00000) | luminosity << 4;
-        VertexConsumer builder = FluidRenderHelper.getFluidBuilder(OWN_BUFFER);
 
         int fAxis = grainAxis.ordinal();
         float[] min = {x0, y0, z0};

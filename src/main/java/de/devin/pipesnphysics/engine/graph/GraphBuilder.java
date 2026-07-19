@@ -5,6 +5,7 @@ import com.simibubi.create.content.fluids.FluidTransportBehaviour;
 import com.simibubi.create.content.fluids.pipes.VanillaFluidTargets;
 import com.simibubi.create.content.fluids.pump.PumpBlock;
 import de.devin.pipesnphysics.compat.SableCompat;
+import de.devin.pipesnphysics.engine.boundary.FluidCaps;
 import de.devin.pipesnphysics.engine.boundary.FluidTankGeometry;
 import de.devin.pipesnphysics.engine.boundary.HandlerRoles;
 import de.devin.pipesnphysics.engine.valve.ValveThrottle;
@@ -12,7 +13,6 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.state.BlockState;
-import net.neoforged.neoforge.capabilities.Capabilities;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -245,8 +245,7 @@ public final class GraphBuilder {
             return;
         }
 
-        var handler = level.getCapability(
-                Capabilities.FluidHandler.BLOCK, neighbor, face.getOpposite());
+        var handler = FluidCaps.at(level, neighbor, face.getOpposite());
         // A cauldron (and the other vanilla fluid targets) now exposes a NeoForge
         // fluid-handler capability, but its CauldronWrapper only drains in whole
         // 1000 mB increments — far above MAX_FLOW_PER_ENDPOINT — so the generic
@@ -263,7 +262,7 @@ public final class GraphBuilder {
             boolean firstSight = discovery.handlers.add(handlerPos);
             conns.add(handlerPos);
             backLink(discovery, handlerPos, cur);
-            var sideAgnosticCap = level.getCapability(Capabilities.FluidHandler.BLOCK, neighbor, null);
+            var sideAgnosticCap = FluidCaps.at(level, neighbor, null);
             // SIDE-SPECIFIC when the face this pipe meets exposes a DIFFERENT handler than the null
             // side — a distinct per-face tank the engine must read through THIS face rather than
             // couple. A block with no null cap is trivially side-specific; a block whose null side
@@ -392,7 +391,7 @@ public final class GraphBuilder {
                 frontier.add(neighbor.immutable());
                 continue;
             }
-            if (level.getCapability(Capabilities.FluidHandler.BLOCK, neighbor, face.getOpposite()) != null
+            if (FluidCaps.at(level, neighbor, face.getOpposite()) != null
                     && !HandlerRoles.isIgnored(level, neighbor)) {
                 BlockPos handlerPos = neighbor.immutable();
                 discovery.handlers.add(handlerPos);

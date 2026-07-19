@@ -18,7 +18,6 @@ import net.minecraft.world.level.block.LiquidBlock;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.material.FluidState;
-import net.neoforged.neoforge.capabilities.Capabilities;
 import net.neoforged.neoforge.fluids.FluidStack;
 import net.neoforged.neoforge.fluids.capability.IFluidHandler;
 import net.neoforged.neoforge.fluids.capability.IFluidHandler.FluidAction;
@@ -73,6 +72,8 @@ public final class BoundaryColumn {
     private Direction accessFace;
     /** Classified once here at resolve time, so the executor never re-probes the block entity. */
     private boolean hosePulley;
+    /** A Create fluid tank, whose fluid is DRAWN inset (see {@link #renderedSurface()}). */
+    private boolean tankRender;
 
     private BoundaryColumn(BlockPos identity, BlockPos accessPos, double baseY,
                            int heightBlocks, int capacityMb, FluidStack contents, int contentMb,
@@ -131,14 +132,14 @@ public final class BoundaryColumn {
      */
     public static IFluidHandler findHandler(Level level, BlockPos pos, Direction face) {
         if (face != null) {
-            IFluidHandler sided = level.getCapability(Capabilities.FluidHandler.BLOCK, pos, face);
+            IFluidHandler sided = FluidCaps.at(level, pos, face);
             if (sided != null) return sided;
         }
-        IFluidHandler sideAgnostic = level.getCapability(Capabilities.FluidHandler.BLOCK, pos, null);
+        IFluidHandler sideAgnostic = FluidCaps.at(level, pos, null);
         if (sideAgnostic != null) return sideAgnostic;
         IFluidHandler anyFace = null;
         for (Direction side : Direction.values()) {
-            IFluidHandler faceCap = level.getCapability(Capabilities.FluidHandler.BLOCK, pos, side);
+            IFluidHandler faceCap = FluidCaps.at(level, pos, side);
             if (faceCap == null) continue;
             if (FluidPropagator.getPipe(level, pos.relative(side)) != null) return faceCap; // a connecting face
             if (anyFace == null) anyFace = faceCap;
@@ -163,7 +164,13 @@ public final class BoundaryColumn {
         // like a hose pulley — so it is a one-way SOURCE while it holds fluid and a one-way SINK while
         // empty. See HandlerRoles#isRelayEndpoint.
         if (HandlerRoles.isRelayEndpoint(level, pos)) return relayEndpoint(level, pos, face, cap);
-        if (level.getBlockEntity(pos) instanceof FluidTankBlockEntity tankBe) {
+        // The Create-tank path applies only to blocks that BEHAVE like Create tanks: one shared
+        // side-agnostic handler over the multiblock inventory. A SIDE-SPECIFIC derivative (TFMG's
+        // blast stove extends FluidTankBlockEntity but serves a different two-tank combined wrapper
+        // per axis) must resolve through its FACE handler instead — the tank path would model the
+        // internal gauge inventory, drop the access face, and read/equalize tanks the plumbed port
+        // cannot reach. accessFace != null is exactly "GraphBuilder saw per-face handlers" (§2).
+        if (face == null && level.getBlockEntity(pos) instanceof FluidTankBlockEntity tankBe) {
             return resolveTank(level, pos, tankBe);
         }
         if (level.getBlockEntity(pos) instanceof HosePulleyBlockEntity) {
@@ -184,7 +191,8 @@ public final class BoundaryColumn {
                 - CentrifugeField.headOffset(level, controllerPos, level.getGameTime())
                 + MomentumField.headOffset(level, controllerPos);
         return finiteReservoir(controllerPos, pos, baseY, height, inventory.getCapacity(),
-                fluid.copy(), fluid.getAmount(), SableCompat.getUpProjectionY(level, controllerPos));
+                fluid.copy(), fluid.getAmount(), SableCompat.getUpProjectionY(level, controllerPos))
+                .tankRendered();
     }
 
     /**
@@ -235,8 +243,10 @@ public final class BoundaryColumn {
         }
         if (capacity <= 0) return null;
 
-        // Only the generic path can be a side-specific handler (a tank/pulley/relay is side-agnostic),
-        // so this is where the access face rides onto the column for the later transfer.
+        // Side-specific handlers resolve HERE regardless of their block entity's ancestry (a real
+        // Create tank/pulley/relay is side-agnostic; a tank-derived machine with per-face ports is
+        // not a tank) — so this is where the access face rides onto the column for the later
+        // transfer, and capacity/contents come from the plumbed FACE's own wrapper.
         double baseY = SableCompat.getColumnBaseY(level, pos, 1, 1)
                 - CentrifugeField.headOffset(level, pos, level.getGameTime())
                 + MomentumField.headOffset(level, pos);
@@ -528,6 +538,36 @@ public final class BoundaryColumn {
     private BoundaryColumn asHosePulley() {
         this.hosePulley = true;
         return this;
+    }
+
+    private BoundaryColumn tankRendered() {
+        this.tankRender = true;
+        return this;
+    }
+
+    // Create's FluidTankRenderer draws the fluid INSET: it sits capHeight+minPuddle above the block
+    // bottom and capHeight below the top, so it fills only (height − 2·capHeight − minPuddle) of the
+    // column. Our own head/surface uses the FULL block range; the two diverge by up to ~0.31 block at
+    // low fill (a settled pipe then sits well below the tank's VISIBLE waterline — "the surface level
+    // inside the tanks is bumped from Create's model"). The SETTLE/render side tracks the rendered
+    // surface below so a pipe meets the fluid the player actually sees; the SOLVE keeps the full-range
+    // head for its conservation math (changing it would shift equalization volumes), but its GATES —
+    // the draw lip, the lip drain cap, and the weir/cavitation potentials — read the rendered surface
+    // too, because the player judges them against the fluid on screen.
+    private static final double TANK_RENDER_FLOOR = 1.0 / 4 + 1.0 / 16;   // capHeight + minPuddle
+    private static final double TANK_RENDER_LOSS = 2.0 / 4 + 1.0 / 16;    // 2·capHeight + minPuddle
+
+    /**
+     * The surface elevation where the fluid is actually DRAWN — for a Create fluid tank the inset
+     * render range (so a settled pipe's waterline meets the tank's visible fluid, which sits above
+     * {@code baseY + fill} at low fill), else the plain {@link #liquidSurface()}. Used by the
+     * settle, the {@code /pipegraph} surface marker, and every player-visible GATE (draw lip,
+     * lip drain cap, weir-crest potential) — the solve's conservation math keeps {@link #head}.
+     */
+    public double renderedSurface() {
+        if (!tankRender) return liquidSurface();
+        double renderedFill = TANK_RENDER_FLOOR + fillFraction() * (heightBlocks - TANK_RENDER_LOSS);
+        return baseY + renderedFill * fillScale;
     }
 
     /** Volume in mB needed to raise this column's surface by one block. */

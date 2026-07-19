@@ -8,8 +8,9 @@ import de.devin.pipesnphysics.engine.graph.Edge;
 import de.devin.pipesnphysics.engine.graph.Graph;
 import de.devin.pipesnphysics.engine.graph.Node;
 import de.devin.pipesnphysics.engine.store.PipeStore;
+import de.devin.pipesnphysics.engine.store.PipeWindow;
 import net.minecraft.core.BlockPos;
-import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.level.Level;
 
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -27,7 +28,26 @@ import java.util.Map;
  * — that lifetime is what makes the budgets per-tick.
  */
 public final class FlowNetwork {
-    final ServerLevel level;
+    /** Ticks of buffered rate a flowing cell holds — the front crosses ~one cell per this many ticks. */
+    private static final int DEPTH_TICKS = 4;
+    /** The depth floor as a fraction of a cell (1/this): the thinnest coherent, visible plug. */
+    private static final int MIN_DEPTH_DIVISOR = 8;
+
+    /**
+     * The column depth a run flowing at {@code solvedRateMb} carries per cell — the gate quantity
+     * everywhere plug flow used to require a FULL cell: {@link #DEPTH_TICKS} of buffered rate, so
+     * a front's arrival stays bounded regardless of rate, floored at a visible sliver of the bore
+     * and never more than a cell. A trickle runs as a shallow stream; full-bore appears only where
+     * the line is pressurized (the flowing top-up) or backed up. At and above a quarter cell per
+     * tick this IS the old full-cell gate.
+     */
+    public static int flowDepthMb(int solvedRateMb, int cellCapacity) {
+        if (cellCapacity <= 0) return 0;
+        return Math.clamp((long) DEPTH_TICKS * solvedRateMb,
+                Math.max(cellCapacity / MIN_DEPTH_DIVISOR, 1), cellCapacity);
+    }
+
+    final Level level;
     final Graph graph;
     /** mB one pipe cell holds; 0 = pipes store nothing and every run degrades to a wire. */
     final int cellCapacity = PipeStore.capacityMb();
@@ -35,7 +55,7 @@ public final class FlowNetwork {
     private final Map<BlockPos, PipeStore.Store> cells = new HashMap<>();
     private final Map<Integer, Reservoir> reservoirs = new HashMap<>();
 
-    public FlowNetwork(ServerLevel level, Graph graph) {
+    public FlowNetwork(Level level, Graph graph) {
         this.level = level;
         this.graph = graph;
 
@@ -85,23 +105,29 @@ public final class FlowNetwork {
         return SableCompat.getWorldY(level, pos) - 0.5;
     }
 
-    /**
-     * A pipe cell's stored volume lives in its BORE — the 6/16-wide fluid window the renderer
-     * draws — not the full block. Hydrostatic fill↔height conversions must use the bore, or a
-     * settled pipe's rendered surface sits visibly off the tank waterline it equalized with
-     * ("fluid height in the pipe doesn't match the tank" report).
-     */
-    static final double BORE_BOTTOM = 0.5 - 3.0 / 16; // matches the renderer's PIPE_RADIUS
-    static final double BORE_HEIGHT = 2 * (3.0 / 16);
+    // A pipe cell's stored fluid lives in — and renders in — the vertical WINDOW defined by
+    // {@link PipeWindow} (bore for a horizontal cell, full block for a vertical riser). The settle,
+    // the draw lip, and the renderer all read that one window, so a settled pipe's surface lands on
+    // the tank waterline it equalized with and the solver never conducts through a cell drawn empty.
 
-    /** The bottom of a cell's bore in true world space. */
-    double boreBottomY(BlockPos pos) {
-        return cellBottomY(pos) + BORE_BOTTOM;
+    /** The bottom of a cell's drawn fluid window in true world space. */
+    double windowBottomY(BlockPos pos) {
+        return PipeWindow.bottomY(level, pos);
     }
 
-    /** The fraction of a cell's bore sitting below the given surface line, clamped 0..1. */
-    double boreFill(BlockPos pos, double line) {
-        return Math.clamp((line - boreBottomY(pos)) / BORE_HEIGHT, 0, 1);
+    /** The height of a cell's drawn fluid window: the full block for a riser, else the bore. */
+    double windowHeight(BlockPos pos) {
+        return PipeWindow.height(level, pos);
+    }
+
+    /** The fraction of a cell's fluid window sitting below the given surface line, clamped 0..1. */
+    double windowFill(BlockPos pos, double line) {
+        return PipeWindow.fill(level, pos, line);
+    }
+
+    /** The draw-lip elevation of an opening through a cell (the pipe's outer shell bottom). */
+    double lipY(BlockPos pos) {
+        return PipeWindow.lipY(level, pos);
     }
 
     /** A cell's centre elevation in true world space (Sable-projected). */

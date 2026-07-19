@@ -107,14 +107,18 @@ public final class PipeProbe {
         byte status = status(solution, edge.index(), actualFlow);
         byte detail = edgeDetail(level, graph, solution, edge, status, fluid);
         // The air-break margin ("how much more lift before the column snaps over the crest") is an
-        // EARLY warning, meaningful only while the column still holds. Once the solver has ALREADY
-        // broken it (a CREST edge) there is no margin left: this recomputed-from-display-heads value
-        // can read a small POSITIVE number right at the threshold and would then contradict the
-        // "air break over the crest" reason the same run shows. Suppress it when broken — the client
-        // prints the concrete fix instead.
+        // EARLY warning about LIFT — meaningful only while fluid is moving or a pump is being asked
+        // to raise it. On a settled NO_FLOW run nothing is lifting, so it is noise (like the reach
+        // line, suppressed the same way): a resting pipe sitting a hair above its SOLVED waterline
+        // would read a spurious margin — and after the Create-tank render inset that solved surface
+        // sits BELOW the visible fill, so the cell is actually SUBMERGED, not in suction. Also
+        // suppressed once the solver has broken the column (a CREST edge): there is no margin left,
+        // and this recomputed value can read a small positive number that contradicts the "air break
+        // over the crest" reason the same run shows — the client prints the concrete fix instead.
         boolean crestBroken = detail == PipeStatusPayload.DETAIL_CREST;
-        boolean hasSuction = hasPressure && !crestBroken
-                && runWorstPressure < -0.05f && !isGas(fluid);
+        boolean hasSuction = hasPressure && !crestBroken && !isGas(fluid)
+                && status != PipeStatusPayload.STATUS_NO_FLOW
+                && runWorstPressure < -0.05f;
         float suctionMargin = hasSuction
                 ? (float) (PipesNPhysicsConfig.SUCTION_LIMIT.get() + runWorstPressure) : 0;
         return new PipeStatusPayload(pos, status, actualFlow, direction,
@@ -394,7 +398,9 @@ public final class PipeProbe {
 
         byte status = flows.status();
         byte detail = nodeDetail(level, graph, solution, node, status, fluid);
-        boolean hasSuction = hasPressure && pressure < -0.05f && !isGas(fluid);
+        // The air-break margin is a LIFT diagnostic — noise on a settled run (see the edge probe).
+        boolean hasSuction = hasPressure && !isGas(fluid)
+                && status != PipeStatusPayload.STATUS_NO_FLOW && pressure < -0.05f;
         float suctionMargin = hasSuction
                 ? (float) (PipesNPhysicsConfig.SUCTION_LIMIT.get() + pressure) : 0;
 

@@ -6,8 +6,10 @@ import com.simibubi.create.content.fluids.tank.FluidTankBlockEntity;
 import com.simibubi.create.infrastructure.config.AllConfigs;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.engine.EngineTickHandler;
+import de.devin.pipesnphysics.engine.boundary.FluidCaps;
 import de.devin.pipesnphysics.engine.boundary.FluidTankGeometry;
 import de.devin.pipesnphysics.engine.boundary.OpenEndPipes;
+import de.devin.pipesnphysics.engine.boundary.RelayDetector;
 import de.devin.pipesnphysics.engine.graph.GraphCache;
 import de.devin.pipesnphysics.engine.store.PipeStore;
 import net.minecraft.core.BlockPos;
@@ -17,7 +19,6 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.level.material.FlowingFluid;
 import net.neoforged.bus.api.EventPriority;
 import net.neoforged.bus.api.SubscribeEvent;
-import net.neoforged.neoforge.capabilities.Capabilities;
 import net.neoforged.neoforge.event.level.BlockEvent;
 import net.neoforged.neoforge.fluids.FluidStack;
 import net.neoforged.neoforge.fluids.FluidType;
@@ -55,6 +56,8 @@ public final class NetworkEditHandler {
             OpenEndPipes.onPipeRemoved(level, event.getPos());
             // Drop any sticky pulley output role at this pos, so a rebuilt pulley may drain again.
             OpenEndPipes.forgetPulley(level, event.getPos());
+            // Drop any learned relay role, so a tank placed here does not inherit the demotion.
+            RelayDetector.forget(event.getPos());
             wakeAround(level, event.getPos());
         }
     }
@@ -117,8 +120,7 @@ public final class NetworkEditHandler {
         }
         for (Direction dir : Direction.values()) {
             if (remaining <= 0) return 0;
-            IFluidHandler handler = level.getCapability(
-                    Capabilities.FluidHandler.BLOCK, pos.relative(dir), dir.getOpposite());
+            IFluidHandler handler = FluidCaps.at(level, pos.relative(dir), dir.getOpposite());
             if (handler != null) {
                 remaining -= handler.fill(content.copyWithAmount(remaining), FluidAction.EXECUTE);
             }
@@ -177,7 +179,6 @@ public final class NetworkEditHandler {
     }
 
     private static boolean hasHandler(Level level, BlockPos pos) {
-        return level.isLoaded(pos)
-                && level.getCapability(Capabilities.FluidHandler.BLOCK, pos, null) != null;
+        return level.isLoaded(pos) && FluidCaps.at(level, pos, null) != null;
     }
 }

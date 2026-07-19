@@ -24,6 +24,10 @@ import java.util.Map;
  *    {@code null} side and every non-top face, plus a DIFFERENT SECONDARY tank on {@link Direction#UP}.
  *    A null cap exists, so the engine only reads the top tank if it treats "a face whose handler differs
  *    from the null side" as side-specific (identity, not null-cap-absence).
+ *  - {@link Blocks#OBSIDIAN} — the shape of TFMG's blast stove: a provider that THROWS on the
+ *    {@code null}-side query its lambda never expected (NeoForge allows null there), serving a tank
+ *    only on real faces. The engine must degrade it to side-specific, never crash the tick
+ *    ({@code FluidCaps}).
  * Backing tanks are per BlockPos so a test can pre-fill a side and read it back through the engine.
  * Registration is gated to {@code !production} by the caller, so it never ships.
  */
@@ -44,6 +48,12 @@ public final class TestSideHandlers {
         // the top exposes a DIFFERENT one — so it is side-specific only under the identity discriminator.
         event.registerBlock(Capabilities.FluidHandler.BLOCK, (level, pos, state, be, side) ->
                 side == Direction.UP ? secondaryAt(pos) : primaryAt(pos), Blocks.WET_SPONGE);
+        // Blast-stove shape: the lambda dereferences the side unconditionally, so the (legal)
+        // null-side query throws — the crash a foreign provider once caused inside the graph BFS.
+        event.registerBlock(Capabilities.FluidHandler.BLOCK, (level, pos, state, be, side) -> {
+            if (side.getAxis().isVertical()) return null;
+            return primaryAt(pos);
+        }, Blocks.OBSIDIAN);
     }
 
     /** The backing tank for one face — a test fills this, then reads it through the engine. */

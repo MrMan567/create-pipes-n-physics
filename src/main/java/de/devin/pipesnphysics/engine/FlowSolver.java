@@ -11,6 +11,7 @@ import de.devin.pipesnphysics.engine.graph.Graph;
 import de.devin.pipesnphysics.engine.graph.Node;
 import de.devin.pipesnphysics.engine.solve.NetworkSolver;
 import de.devin.pipesnphysics.engine.store.PipeStore;
+import de.devin.pipesnphysics.engine.store.PipeWindow;
 import de.devin.pipesnphysics.engine.valve.ValveThrottle;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -299,7 +300,8 @@ public final class FlowSolver {
      * gates instead of self-priming (wire mode, capacity 0, stores nothing and stays always-wet,
      * keeping the legacy instant behaviour).
      */
-    record EdgeStatics(double throttle, double crestHeight, double crestPos, boolean crestWet) {}
+    record EdgeStatics(double throttle, double crestHeight, double crestFloor, double crestPos,
+                       boolean crestWet) {}
 
     /** Resolve every edge's fluid-independent {@link EdgeStatics} once, before the per-fluid passes. */
     private static Map<Integer, EdgeStatics> computeEdgeStatics(Level level, Graph graph) {
@@ -316,13 +318,18 @@ public final class FlowSolver {
                     crestCell = edge.pipes().get(i);
                 }
             }
+            // The crest cell's LIP (its outer shell bottom, the draw-lip datum) is the WEIR
+            // threshold: a supply reaching it pours into the cell and over by plain gravity, so
+            // a dry crest only gates below it. Same datum as the draw lip, so a tank resting AT
+            // its lip sits exactly at the gate boundary, never walled a hair above it.
+            double crestFloor = crestCell != null ? PipeWindow.lipY(level, crestCell) : Double.NaN;
             boolean crestWet = true;
             if (crestCell != null && PipeStore.capacityMb() > 0) {
                 PipeStore.Store cell = PipeStore.at(level, crestCell);
                 crestWet = cell != null && cell.amount() > 0;
             }
-            statics.put(edge.index(),
-                    new EdgeStatics(runThrottle(level, edge), crestHeight, crestPos, crestWet));
+            statics.put(edge.index(), new EdgeStatics(
+                    runThrottle(level, edge), crestHeight, crestFloor, crestPos, crestWet));
         }
         return statics;
     }

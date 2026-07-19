@@ -3,7 +3,7 @@ package de.devin.pipesnphysics.engine;
 import de.devin.pipesnphysics.engine.graph.Graph;
 import de.devin.pipesnphysics.engine.graph.GraphBuilder;
 import net.minecraft.core.BlockPos;
-import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.level.Level;
 
 /**
  * Top-level entry point for the fluid engine.
@@ -34,12 +34,12 @@ public final class FluidEngine {
     private FluidEngine() {}
 
     /** Build a graph without solving. Used by /pipegraph and the overlay. */
-    public static Graph buildGraph(ServerLevel level, BlockPos seedPos) {
+    public static Graph buildGraph(Level level, BlockPos seedPos) {
         return GraphBuilder.build(level, seedPos);
     }
 
     /** Build and solve a FRESH graph without applying anything. Used by the visualizer. */
-    public static Solution solveFresh(ServerLevel level, BlockPos seedPos) {
+    public static Solution solveFresh(Level level, BlockPos seedPos) {
         Graph graph = GraphBuilder.build(level, seedPos);
         return FlowSolver.solve(level, graph);
     }
@@ -50,7 +50,7 @@ public final class FluidEngine {
      * the solve — and every exchange is clamped by what the source really gives and the sink
      * really takes, so a stale plan degrades to a smaller (or zero) movement instead of an error.
      */
-    public static PipeFlowExecutor.Actuals apply(ServerLevel level, Graph graph, Solution solution) {
+    public static PipeFlowExecutor.Actuals apply(Level level, Graph graph, Solution solution) {
         return PipeFlowExecutor.run(level, graph, solution);
     }
 }

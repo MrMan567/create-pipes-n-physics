@@ -86,7 +86,7 @@ public final class HandlerRoles {
         if (state.is(SINK_ONLY)) return "sink-only (sink_only tag) — the engine fills it but never drains it";
         FluidHandlerRole code = FluidHandlerApi.role(state.getBlock());
         if (code != null) return code.name().toLowerCase() + " (registered in code via the API)";
-        if (PipesNPhysicsConfig.AUTO_DETECT_RELAY_HANDLERS.get() && RelayDetector.isRelay(state.getBlock())) {
+        if (PipesNPhysicsConfig.AUTO_DETECT_RELAY_HANDLERS.get() && RelayDetector.isRelay(pos)) {
             return "relay (learned by the detector this session) — bottomless one-way endpoint";
         }
         return "plain capacitor (no explicit role) — a normal tank unless the detector demotes it";
@@ -115,14 +115,15 @@ public final class HandlerRoles {
      * (like a hose pulley): a one-way SOURCE while they hold fluid, a one-way SINK while empty — so the
      * engine always drains a receiving connector and always fills a sending one, no matter the levels,
      * instead of calling them "balanced" and refusing to move fluid (the equalization stall). True for
-     * the relay role (tag or code) or a detector-learned relay, unless pinned as a real tank / conduit.
+     * the relay role (tag or code) or a detector-learned relay position, unless pinned as a real
+     * tank / conduit.
      */
     public static boolean isRelayEndpoint(Level level, BlockPos pos) {
         BlockState state = level.getBlockState(pos);
         FluidHandlerRole role = explicitRole(state);
         if (role == FluidHandlerRole.RELAY) return true;
-        return role == null && PipesNPhysicsConfig.AUTO_DETECT_RELAY_HANDLERS.get()
-                && RelayDetector.isRelay(state.getBlock());
+        return role == null && !level.isClientSide() && PipesNPhysicsConfig.AUTO_DETECT_RELAY_HANDLERS.get()
+                && RelayDetector.isRelay(pos); // learned relays are a server-only, pos-keyed notion
     }
 
     /**

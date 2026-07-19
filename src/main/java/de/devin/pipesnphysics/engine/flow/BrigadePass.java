@@ -74,18 +74,19 @@ public final class BrigadePass {
     /**
      * Fluid arriving at a node this tick, for a consumer pulling through it: a reservoir drains
      * on demand; a junction/gate node yields its SLOT — plug flow: the slot passes fluid on only
-     * once FULL, so the junction cell visibly fills before anything continues past it (feeders
-     * top it up in their own ticks); a slot-less pass-through (a pump) pulls straight from its
-     * feeders' tails, recursing through wires. The visited set breaks pull cycles.
+     * once it pools the pulling run's flow depth ({@code depthMb}), so the junction cell visibly
+     * fills before anything continues past it (feeders top it up in their own ticks); a slot-less
+     * pass-through (a pump) pulls straight from its feeders' tails, recursing through wires. The
+     * visited set breaks pull cycles.
      */
-    int pullArrivingAt(int nodeIndex, FluidStack wanted, int amount, Set<Integer> visited) {
+    int pullArrivingAt(int nodeIndex, FluidStack wanted, int amount, int depthMb, Set<Integer> visited) {
         if (amount <= 0 || !visited.add(nodeIndex)) return 0;
         Reservoir reservoir = network.reservoirAt(nodeIndex);
         if (reservoir != null) return reservoir.drain(wanted, amount);
 
         PipeStore.Store slot = network.slotAt(nodeIndex);
         if (slot != null) {
-            if (slot.amount() >= network.cellCapacity
+            if (slot.amount() >= depthMb
                     && FluidStack.isSameFluidSameComponents(slot.fluid(), wanted)) {
                 return slot.extract(amount).getAmount();
             }
@@ -106,9 +107,10 @@ public final class BrigadePass {
     /**
      * A run ticks only after every run OUT of its downstream PASS-THROUGH node has ticked (a
      * reservoir buffers, so it breaks the dependency chain). A junction slot buffers too, but it
-     * only conducts once FULL (and does not exist in wire mode), so runs into a pass-through
-     * still order behind the runs out of it — only a reservoir truly decouples. Kahn's algorithm
-     * over that relation; cycle members that never free up are appended in discovery order.
+     * only conducts once it pools the consumer's flow depth (and does not exist in wire mode), so
+     * runs into a pass-through still order behind the runs out of it — only a reservoir truly
+     * decouples. Kahn's algorithm over that relation; cycle members that never free up are
+     * appended in discovery order.
      */
     private List<FlowingRun> consumersFirst() {
         Map<Integer, Integer> waitingOn = new HashMap<>();
@@ -148,10 +150,13 @@ public final class BrigadePass {
 
     /**
      * The lip drain cap per source reservoir: at most half its volume above the LOWEST opening it
-     * flows out of this tick. A pump actively pulling the reservoir is exempt when
-     * {@code pumpDrainAnyLevel} is on (the dip-tube rule), as are gases and non-finite endpoints
-     * (open mouths, hose pulleys, relays — no surface to flap across a lip). The cap's formula
-     * and consumption live on {@link Reservoir#capDrawAtLip}.
+     * flows out of this tick. The lip of an opening is its cell's LIP (the pipe's outer shell
+     * bottom, {@code PipeWindow.lipY}) for gravity flow, the block floor when a pump actively
+     * pulls the reservoir (suction reaches the puddle under the pipe), and gone entirely when
+     * {@code pumpDrainAnyLevel} is on (the dip-tube rule) — mirroring {@code FluidPass.openingLip}.
+     * Gases and non-finite endpoints (open mouths, hose pulleys, relays — no surface to flap
+     * across a lip) are exempt. The cap's formula and consumption live on
+     * {@link Reservoir#capDrawAtLip}.
      */
     private void installLipCaps() {
         boolean drainAny = PipesNPhysicsConfig.PUMP_DRAIN_ANY_LEVEL.get();
@@ -164,9 +169,11 @@ public final class BrigadePass {
             for (Edge edge : network.graph.edgesOf(node.index())) {
                 FlowingRun run = runs.get(edge.index());
                 if (run == null || run.upstreamNode() != node.index()) continue;
-                if (drainAny && pumpPullsFrom(edge, node.index())) continue;
+                boolean pumpPulls = pumpPullsFrom(edge, node.index());
+                if (drainAny && pumpPulls) continue;
                 BlockPos opening = PipeGeometry.adjacentCell(network.graph, edge, node.index());
-                lowestLip.merge(reservoir, network.cellBottomY(opening), Math::min);
+                double lip = pumpPulls ? network.cellBottomY(opening) : network.lipY(opening);
+                lowestLip.merge(reservoir, lip, Math::min);
             }
         }
         lowestLip.forEach(Reservoir::capDrawAtLip);

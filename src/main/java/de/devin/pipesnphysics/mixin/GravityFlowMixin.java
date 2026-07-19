@@ -42,8 +42,18 @@ public abstract class GravityFlowMixin extends BlockEntityBehaviour {
     @Inject(method = "tick", at = @At("HEAD"), cancellable = true)
     private void pipesnphysics$cancelCreateTransport(CallbackInfo ci) {
         if (!PipesNPhysicsConfig.ENABLE_ENGINE.get()) return;
-        if (blockEntity.isVirtual()) return; // Ponder scenes & schematics keep Create's animation
         Level level = blockEntity.getLevel();
+        if (blockEntity.isVirtual()) {
+            // Our engine now runs live in Ponder (a client-side virtual level), so cancel Create's
+            // transport there and let PonderEngineDriver own the fluid. Schematic ghosts are also
+            // client-virtual but never tick transport, so this only bites ponder; server-side virtual
+            // and the flag-off case keep Create's animation (the old behavior). Checked without
+            // referencing PonderLevel, so this COMMON mixin needs no client-only class.
+            if (level != null && level.isClientSide() && PipesNPhysicsConfig.ENABLE_PONDER_ENGINE.get()) {
+                ci.cancel();
+            }
+            return;
+        }
         if (level == null) return;
         // The heartbeat (markDirty) lives on the block-entity tick now (PipeHeartbeatMixin), so it
         // survives even when a peer addon wins this HEAD-cancel race and skips this callback.

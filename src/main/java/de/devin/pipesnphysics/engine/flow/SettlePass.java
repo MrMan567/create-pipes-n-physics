@@ -66,12 +66,12 @@ public final class SettlePass {
         Double head = solution.nodeHeads().get(node.index());
         if (head == null) return;
         int target = (int) Math.round(
-                network.boreFill(node.pos(), head + SettlingRun.SURFACE_EPS) * network.cellCapacity);
+                network.windowFill(node.pos(), head) * network.cellCapacity);
         int rate = SettlingRun.settleRate(network.cellCapacity);
         for (Edge edge : network.graph.edgesOf(node.index())) {
             // The brigade owns the cells of edges it flowed this tick: exchanging with them here
-            // would move fluid outside their exit budgets and trim the slot below capacity,
-            // breaking the "a slot conducts only once FULL" plug gate next tick.
+            // would move fluid outside their exit budgets and trim the slot below its pooled
+            // depth, breaking the "a slot conducts only once at flow depth" plug gate next tick.
             if (flowedEdges.contains(edge.index())) continue;
             BlockPos adjacent = PipeGeometry.adjacentCell(network.graph, edge, node.index());
             if (adjacent == null || adjacent.equals(node.pos())) continue;

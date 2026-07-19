@@ -1,11 +1,14 @@
 package de.devin.pipesnphysics.client;
 
 import de.devin.pipesnphysics.PipesNPhysics;
+import de.devin.pipesnphysics.client.ponder.PnpPonderPlugin;
+import net.createmod.ponder.foundation.PonderIndex;
 import net.minecraft.client.resources.model.ModelResourceLocation;
 import net.minecraft.resources.ResourceLocation;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
+import net.neoforged.fml.event.lifecycle.FMLClientSetupEvent;
 import net.neoforged.neoforge.client.event.ModelEvent;
 
 /**
@@ -21,5 +24,10 @@ public final class ClientEvents {
     @SubscribeEvent
     public static void onRegisterAdditionalModels(ModelEvent.RegisterAdditional event) {
         event.register(ARROW_MODEL);
+    }
+
+    @SubscribeEvent
+    public static void onClientSetup(FMLClientSetupEvent event) {
+        event.enqueueWork(() -> PonderIndex.addPlugin(new PnpPonderPlugin()));
     }
 }

@@ -51,6 +51,7 @@ public class PipesNPhysicsConfig {
     public static final ModConfigSpec.IntValue PUMP_RANGE_PRESERVE_SECONDS;
     public static final ModConfigSpec.BooleanValue ENABLE_PIPE_SWAP;
     public static final ModConfigSpec.BooleanValue PIPE_LEVEL_RENDER;
+    public static final ModConfigSpec.BooleanValue ENABLE_PONDER_ENGINE;
     public static final ModConfigSpec.DoubleValue PIPE_LEVEL_FLOW_SPEED;
     public static final ModConfigSpec.BooleanValue FLUID_TILT_ENABLED;
     public static final ModConfigSpec.BooleanValue FLUID_WAVE_MESH;
@@ -290,6 +291,11 @@ public class PipesNPhysicsConfig {
                         "1.0 = default; lower it to calm a fast flow, raise it to make it livelier. Only the",
                         "animation speed changes, not the actual fluid transfer.")
                 .defineInRange("pipeLevelFlowSpeed", 1.0, 0.0, 10.0);
+        ENABLE_PONDER_ENGINE = client
+                .comment("Run the fluid engine live inside Ponder scenes, so the mod's own physics",
+                        "(reach bounded by height, siphons, communicating vessels) drive the animation",
+                        "instead of Create's stock pipe transport. Off = Ponder shows Create's behavior.")
+                .define("enablePonderEngine", true);
         client.pop();
         client.push("sableFluidPhysics");
         FLUID_TILT_ENABLED = client

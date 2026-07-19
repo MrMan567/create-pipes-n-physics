@@ -14,6 +14,7 @@ import de.devin.pipesnphysics.engine.solve.NetworkSolver.BranchSpec;
 import de.devin.pipesnphysics.engine.solve.NetworkSolver.NodeSpec;
 import de.devin.pipesnphysics.engine.solve.NetworkSolver;
 import de.devin.pipesnphysics.engine.solve.UnionFind;
+import de.devin.pipesnphysics.engine.store.PipeWindow;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.world.level.Level;
@@ -205,13 +206,14 @@ final class FluidPass {
         // BEFORE their own simulate guard, so a foreign fluid's pass corrupts the mouth. The handler
         // is still resolved above for its side effects (it populates the open-end cache and drives
         // manageSource, which apply() depends on) — that is normal per-tick management, not a probe.
-        // An intake mouth gives only its own fluid; an empty outlet accepts any unclaimed pass fluid.
+        // An intake mouth gives only its own fluid; an empty outlet accepts any unclaimed pass
+        // fluid and VENTS what it cannot place, exactly like Create's own mouth (deliberate:
+        // the disposal gate that walled undisposable fluids was reverted by owner decision).
         if (column.isOpenEnd()) {
             if (column.isInfiniteSource()) {
                 return FluidStack.isSameFluidSameComponents(column.contents(), sample);
             }
-            if (claimedEmpties.contains(column.identity())) return false;
-            return true;
+            return !claimedEmpties.contains(column.identity());
         }
         if (cap == null) return false;
         if (!column.isEmpty()) {
@@ -238,7 +240,11 @@ final class FluidPass {
         if (!column.isFiniteReservoir()) return new NodeSpec(column.capacitance(), head);
         double span = column.heightBlocks() * column.fillScale();
         double ceiling = NetworkSolver.surfaceHead(column.baseY(), span, gas);
-        return new NodeSpec(column.capacitance(), head, Double.NEGATIVE_INFINITY, ceiling);
+        // The crest-gating potential seeds from the RENDERED surface (a Create tank draws its
+        // fluid inset, ABOVE the liquid surface at low fills), so the weir gate agrees with the
+        // fluid the player sees — like the draw lip. The solved head stays the liquid surface.
+        double reach = gas ? head : column.renderedSurface();
+        return new NodeSpec(column.capacitance(), head, Double.NEGATIVE_INFINITY, ceiling, reach);
     }
 
     // ------------------------------------------------------------------ branch assembly
@@ -316,6 +322,7 @@ final class FluidPass {
         double lipA = Double.NaN;
         double lipB = Double.NaN;
         double crestHeight = Double.NaN;
+        double crestFloor = Double.NaN;
         double crestPos = 0;
         boolean crestWet = true;
 
@@ -363,20 +370,24 @@ final class FluidPass {
             boolean drainAny = PipesNPhysicsConfig.PUMP_DRAIN_ANY_LEVEL.get();
             if (columnA != null) {
                 BlockPos opening = PipeGeometry.adjacentCell(graph, edge, edge.a());
-                lipA = SableCompat.getWorldY(level, opening) - 0.5;
                 if (drainAny && pumpPullsA) {
                     lipA = Double.NEGATIVE_INFINITY;
-                } else if (!canDrawFrom(graph.node(edge.a()), columnA, opening, lipA)) {
-                    allowedSign = combineSign(allowedSign, -1);
+                } else {
+                    lipA = openingLip(opening, pumpPullsA);
+                    if (!canDrawFrom(graph.node(edge.a()), columnA, opening, lipA)) {
+                        allowedSign = combineSign(allowedSign, -1);
+                    }
                 }
             }
             if (columnB != null) {
                 BlockPos opening = PipeGeometry.adjacentCell(graph, edge, edge.b());
-                lipB = SableCompat.getWorldY(level, opening) - 0.5;
                 if (drainAny && pumpPullsB) {
                     lipB = Double.NEGATIVE_INFINITY;
-                } else if (!canDrawFrom(graph.node(edge.b()), columnB, opening, lipB)) {
-                    allowedSign = combineSign(allowedSign, +1);
+                } else {
+                    lipB = openingLip(opening, pumpPullsB);
+                    if (!canDrawFrom(graph.node(edge.b()), columnB, opening, lipB)) {
+                        allowedSign = combineSign(allowedSign, +1);
+                    }
                 }
             }
             // A lip conflict (e.g. a pump trying to draw from below a tank's
@@ -384,6 +395,7 @@ final class FluidPass {
             if (allowedSign == Integer.MIN_VALUE) return;
 
             crestHeight = statics.crestHeight();
+            crestFloor = statics.crestFloor();
             crestPos = statics.crestPos();
             crestWet = statics.crestWet();
         }
@@ -406,7 +418,7 @@ final class FluidPass {
         // it caps the run's flow to {@code throttle × fully-open flow}, so 50% always means half,
         // wherever the valve sits. The angle is carried on the meta for that loop.
         branches.add(new BranchSpec(solverA, solverB, conductance, emf, allowedSign,
-                crestHeight, crestPos, crestWet));
+                crestHeight, crestFloor, crestPos, crestWet));
         meta.add(new BranchMeta(edge.index(), columnA, columnB, lipA, lipB,
                 driveNode, driveHead, driveInternalConductance, throttle));
         // Whether this is a held FEED candidate (a pump driving out toward a shut gate) is decided
@@ -460,14 +472,29 @@ final class FluidPass {
     }
 
     /**
-     * Fluid can only leave a column through an opening its surface reaches. Open
-     * ends are exempt: their opening is inside the fluid by construction (a pipe
-     * mouth submerged in a lake), wherever it points.
+     * The draw-lip elevation of an opening: gravity flow leaves once the surface reaches the
+     * opening cell's LIP — the pipe's outer shell bottom ({@link PipeWindow#lipY}), so a tank
+     * settles where its fluid stops touching the pipe the player sees — while a pump actively
+     * pulling the column reaches the opening's BLOCK floor (its suction takes the puddle under
+     * the pipe too — what lets a base-level pump move ALL fluid), or anywhere under
+     * pumpDrainAnyLevel.
+     */
+    private double openingLip(BlockPos opening, boolean pumpPulls) {
+        return pumpPulls ? SableCompat.getWorldY(level, opening) - 0.5
+                : PipeWindow.lipY(level, opening);
+    }
+
+    /**
+     * Fluid can only leave a column through an opening its surface reaches — its RENDERED
+     * surface: the player judges the lip against the fluid they SEE, and a Create tank draws
+     * its fluid inset (up to ~0.31 ABOVE the liquid surface at low fills), so gating on the
+     * liquid surface walled a tank whose visible fluid stood well over the pipe ("the fluid
+     * inside the tank is higher than the lip, like a lot higher"). Open ends are exempt: their
+     * opening is inside the fluid by construction (a pipe mouth submerged in a lake).
      */
     private boolean canDrawFrom(Node handlerNode, BoundaryColumn column, BlockPos opening, double lip) {
         if (column.isOpenEnd() || column.isInfiniteSource()) return true;
-        double surface = column.head(false);
-        if (surface <= lip) return false;
+        if (column.renderedSurface() <= lip) return false;
         return SableCompat.canFluidReachPipe(level, handlerNode.pos(), opening, column.fillFraction());
     }
 
@@ -545,7 +572,8 @@ final class FluidPass {
             BranchSpec spec = branches.get(b);
             scaled.add(scale[b] == 1 ? spec
                     : new BranchSpec(spec.a(), spec.b(), spec.conductance() * scale[b], spec.emf(),
-                            spec.allowedSign(), spec.crestHeight(), spec.crestPos(), spec.crestWet()));
+                            spec.allowedSign(), spec.crestHeight(), spec.crestFloor(),
+                            spec.crestPos(), spec.crestWet()));
         }
         return scaled;
     }

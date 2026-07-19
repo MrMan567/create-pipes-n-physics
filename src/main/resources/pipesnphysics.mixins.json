@@ -23,7 +23,10 @@
   ],
   "client": [
     "GlassPipeVisualMixin",
-    "TransparentStraightPipeRendererMixin"
+    "TransparentStraightPipeRendererMixin",
+    "PonderSceneOverrideMixin",
+    "PonderSceneTickMixin",
+    "PonderSceneAccessor"
   ],
   "injectors": {
     "defaultRequire": 1

@@ -5,7 +5,7 @@ import de.devin.pipesnphysics.engine.flow.FlowLedger;
 import de.devin.pipesnphysics.engine.flow.FlowNetwork;
 import de.devin.pipesnphysics.engine.flow.SettlePass;
 import de.devin.pipesnphysics.engine.graph.Graph;
-import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.level.Level;
 
 import java.util.HashSet;
 import java.util.Set;
@@ -20,7 +20,9 @@ import java.util.Set;
  * fluid pass — every flowing edge becomes a {@code FlowingRun} that advances its contents
  * downstream by at most the solved rate, consumers-first so a chain moves one step everywhere in
  * the same tick; sources drain into the pipes, sinks fill only from fluid that actually exits
- * them. Then one {@link SettlePass} over everything that did not flow — each idle edge is a
+ * them. The plug gates require the run's {@linkplain FlowNetwork#flowDepthMb flow depth}, not a
+ * full cell, so a trickle streams shallow while pressure or back-up still packs full-bore. Then
+ * one {@link SettlePass} over everything that did not flow — each idle edge is a
  * {@code SettlingRun} moving toward its hydrostatic resting profile (humps recede, submerged
  * cells fill, broken siphons hold barometric legs, held pump lines pack fill-only, headless runs
  * gravity-pool). Finally the flush: one sync per changed cell.
@@ -41,7 +43,7 @@ public final class PipeFlowExecutor {
 
     private PipeFlowExecutor() {}
 
-    public static Actuals run(ServerLevel level, Graph graph, Solution solution) {
+    public static Actuals run(Level level, Graph graph, Solution solution) {
         FlowNetwork network = new FlowNetwork(level, graph);
         FlowLedger ledger = new FlowLedger(solution.actualFlow());
 

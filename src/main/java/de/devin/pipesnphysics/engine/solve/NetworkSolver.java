@@ -81,11 +81,21 @@ public final class NetworkSolver {
      *                    ignored as input for zero-capacitance nodes)
      * @param floor       head at empty; the lower box bound (may be {@code -∞})
      * @param ceiling     head at full; the upper box bound (may be {@code +∞})
+     * @param reachHead   the surface the crest-gating potential seeds from — the RENDERED
+     *                    surface for a Create tank (drawn inset, ABOVE the liquid surface at
+     *                    low fills), so the weir/cavitation gates key on the fluid the player
+     *                    SEES; the conservation math keeps {@code head}. Defaults to head.
      */
-    public record NodeSpec(double capacitance, double head, double floor, double ceiling) {
+    public record NodeSpec(double capacitance, double head, double floor, double ceiling,
+                           double reachHead) {
         /** An unbounded node (junction, pump, or a reservoir whose saturation is handled elsewhere). */
         public NodeSpec(double capacitance, double head) {
-            this(capacitance, head, Double.NEGATIVE_INFINITY, Double.POSITIVE_INFINITY);
+            this(capacitance, head, Double.NEGATIVE_INFINITY, Double.POSITIVE_INFINITY, head);
+        }
+
+        /** A boxed node whose gating potential seeds from its own head. */
+        public NodeSpec(double capacitance, double head, double floor, double ceiling) {
+            this(capacitance, head, floor, ceiling, head);
         }
     }
 
@@ -98,17 +108,27 @@ public final class NetworkSolver {
      * @param emf          pump head in blocks, driving a→b flow when positive
      * @param allowedSign  +1 = only a→b flow allowed, -1 = only b→a, 0 = bidirectional
      * @param crestHeight  highest cell elevation along the run (blocks), or NaN for no gate
+     * @param crestFloor   the crest cell's LIP (its outer shell bottom, the draw-lip datum) —
+     *                     the WEIR threshold: a supply whose potential reaches it pours into the
+     *                     cell and over the top by plain gravity, so only a DRY crest whose floor
+     *                     sits above the supply gates outright
      * @param crestPos     fractional position of the crest along the run, 0 (at a) .. 1 (at b)
      * @param crestWet     whether the crest cell actually HOLDS fluid. Suction can hold an
-     *                     existing column, never create one: a DRY crest above the reachable
-     *                     potential gates the branch instead of letting it self-prime.
+     *                     existing column, never create one: a DRY crest whose floor sits above
+     *                     the reachable potential gates the branch instead of letting it self-prime.
      */
     public record BranchSpec(int a, int b, double conductance, double emf, int allowedSign,
-                             double crestHeight, double crestPos, boolean crestWet) {
+                             double crestHeight, double crestFloor, double crestPos, boolean crestWet) {
+        /** No-weir-band convenience (crestFloor = crestHeight) — what the solver tests model. */
+        public BranchSpec(int a, int b, double conductance, double emf, int allowedSign,
+                          double crestHeight, double crestPos, boolean crestWet) {
+            this(a, b, conductance, emf, allowedSign, crestHeight, crestHeight, crestPos, crestWet);
+        }
+
         /** Primed-column convenience (crestWet = true) — the shape every pre-priming test models. */
         public BranchSpec(int a, int b, double conductance, double emf, int allowedSign,
                           double crestHeight, double crestPos) {
-            this(a, b, conductance, emf, allowedSign, crestHeight, crestPos, true);
+            this(a, b, conductance, emf, allowedSign, crestHeight, crestHeight, crestPos, true);
         }
 
         public static BranchSpec passive(int a, int b, double conductance) {
@@ -364,8 +384,16 @@ public final class NetworkSolver {
         // siphon must not climb by itself (it used to: the sink drained at the solved trickle
         // while the "flow" just filled the ascending leg). A pump's EMF raises the potential
         // profile, so a powered line still primes over the rise; once fluid tops the crest the
-        // normal taper takes over and the siphon sustains pump-less.
-        if (!br.crestWet()) return 0;
+        // normal taper takes over and the siphon sustains pump-less. The self-prime bar is the
+        // crest cell's LIP, not its centre: a supply whose own potential reaches the cell's lip
+        // wets it and pours over the top by plain gravity (weir flow — a tank draining through a
+        // run at its own level), no suction involved; hard-gating that band let one idle tick's
+        // settle drain a crest cell and permanently lock out a working run.
+        if (!br.crestWet()) {
+            double supplyHead = flow >= 0 ? headA + Math.max(0, br.emf())
+                    : headB + Math.max(0, -br.emf());
+            if (supplyHead < br.crestFloor()) return 0;
+        }
         double taperBand = Math.max(0.5, suctionLimit * CREST_TAPER_FRACTION);
         return Math.clamp((suctionLimit - deficit) / taperBand, 0, 1);
     }
@@ -391,7 +419,7 @@ public final class NetworkSolver {
         int n = nodes.size();
         double[] pot = new double[n];
         for (int i = 0; i < n; i++) {
-            pot[i] = nodes.get(i).capacitance() > 0 ? nodes.get(i).head() : NO_SUPPLY;
+            pot[i] = nodes.get(i).capacitance() > 0 ? nodes.get(i).reachHead() : NO_SUPPLY;
         }
         for (int round = 0; round < n; round++) {
             boolean changed = false;

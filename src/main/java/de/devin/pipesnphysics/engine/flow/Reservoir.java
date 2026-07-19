@@ -3,7 +3,7 @@ package de.devin.pipesnphysics.engine.flow;
 import de.devin.pipesnphysics.engine.boundary.BoundaryColumn;
 import de.devin.pipesnphysics.engine.boundary.OpenEndPipes;
 import de.devin.pipesnphysics.engine.boundary.RelayDetector;
-import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.level.Level;
 import net.neoforged.neoforge.fluids.FluidStack;
 import net.neoforged.neoforge.fluids.capability.IFluidHandler;
 import net.neoforged.neoforge.fluids.capability.IFluidHandler.FluidAction;
@@ -23,13 +23,13 @@ public final class Reservoir {
     /** The last few mB may leave in one go, so columns drain to genuinely empty (shared dregs rule). */
     static final int DREGS_MB = 4;
 
-    private final ServerLevel level;
+    private final Level level;
     private final BoundaryColumn column;
     private int giveRemaining;
     private int takeRemaining;
     private double drawLipCapMb = Double.MAX_VALUE;
 
-    Reservoir(ServerLevel level, BoundaryColumn column, int maxFlowPerEndpoint) {
+    Reservoir(Level level, BoundaryColumn column, int maxFlowPerEndpoint) {
         this.level = level;
         this.column = column;
         this.giveRemaining = maxFlowPerEndpoint;
@@ -63,7 +63,7 @@ public final class Reservoir {
         if (moved.isEmpty()) return 0;
         giveRemaining -= moved.getAmount();
         drawLipCapMb -= moved.getAmount(); // the lip cap is per TICK, however many draws share it
-        RelayDetector.recordApplied(column.accessPos(), -moved.getAmount());
+        if (!level.isClientSide()) RelayDetector.recordApplied(column.accessPos(), -moved.getAmount());
         return moved.getAmount();
     }
 
@@ -83,7 +83,7 @@ public final class Reservoir {
         int filled = handler.fill(fluid.copyWithAmount(want), FluidAction.EXECUTE);
         if (filled <= 0) return 0;
         takeRemaining -= filled;
-        RelayDetector.recordApplied(column.accessPos(), filled);
+        if (!level.isClientSide()) RelayDetector.recordApplied(column.accessPos(), filled);
         if (column.isOpenEnd()) {
             OpenEndPipes.markSpilled(level, column.accessPos());
         } else if (column.isHosePulley()) {
@@ -114,7 +114,7 @@ public final class Reservoir {
         int filled = handler.fill(fluid.copyWithAmount(amount), FluidAction.EXECUTE);
         if (filled > 0) {
             giveRemaining += filled;
-            RelayDetector.recordApplied(column.accessPos(), filled);
+            if (!level.isClientSide()) RelayDetector.recordApplied(column.accessPos(), filled);
         }
         return filled;
     }
@@ -135,10 +135,12 @@ public final class Reservoir {
     /**
      * The fluid surface elevation — this reservoir's own contents as world-read when the
      * {@code FlowNetwork} was built, constant within the tick (which is why the settle pass
-     * needs its hysteresis band) and never a solved head.
+     * needs its hysteresis band) and never a solved head. This is the RENDERED surface (a
+     * Create tank draws its fluid inset), so a settled pipe's waterline meets the tank's
+     * VISIBLE fluid rather than the full-block {@code baseY + fill} the solver equalizes.
      */
     double surface() {
-        return column.liquidSurface();
+        return column.renderedSurface();
     }
 
     /** A real finite tank/basin (equalized, lip-gated), as opposed to an open mouth or pulley. */

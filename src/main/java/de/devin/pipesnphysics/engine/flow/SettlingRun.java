@@ -25,8 +25,9 @@ import java.util.List;
  * between same-height cells (a crest arch drains off its corners), skipped for a HELD column
  * that pressure pins in place. {@link #exchangeWithReservoirs} has the run communicate with each
  * end reservoir through the CONDUCTING prefix of at-target cells (the shared waterline): the
- * first below-target cell past it draws in, the first above-target one pours out; a hysteresis
- * band keeps the tank-surface↔target feedback from ping-ponging, and dregs leave in one go.
+ * first below-target cell past it draws in, the first above-target one pours out; the DRAW
+ * side's hysteresis band keeps the tank-surface↔target feedback from ping-ponging (pours are
+ * self-stabilizing and act on any excess), and dregs leave in one go.
  * {@link #primeFromPumps} lets a running pump pack its dead-headed line from its supply side
  * (its solved steady-state flow is 0, so nothing else would fill it). {@link #gravityPool} is
  * the fallback with no solve data at all (every reservoir gone or empty): plain gravity trickles
@@ -55,12 +56,18 @@ final class SettlingRun {
         return !fluid.isEmpty() && fluid.getFluid().getFluidType().isLighterThanAir();
     }
     /**
-     * Endpoint-exchange hysteresis (fraction of a cell): drawing from a tank lowers its surface,
-     * which lowers the targets, which would pour the same fluid straight back — so the exchange
-     * acts only on an error beyond this band and the settled state sits stably inside it.
+     * DRAW-side hysteresis (fraction of a cell): drawing from a tank lowers its surface, which
+     * lowers the targets, which would pour the same fluid straight back — so draws act only on a
+     * deficit beyond this band. Pours need no band (raising the tank raises the target, so they
+     * self-stabilize), and banding them left a visible film standing in every near-empty cell.
      */
     private static final double SETTLE_BAND = 0.1;
-    /** Waterline deadband so a cell exactly at the surface doesn't flap. */
+    /**
+     * Small elevation epsilon (blocks) for cell-HEIGHT and seal/pour comparisons only. It is NOT
+     * added to a fill target's waterline: divided by the narrow bore it becomes a 13% distortion,
+     * settling a pipe visibly off the tank it equalized with. The mB-based {@link #SETTLE_BAND} is
+     * the anti-flap deadband.
+     */
     static final double SURFACE_EPS = 0.05;
 
     private final FlowNetwork network;
@@ -101,8 +108,8 @@ final class SettlingRun {
         Double lineA = restingLine(edge.a(), edge.b());
         Double lineB = restingLine(edge.b(), edge.a());
         if (lineA == null && lineB == null) return gravityPool();
-        double headA = lineA != null ? lineA : lineB;
-        double headB = lineB != null ? lineB : lineA;
+        double headA = emptyFloorCap(edge.a(), lineA != null ? lineA : lineB);
+        double headB = emptyFloorCap(edge.b(), lineB != null ? lineB : lineA);
 
         // Two profiles: what the run may RETAIN (a previously-primed siphon leg holds a barometric
         // column up to surface + suction limit — a vacuum gap at the crest supports it) versus what
@@ -133,8 +140,8 @@ final class SettlingRun {
         Double lineA = restingLine(edge.a(), edge.b());
         Double lineB = restingLine(edge.b(), edge.a());
         if (lineA == null && lineB == null) return false;
-        double headA = lineA != null ? lineA : lineB;
-        double headB = lineB != null ? lineB : lineA;
+        double headA = emptyFloorCap(edge.a(), lineA != null ? lineA : lineB);
+        double headB = emptyFloorCap(edge.b(), lineB != null ? lineB : lineA);
         int[] draw = drawTargets(headA, headB);
         boolean moved = drawFromReservoir(draw, false);
         moved |= drawFromReservoir(draw, true);
@@ -166,10 +173,15 @@ final class SettlingRun {
         return crestY <= a.surface() + limit && crestY <= b.surface() + limit;
     }
 
-    /** An end is sealed while its finite reservoir's live surface still reaches the opening. */
+    /**
+     * An end is sealed while its finite reservoir's live surface still wets the end cell's BORE
+     * opening — the block bottom is not enough: a waterline in the gap below the bore leaves the
+     * opening in the tank's head space, air enters, and the column must recede (a full run
+     * between two low tanks held its 250 mB forever — "the pipes hold 250 instead of equalizing").
+     */
     private boolean sealsItsEnd(Reservoir reservoir, BlockPos endCell) {
         return reservoir != null && reservoir.isFiniteReservoir() && reservoir.holdsFluid()
-                && reservoir.surface() > network.cellBottomY(endCell) + SURFACE_EPS;
+                && reservoir.surface() > network.windowBottomY(endCell) + SURFACE_EPS;
     }
 
     /**
@@ -177,15 +189,32 @@ final class SettlingRun {
      * defers to the far side (its mouth is a spill threshold, not a surface); anything else (a
      * pump or junction) uses the solved head — or, for a fill-only run, the CEILING field
      * (reservoir anchors + pump boosts: how high the line can be packed).
+     *
+     * An EMPTY reservoir has no surface and defers too — its floor only CAPS the far side's line
+     * ({@link #emptyFloorCap}). Anchoring the line at the floor froze runs solid: an empty tank
+     * up a riser set targets ABOVE the run's whole content, so nothing was ever "excess" and the
+     * pour/fall/spread machinery never engaged — a dreg beside an open mouth just sat there.
+     * With no live surface or head at either end the run is headless and gravity-pools.
      */
     private Double restingLine(int nodeIndex, int farNodeIndex) {
         Reservoir reservoir = network.reservoirAt(nodeIndex);
-        if (reservoir != null && reservoir.isFiniteReservoir()) return reservoir.surface();
+        if (reservoir != null && reservoir.isFiniteReservoir()) {
+            return reservoir.holdsFluid() ? reservoir.surface() : null;
+        }
         if (reservoir != null && reservoir.isOpenMouth()) return null; // read the far side instead
         Double head = solution.nodeHeads().get(nodeIndex);
         if (!fillOnly) return head;
         Double ceiling = solution.nodeCeilings().get(nodeIndex);
         return ceiling != null ? ceiling : head;
+    }
+
+    /** An empty reservoir's floor still caps its side of the line: fluid drains down toward it. */
+    private double emptyFloorCap(int nodeIndex, double line) {
+        Reservoir reservoir = network.reservoirAt(nodeIndex);
+        if (reservoir != null && reservoir.isFiniteReservoir() && !reservoir.holdsFluid()) {
+            return Math.min(line, reservoir.surface());
+        }
+        return line;
     }
 
     /** What the run may RETAIN: waterline plus the barometric allowance on a broken siphon's legs. */
@@ -200,6 +229,15 @@ final class SettlingRun {
 
     private int[] hydrostaticTargets(double headA, double headB, double suctionAllowance) {
         boolean crestBroken = isCrestBroken();
+        // A barometric leg is supported by the VACUUM in the broken crest's gap, which exists
+        // only while the tube is sealed against air at BOTH ends (air entering either end rises
+        // into the gap and both legs fall to their bare surfaces). A wet-but-unsealed end — a
+        // tank whose surface sits below its end cell's bore — is an air path like an empty one:
+        // per-leg "endpoint holds fluid" kept a run's sink leg hanging full in mid-air forever
+        // beside a drained source.
+        boolean sealed = crestBroken && suctionAllowance > 0
+                && sealsItsEnd(network.reservoirAt(edge.a()), cells.getFirst())
+                && sealsItsEnd(network.reservoirAt(edge.b()), cells.getLast());
         int crest = 0;
         if (crestBroken) {
             double crestY = Double.NEGATIVE_INFINITY;
@@ -215,25 +253,21 @@ final class SettlingRun {
         for (int i = 0; i < cells.size(); i++) {
             double line;
             if (crestBroken) {
-                boolean sideA = i <= crest;
-                double head = sideA ? headA : headB;
-                // A leg whose endpoint holds nothing is open to air from below: no vacuum can
-                // support a barometric column there, so it targets the bare surface.
-                line = endHoldsFluid(sideA ? edge.a() : edge.b()) ? head + suctionAllowance : head;
+                double head = i <= crest ? headA : headB;
+                line = sealed ? head + suctionAllowance : head;
             } else {
                 line = Math.min(headA, headB);
             }
-            // Map the line onto the BORE (where the stored volume lives and renders), so a settled
-            // pipe's drawn surface lands exactly on the tank waterline it equalized with.
+            // Map the line onto the cell's drawn fluid window (bore for a horizontal cell, the
+            // full block for a vertical riser), so a settled pipe's surface lands exactly on the
+            // tank waterline it equalized with — whichever way the cell renders. The line is NOT
+            // nudged: a 0.05-block bump is 13% of the 6/16 bore and would settle the pipe visibly
+            // ABOVE the tank (and dead-zone a run whose waterline sits just above the bore floor);
+            // the mB-based SETTLE_BAND hysteresis is the anti-flap deadband, not a world-Y nudge.
             target[i] = (int) Math.round(
-                    network.boreFill(cells.get(i), line + SURFACE_EPS) * network.cellCapacity);
+                    network.windowFill(cells.get(i), line) * network.cellCapacity);
         }
         return target;
-    }
-
-    private boolean endHoldsFluid(int nodeIndex) {
-        Reservoir reservoir = network.reservoirAt(nodeIndex);
-        return reservoir != null && reservoir.isFiniteReservoir() && reservoir.holdsFluid();
     }
 
     /** Excess flows to an adjacent deficit, strictly cell to cell, both sweeps. */
@@ -280,8 +314,8 @@ final class SettlingRun {
         if (!fillOnly) {
             moved |= pourIntoReservoir(retain, false);
             moved |= pourIntoReservoir(retain, true);
-            moved |= pourOutOpenEnd(cells.getFirst(), edge.a());
-            moved |= pourOutOpenEnd(cells.getLast(), edge.b());
+            moved |= pourOutOpenEnd(false);
+            moved |= pourOutOpenEnd(true);
         }
         return moved;
     }
@@ -295,7 +329,7 @@ final class SettlingRun {
         Reservoir reservoir = network.reservoirAt(fromB ? edge.b() : edge.a());
         if (reservoir == null || !reservoir.isFiniteReservoir() || !reservoir.holdsFluid()) return false;
         BlockPos endCell = fromB ? cells.getLast() : cells.getFirst();
-        if (reservoir.surface() <= network.boreBottomY(endCell) + SURFACE_EPS) return false;
+        if (reservoir.surface() <= network.windowBottomY(endCell)) return false;
         for (int step = 0; step < cells.size(); step++) {
             int i = fromB ? cells.size() - 1 - step : step;
             PipeStore.Store cell = network.cellAt(cells.get(i));
@@ -320,8 +354,11 @@ final class SettlingRun {
     /**
      * The mirror walk: the first ABOVE-target cell past the conducting prefix pours straight into
      * the end reservoir (a broken siphon's crest collapsing, a hump receding through a full
-     * riser). Hysteresis: acts only past the band — a target wobbling with the tank's own surface
-     * must not ping-pong — except target-0 dregs, which always leave.
+     * riser). Pours act on ANY excess — no hysteresis: pouring in RAISES the tank's surface and
+     * with it the target, so this direction is self-stabilizing, and the DRAW side's band alone
+     * breaks the draw↔pour loop. Sharing the band here left a visible ~10%-of-a-cell film
+     * standing above the waterline in every cell beside a near-empty tank ("the flagged pipe
+     * still holds fluid and does not flow into the tank").
      */
     private boolean pourIntoReservoir(int[] target, boolean fromB) {
         Reservoir reservoir = network.reservoirAt(fromB ? edge.b() : edge.a());
@@ -331,7 +368,7 @@ final class SettlingRun {
             PipeStore.Store cell = network.cellAt(cells.get(i));
             if (cell == null) return false;
             int excess = cell.amount() - target[i];
-            if (excess > hysteresisMb || (target[i] == 0 && excess > 0)) {
+            if (excess > 0) {
                 int move = excess <= Reservoir.DREGS_MB ? excess : Math.min(excess, rate);
                 int poured = reservoir.fill(cell.fluid(), move);
                 if (poured <= 0) return false;
@@ -420,10 +457,10 @@ final class SettlingRun {
             moved |= spreadLevel(cells.get(i), cells.get(i + 1), 0);
             moved |= spreadLevel(cells.get(i + 1), cells.get(i), 0);
         }
-        moved |= pourOutOpenEnd(cells.getFirst(), edge.a());
-        moved |= pourOutOpenEnd(cells.getLast(), edge.b());
-        moved |= equalizeWithReservoir(cells.getFirst(), edge.a());
-        moved |= equalizeWithReservoir(cells.getLast(), edge.b());
+        moved |= pourOutOpenEnd(false);
+        moved |= pourOutOpenEnd(true);
+        moved |= equalizeWithReservoir(false);
+        moved |= equalizeWithReservoir(true);
         return moved;
     }
 
@@ -476,16 +513,24 @@ final class SettlingRun {
         return moveBetween(from, to, Math.min(from.amount(), rate));
     }
 
-    /** Pour an end cell's fluid out of an open mouth at or below it (the spill of a dying run). */
-    private boolean pourOutOpenEnd(BlockPos endCell, int nodeIndex) {
+    /**
+     * Pour the run's fluid out of an open mouth at or below it (the spill of a dying run). The
+     * walk crosses EMPTY cells in from the mouth to the first one holding fluid — the last dregs
+     * otherwise strand one cell short forever, because {@link #spreadLevel}'s anti-slosh gate
+     * refuses to push the final {@code DREGS_MB} across a level pair and nothing else moves them.
+     */
+    private boolean pourOutOpenEnd(boolean fromB) {
+        int nodeIndex = fromB ? edge.b() : edge.a();
         Reservoir mouth = network.reservoirAt(nodeIndex);
         if (mouth == null || !mouth.isOpenMouth() || mouth.isInfiniteSource()) return false;
+        int i = firstWetCellFrom(fromB);
+        if (i < 0) return false;
+        BlockPos pos = cells.get(i);
         double mouthY = network.cellCenterY(network.graph.node(nodeIndex).pos());
-        if (mouthY > network.cellCenterY(endCell) + SURFACE_EPS) {
+        if (mouthY > network.cellCenterY(pos) + SURFACE_EPS) {
             return false; // the mouth sits above: gravity keeps the fluid in the pipe
         }
-        PipeStore.Store cell = network.cellAt(endCell);
-        if (cell == null || cell.amount() <= 0) return false;
+        PipeStore.Store cell = network.cellAt(pos);
         int move = cell.amount() <= Reservoir.DREGS_MB ? cell.amount() : Math.min(cell.amount(), rate);
         int poured = mouth.fill(cell.fluid(), move);
         if (poured <= 0) return false;
@@ -496,16 +541,20 @@ final class SettlingRun {
 
     /**
      * Even with no solve data, the fluid IN the pipes still communicates with an adjacent
-     * reservoir: pour the end cell into it while the cell's own surface sits above the
-     * reservoir's — a wet run beside an emptied tank drains back in instead of hanging forever.
+     * reservoir: pour the first wet cell in from that end into it while the cell's own surface
+     * sits above the reservoir's — a wet run beside an emptied tank drains back in instead of
+     * hanging forever. Walks like {@link #pourOutOpenEnd} so dregs cannot strand behind an empty
+     * end cell.
      */
-    private boolean equalizeWithReservoir(BlockPos endCell, int nodeIndex) {
-        Reservoir reservoir = network.reservoirAt(nodeIndex);
+    private boolean equalizeWithReservoir(boolean fromB) {
+        Reservoir reservoir = network.reservoirAt(fromB ? edge.b() : edge.a());
         if (reservoir == null || !reservoir.isFiniteReservoir()) return false;
-        PipeStore.Store cell = network.cellAt(endCell);
-        if (cell == null || cell.amount() <= 0) return false;
-        double cellSurface = network.boreBottomY(endCell)
-                + cell.amount() / (double) network.cellCapacity * FlowNetwork.BORE_HEIGHT;
+        int i = firstWetCellFrom(fromB);
+        if (i < 0) return false;
+        BlockPos pos = cells.get(i);
+        PipeStore.Store cell = network.cellAt(pos);
+        double cellSurface = network.windowBottomY(pos)
+                + cell.amount() / (double) network.cellCapacity * network.windowHeight(pos);
         if (cellSurface <= reservoir.surface() + SURFACE_EPS) return false;
         int move = cell.amount() <= Reservoir.DREGS_MB ? cell.amount() : Math.min(cell.amount(), rate);
         int poured = reservoir.fill(cell.fluid(), move);
@@ -513,6 +562,25 @@ final class SettlingRun {
         cell.extract(poured);
         ledger.moved(edge, poured);
         return true;
+    }
+
+    /**
+     * Index of the first cell holding fluid, walking in from the given end across empty cells —
+     * or -1 with nothing to find. The walk never climbs: an empty cell whose floor sits above the
+     * wet cell it leads to is a dry rise the fluid cannot cross (an air gap, not a channel).
+     */
+    private int firstWetCellFrom(boolean fromB) {
+        double pathFloor = Double.NEGATIVE_INFINITY;
+        for (int step = 0; step < cells.size(); step++) {
+            int i = fromB ? cells.size() - 1 - step : step;
+            PipeStore.Store cell = network.cellAt(cells.get(i));
+            if (cell == null) return -1;
+            if (cell.amount() > 0) {
+                return pathFloor > network.windowBottomY(cells.get(i)) + SURFACE_EPS ? -1 : i;
+            }
+            pathFloor = Math.max(pathFloor, network.windowBottomY(cells.get(i)));
+        }
+        return -1;
     }
 
     private boolean moveBetween(PipeStore.Store from, PipeStore.Store to, int amount) {

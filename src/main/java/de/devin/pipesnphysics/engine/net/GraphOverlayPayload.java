@@ -52,9 +52,11 @@ public record GraphOverlayPayload(long seed, List<NodeEntry> nodes, List<EdgeEnt
      * block it is plus a fluid summary for sources/sinks). {@code kind} picks the box
      * style the client draws AND decides whether a label ships at all: {@code label} is
      * empty for nodes the overlay should not annotate (junctions). Lines are separated
-     * by {@code \n}.
+     * by {@code \n}. {@code surfaceY} is the engine's computed fluid surface elevation for
+     * a finite reservoir ({@code NaN} otherwise) — the height a settled pipe equalizes to,
+     * drawn in-world so it can be compared against Create's rendered tank fluid.
      */
-    public record NodeEntry(int x, int y, int z, byte kind, String label) {
+    public record NodeEntry(int x, int y, int z, byte kind, float surfaceY, String label) {
         public static final byte KIND_HANDLER = 0;
         public static final byte KIND_PUMP = 1;
         public static final byte KIND_JUNCTION = 2;
@@ -66,6 +68,7 @@ public record GraphOverlayPayload(long seed, List<NodeEntry> nodes, List<EdgeEnt
                         ByteBufCodecs.VAR_INT, NodeEntry::y,
                         ByteBufCodecs.VAR_INT, NodeEntry::z,
                         ByteBufCodecs.BYTE, NodeEntry::kind,
+                        ByteBufCodecs.FLOAT, NodeEntry::surfaceY,
                         ByteBufCodecs.STRING_UTF8, NodeEntry::label,
                         NodeEntry::new
                 );

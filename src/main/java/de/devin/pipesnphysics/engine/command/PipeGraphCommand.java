@@ -15,15 +15,18 @@ import de.devin.pipesnphysics.engine.FlowSolver;
 import de.devin.pipesnphysics.engine.FluidEngine;
 import de.devin.pipesnphysics.engine.Solution;
 import de.devin.pipesnphysics.engine.boundary.BoundaryColumn;
+import de.devin.pipesnphysics.engine.boundary.FluidCaps;
 import de.devin.pipesnphysics.engine.boundary.HandlerRoles;
 import de.devin.pipesnphysics.engine.boundary.RelayDetector;
 import de.devin.pipesnphysics.engine.graph.Edge;
 import de.devin.pipesnphysics.engine.graph.Graph;
 import de.devin.pipesnphysics.engine.graph.GraphCache;
 import de.devin.pipesnphysics.engine.graph.Node;
+import de.devin.pipesnphysics.engine.graph.PipeGeometry;
 import de.devin.pipesnphysics.engine.net.GraphOverlayPayload;
 import de.devin.pipesnphysics.engine.probe.PipeProbe;
 import de.devin.pipesnphysics.engine.store.PipeStore;
+import de.devin.pipesnphysics.engine.store.PipeWindow;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.core.BlockPos;
@@ -37,7 +40,6 @@ import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.neoforged.neoforge.fluids.FluidStack;
 import net.neoforged.neoforge.fluids.FluidType;
-import net.neoforged.neoforge.capabilities.Capabilities;
 import net.neoforged.neoforge.fluids.capability.IFluidHandler;
 import net.neoforged.neoforge.fluids.capability.IFluidHandler.FluidAction;
 import net.neoforged.neoforge.network.PacketDistributor;
@@ -147,10 +149,10 @@ public final class PipeGraphCommand {
 
         // Fluid capability, and on which faces. No handler anywhere and not a vanilla target → the engine
         // can never see it as a tank; a side-specific block serves its own network per face.
-        IFluidHandler nullSide = level.getCapability(Capabilities.FluidHandler.BLOCK, pos, null);
+        IFluidHandler nullSide = FluidCaps.at(level, pos, null);
         List<Direction> faces = new ArrayList<>();
         for (Direction d : Direction.values()) {
-            if (level.getCapability(Capabilities.FluidHandler.BLOCK, pos, d) != null) faces.add(d);
+            if (FluidCaps.at(level, pos, d) != null) faces.add(d);
         }
         boolean vanilla = VanillaFluidTargets.canProvideFluidWithoutCapability(state);
         if (vanilla) {
@@ -170,9 +172,9 @@ public final class PipeGraphCommand {
         if (!vanilla && (nullSide != null || !faces.isEmpty())) {
             send(player, "§7Role: §f" + HandlerRoles.explain(level, pos));
             if (!HandlerRoles.hasExplicitRole(state) && PipesNPhysicsConfig.AUTO_DETECT_RELAY_HANDLERS.get()) {
-                int strikes = RelayDetector.strikeCount(state.getBlock());
-                if (RelayDetector.isRelay(state.getBlock())) {
-                    send(player, "§7Detector: §elearned relay §7this session");
+                int strikes = RelayDetector.strikeCount(pos);
+                if (RelayDetector.isRelay(pos)) {
+                    send(player, "§7Detector: §elearned relay §7this session (this position)");
                 } else if (strikes > 0) {
                     send(player, "§7Detector: §f" + strikes + " §7spontaneous-gain strike(s) so far");
                 }
@@ -209,7 +211,7 @@ public final class PipeGraphCommand {
         send(player, "§7Handler per face §8(probe " + probe.getHoverName().getString() + "):");
         if (nullSide != null) send(player, "§d  null-side: " + oneProbe(nullSide, probe));
         for (Direction d : Direction.values()) {
-            IFluidHandler cap = level.getCapability(Capabilities.FluidHandler.BLOCK, pos, d);
+            IFluidHandler cap = FluidCaps.at(level, pos, d);
             if (cap == null) continue;
             int give = cap.drain(Integer.MAX_VALUE, FluidAction.SIMULATE).getAmount();
             String flag = nullSide != null && cap != nullSide && give > nullGive
@@ -234,10 +236,10 @@ public final class PipeGraphCommand {
      * "Column" line report the SAME tank the network actually reads, not the null side.
      */
     private static Direction resolveAccessFace(ServerLevel level, BlockPos pos) {
-        IFluidHandler nullCap = level.getCapability(Capabilities.FluidHandler.BLOCK, pos, null);
+        IFluidHandler nullCap = FluidCaps.at(level, pos, null);
         Direction differing = null;
         for (Direction d : Direction.values()) {
-            IFluidHandler cap = level.getCapability(Capabilities.FluidHandler.BLOCK, pos, d);
+            IFluidHandler cap = FluidCaps.at(level, pos, d);
             if (cap == null || cap == nullCap) continue; // side-agnostic on this face → resolve null
             BlockPos neighbor = pos.relative(d);
             if (FluidPropagator.getPipe(level, neighbor) != null
@@ -251,12 +253,12 @@ public final class PipeGraphCommand {
 
     /** The first fluid any face (or the null side) of this block holds, or water — what to probe fills with. */
     private static FluidStack probeFluid(ServerLevel level, BlockPos pos) {
-        IFluidHandler nullCap = level.getCapability(Capabilities.FluidHandler.BLOCK, pos, null);
+        IFluidHandler nullCap = FluidCaps.at(level, pos, null);
         if (nullCap != null && nullCap.getTanks() > 0 && !nullCap.getFluidInTank(0).isEmpty()) {
             return nullCap.getFluidInTank(0).copyWithAmount(1000);
         }
         for (Direction d : Direction.values()) {
-            IFluidHandler cap = level.getCapability(Capabilities.FluidHandler.BLOCK, pos, d);
+            IFluidHandler cap = FluidCaps.at(level, pos, d);
             if (cap != null && cap.getTanks() > 0 && !cap.getFluidInTank(0).isEmpty()) {
                 return cap.getFluidInTank(0).copyWithAmount(1000);
             }
@@ -383,6 +385,14 @@ public final class PipeGraphCommand {
                                     ? " §f" + slot.fluid().getHoverName().getString() : ""));
                 }
             }
+            // A non-default handler role (tag, code, or a learned relay) changes how the column
+            // resolves — surface it here, or a demoted handler is indistinguishable from a tank.
+            if (n.isHandler()) {
+                BlockState state = level.getBlockState(n.pos());
+                if (HandlerRoles.hasExplicitRole(state) || HandlerRoles.isRelayEndpoint(level, n.pos())) {
+                    send(player, "      §erole: " + HandlerRoles.explain(level, n.pos()));
+                }
+            }
             String pulley = pulleyDiagnostic(level, n);
             if (pulley != null) send(player, "      §c" + pulley);
             String probe = handlerProbe(level, n, probeFluid);
@@ -392,8 +402,13 @@ public final class PipeGraphCommand {
         }
     }
 
-    /** One chat line per edge: endpoints, length, status word, and the solved vs actual rate. */
+    /**
+     * One chat line per edge — endpoints, length, status word, the solved vs actual rate — plus
+     * a holds sub-line with the run's stored fluid cell by cell, and the gravity draw-lip
+     * elevation at each handler end's opening (where that tank stops giving).
+     */
     private static void printEdges(ServerPlayer player, Graph g, Solution s, BlockPos target) {
+        ServerLevel level = player.serverLevel();
         for (Edge e : g.edges()) {
             EdgeFlow flow = s.edgeFlows().get(e.index());
             int rate = PipeProbe.actualEdgeFlow(g, s, e); // mB actually moved, not the hydraulic flow
@@ -417,7 +432,45 @@ public final class PipeGraphCommand {
                     e.length(), dir, flow.mbPerTick(), rate,
                     reason != null ? " §8[" + reason + "]" : "",
                     e.pipes().contains(target) ? " §6← flagged" : ""));
+            String holds = holdsLine(level, e);
+            if (holds != null) send(player, "      " + holds);
+            String lips = lipLine(level, g, e);
+            if (lips != null) send(player, "      " + lips);
         }
+    }
+
+    /** The run's stored fluid: total over capacity plus the cell-by-cell breakdown, a-end first. */
+    private static String holdsLine(ServerLevel level, Edge e) {
+        if (PipeStore.capacityMb() <= 0 || e.pipes().isEmpty()) return null;
+        StringBuilder cells = new StringBuilder();
+        FluidStack held = FluidStack.EMPTY;
+        int total = 0;
+        for (BlockPos pos : e.pipes()) {
+            PipeStore.Store cell = PipeStore.at(level, pos);
+            int mb = cell == null ? 0 : cell.amount();
+            if (held.isEmpty() && mb > 0) held = cell.fluid();
+            total += mb;
+            if (!cells.isEmpty()) cells.append(' ');
+            cells.append(mb);
+        }
+        return String.format("§7holds §f%d§7/%d mB%s §8cells %s", total,
+                e.pipes().size() * PipeStore.capacityMb(),
+                held.isEmpty() ? "" : " §f" + held.getHoverName().getString() + "§7", cells);
+    }
+
+    /** The gravity draw-lip elevation of each handler end's opening cell ({@code PipeWindow.lipY}). */
+    private static String lipLine(ServerLevel level, Graph g, Edge e) {
+        String a = endLip(level, g, e, e.a(), "a");
+        String b = endLip(level, g, e, e.b(), "b");
+        if (a == null && b == null) return null;
+        return "§7lip" + (a != null ? " " + a : "") + (b != null ? " " + b : "");
+    }
+
+    private static String endLip(ServerLevel level, Graph g, Edge e, int nodeIndex, String label) {
+        if (!g.node(nodeIndex).isHandler()) return null;
+        BlockPos opening = PipeGeometry.adjacentCell(g, e, nodeIndex);
+        if (opening == null) return null;
+        return String.format("%s=§f%.2f§7", label, PipeWindow.lipY(level, opening));
     }
 
     /** The tick's planned endpoint transfers (diagnostics — execution is the brigade). */
@@ -456,7 +509,22 @@ public final class PipeGraphCommand {
         };
         return new GraphOverlayPayload.NodeEntry(
                 n.pos().getX(), n.pos().getY(), n.pos().getZ(), kind,
+                surfaceHeight(level, n),
                 nodeLabel(level, n, s.nodeHeads().get(n.index())));
+    }
+
+    /**
+     * The engine's computed fluid surface elevation for a finite reservoir ({@code baseY + fill}),
+     * or {@code NaN} for anything without a liquid waterline (pumps, junctions, open ends, empty or
+     * gas columns). This is the height a settled pipe equalizes to — the overlay draws it in-world
+     * so it can be compared against Create's own rendered tank fluid, which may sit at a different
+     * height ("the surface level inside the tanks is bumped from Create's model").
+     */
+    private static float surfaceHeight(ServerLevel level, Node n) {
+        BoundaryColumn column = columnOf(level, n);
+        if (column == null || !column.isFiniteReservoir() || column.contentMb() <= 0) return Float.NaN;
+        if (column.contents().getFluid().getFluidType().isLighterThanAir()) return Float.NaN;
+        return (float) column.renderedSurface();
     }
 
     /** One edge's overlay entry: its cells ordered along the flow, per-point pressures, and arrow state. */
@@ -561,20 +629,24 @@ public final class PipeGraphCommand {
 
     /**
      * What the LIVE handler behind a HANDLER node actually reports to the engine's probes, or null for
-     * non-handlers: how much it holds ({@code getFluidInTank(0)}), how much it will GIVE
-     * ({@code drain} SIMULATE), and how much of {@code probe} it will TAKE ({@code fill} SIMULATE). This
-     * is exactly what the solver keys participation on, so a handler that shows {@code give=0 take=0} is
-     * why a run past it moves nothing — the case for a paired device (a docking connector) whose
-     * capability is gated on its own state, which the fill/fraction summary above cannot reveal.
+     * non-handlers: what it holds, how much it will GIVE ({@code drain} SIMULATE), and how much of
+     * {@code probe} it will TAKE ({@code fill} SIMULATE). This is exactly what the solver keys
+     * participation on, so a handler that shows {@code give=0 take=0} is why a run past it moves
+     * nothing — the case for a paired device (a docking connector) whose capability is gated on its
+     * own state, which the fill/fraction summary above cannot reveal. Resolved through the node's
+     * ACCESS FACE — the handler the engine actually transfers through, labelled on the line — and a
+     * multi-tank handler (a machine port combining an input and an output tank, like TFMG's blast
+     * stove) lists every tank: {@code holds=0} for tank 0 alone hid the port's real contents.
      */
     private static String handlerProbe(ServerLevel level, Node n, FluidStack probe) {
         if (!n.isHandler()) return null;
-        IFluidHandler cap = BoundaryColumn.findHandler(level, n.pos());
+        IFluidHandler cap = BoundaryColumn.findHandler(level, n.pos(), n.accessFace());
         if (cap == null) return "probe: no live fluid capability";
-        int holds = cap.getTanks() > 0 ? cap.getFluidInTank(0).getAmount() : 0;
         int give = cap.drain(Integer.MAX_VALUE, FluidAction.SIMULATE).getAmount();
         int take = probe.isEmpty() ? 0 : cap.fill(probe.copyWithAmount(1000), FluidAction.SIMULATE);
-        String line = String.format("probe: holds=%d give=%d take=%d%s", holds, give, take,
+        String line = String.format("probe%s: %s give=%d take=%d%s",
+                n.accessFace() != null ? "[via " + n.accessFace() + "]" : "",
+                tankSummary(cap), give, take,
                 probe.isEmpty() ? "" : " (" + probe.getHoverName().getString() + ")");
         // The null-side handler is what our engine actually uses. If a SPECIFIC face accepts/gives more
         // (as Create's face-specific transport would see), the block is sided and our null resolution is
@@ -582,7 +654,7 @@ public final class PipeGraphCommand {
         String bestGive = "", bestTake = "";
         int maxGive = give, maxTake = take;
         for (Direction side : Direction.values()) {
-            IFluidHandler faceCap = level.getCapability(Capabilities.FluidHandler.BLOCK, n.pos(), side);
+            IFluidHandler faceCap = FluidCaps.at(level, n.pos(), side);
             if (faceCap == null) continue;
             int faceGive = faceCap.drain(Integer.MAX_VALUE, FluidAction.SIMULATE).getAmount();
             int faceTake = probe.isEmpty() ? 0
@@ -593,6 +665,21 @@ public final class PipeGraphCommand {
         if (!bestGive.isEmpty()) line += " | face give=" + maxGive + "@" + bestGive;
         if (!bestTake.isEmpty()) line += " | face take=" + maxTake + "@" + bestTake;
         return line;
+    }
+
+    /** "holds=N" for a single tank; every tank of a multi-tank port: "tanks=[Air 500/16000, 0/16000]". */
+    private static String tankSummary(IFluidHandler cap) {
+        if (cap.getTanks() <= 1) {
+            return "holds=" + (cap.getTanks() > 0 ? cap.getFluidInTank(0).getAmount() : 0);
+        }
+        StringBuilder tanks = new StringBuilder("tanks=[");
+        for (int i = 0; i < cap.getTanks(); i++) {
+            if (i > 0) tanks.append(", ");
+            FluidStack in = cap.getFluidInTank(i);
+            if (!in.isEmpty()) tanks.append(in.getHoverName().getString()).append(" ");
+            tanks.append(in.getAmount()).append("/").append(cap.getTankCapacity(i));
+        }
+        return tanks.append("]").toString();
     }
 
     /**

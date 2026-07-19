@@ -19,9 +19,11 @@ import java.util.Set;
  * {@link #tick()} is the whole brigade for this run, in the order that makes a chain move one
  * step everywhere in the same tick: deliver at the downstream end (or top up the junction slot),
  * shift every internal boundary forward by at most the solved rate, then take intake at the
- * upstream end. Movement is PLUG FLOW: fluid entering a dry cell parks until the feeding cell is full, so
- * the visible front is a full column crossing {@code rate/capacity} cells per tick — never a smear —
- * and a sink only receives once the column has actually arrived (a full tail cell).
+ * upstream end. Movement is PLUG FLOW at the run's {@linkplain FlowNetwork#flowDepthMb flow
+ * depth}: fluid entering a dry cell parks until the feeding cell carries the depth, so the
+ * visible front is a coherent column — never a smear — and a sink only receives once the column
+ * has actually arrived (a tail cell at depth). A fast run's depth is a full cell (the old FULL
+ * gates); a trickle runs as a shallow stream that still primes cell by cell.
  */
 final class FlowingRun {
     private final BrigadePass pass;
@@ -30,6 +32,8 @@ final class FlowingRun {
     private final FluidStack fluid;
     /** The solved rate: the most any single boundary of this run moves this tick, in mB. */
     private final int solvedRateMb;
+    /** The plug depth this run flows at — what every gate below requires instead of a full cell. */
+    private final int flowDepthMb;
     private final boolean flowsAToB;
     /** Cells upstream→downstream; empty when the endpoints touch directly (or cells hold nothing). */
     private final List<BlockPos> cells;
@@ -42,6 +46,7 @@ final class FlowingRun {
         this.edge = edge;
         this.fluid = fluid;
         this.solvedRateMb = solvedRateMb;
+        this.flowDepthMb = FlowNetwork.flowDepthMb(solvedRateMb, network.cellCapacity);
         this.flowsAToB = flowsAToB;
         this.cells = network.cellCapacity <= 0 ? List.of()
                 : flowsAToB ? edge.pipes() : edge.pipes().reversed();
@@ -94,7 +99,8 @@ final class FlowingRun {
      * slot up by pulling straight through the wire — exactly what {@link #deliverThroughWire}
      * does for a reservoir sink. Without this a pump wedged flush against a junction never moves
      * anything: the slot stays empty, the consumer past the junction stays gated on it (a slot
-     * passes fluid only once FULL), and the whole line reads solved flow with zero actual.
+     * passes fluid only once at the consumer's flow depth), and the whole line reads solved flow
+     * with zero actual.
      */
     private void topUpSlotThroughWire(PipeStore.Store slot) {
         int want = Math.min(exitBudget, slot.room(fluid));
@@ -102,7 +108,7 @@ final class FlowingRun {
         Reservoir source = network.reservoirAt(upstreamNode());
         int got = source != null
                 ? source.drain(fluid, want)
-                : pass.pullArrivingAt(upstreamNode(), fluid, want, pass.freshVisitSet());
+                : pass.pullArrivingAt(upstreamNode(), fluid, want, flowDepthMb, pass.freshVisitSet());
         if (got <= 0) return;
         slot.insert(fluid, got);
         exitBudget -= got;
@@ -129,7 +135,7 @@ final class FlowingRun {
         Reservoir source = network.reservoirAt(upstreamNode());
         int got = source != null
                 ? source.drain(fluid, want)
-                : pass.pullArrivingAt(upstreamNode(), fluid, want, pass.freshVisitSet());
+                : pass.pullArrivingAt(upstreamNode(), fluid, want, flowDepthMb, pass.freshVisitSet());
         if (got > 0) {
             head.insert(fluid, got);
             pass.ledger().moved(edge, got);
@@ -138,12 +144,12 @@ final class FlowingRun {
 
     /**
      * Deliver the tail cell's own fluid (plug flow may carry a different fluid than the pass)
-     * into the sink — but the column must ARRIVE first: a still-filling tail cell delivers
-     * nothing (the settle phase drains the last residue once flow stops).
+     * into the sink — but the column must ARRIVE first: a tail cell still filling toward the flow
+     * depth delivers nothing (the settle phase drains the last residue once flow stops).
      */
     private void deliverFromTail(Reservoir sink) {
         PipeStore.Store tail = network.cellAt(cells.getLast());
-        if (tail == null || tail.amount() < network.cellCapacity) return;
+        if (tail == null || tail.amount() < flowDepthMb) return;
         int budget = Math.min(exitBudget, tail.amount());
         if (budget <= 0) return;
         int filled = sink.fill(tail.fluid(), budget);
@@ -161,7 +167,7 @@ final class FlowingRun {
         Reservoir source = network.reservoirAt(upstreamNode());
         int got = source != null
                 ? source.drain(fluid, want)
-                : pass.pullArrivingAt(upstreamNode(), fluid, want, pass.freshVisitSet());
+                : pass.pullArrivingAt(upstreamNode(), fluid, want, flowDepthMb, pass.freshVisitSet());
         if (got <= 0) return;
         int filled = sink.fill(fluid, got);
         if (filled < got) reinsertLeftover(got - filled);
@@ -171,18 +177,18 @@ final class FlowingRun {
 
     /**
      * Let a downstream consumer take up to {@code amount} out of this run's downstream end —
-     * from a FULL tail cell (the column must have arrived, plug flow), or straight through a
-     * wire — bounded by the remaining exit budget.
+     * from a tail cell at this run's flow depth (the column must have arrived, plug flow), or
+     * straight through a wire — bounded by the remaining exit budget.
      */
     int pullFromTail(FluidStack wanted, int amount, Set<Integer> visited) {
         int budget = Math.min(amount, exitBudget);
         if (budget <= 0) return 0;
         int got;
         if (cells.isEmpty()) {
-            got = pass.pullArrivingAt(upstreamNode(), wanted, budget, visited);
+            got = pass.pullArrivingAt(upstreamNode(), wanted, budget, flowDepthMb, visited);
         } else {
             PipeStore.Store tail = network.cellAt(cells.getLast());
-            if (tail == null || tail.amount() < network.cellCapacity
+            if (tail == null || tail.amount() < flowDepthMb
                     || !FluidStack.isSameFluidSameComponents(tail.fluid(), wanted)) {
                 return 0;
             }
@@ -194,11 +200,12 @@ final class FlowingRun {
     }
 
     /**
-     * Plug flow, not a smear: fluid entering a DRY cell parks there until the feeding cell is
-     * full. A wet destination (the front itself, or a draining column) moves freely.
+     * Plug flow, not a smear: fluid entering a DRY cell parks there until the feeding cell
+     * carries the flow depth. A wet destination (the front itself, or a draining column) moves
+     * freely.
      */
     private int plugMove(PipeStore.Store from, PipeStore.Store to, int amount) {
-        if (to.amount() <= 0 && from.amount() < network.cellCapacity) return 0;
+        if (to.amount() <= 0 && from.amount() < flowDepthMb) return 0;
         return from.moveInto(to, amount);
     }
 
