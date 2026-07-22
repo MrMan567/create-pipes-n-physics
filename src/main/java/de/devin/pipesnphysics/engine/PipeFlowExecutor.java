@@ -28,9 +28,11 @@ import java.util.Set;
  * gravity-pool). Finally the flush: one sync per changed cell.
  *
  * Every move is integer mB and strictly paired (cell↔cell, or handler↔cell via
- * SIMULATE-then-EXECUTE), so fluid is neither minted nor lost. With
- * {@code PIPE_VOLUME_PER_CELL = 0} every run degenerates to a wire and this reproduces the old
- * instant transfers.
+ * SIMULATE-then-EXECUTE), so fluid is neither minted nor lost — EXCEPT where two different fluids
+ * are driven together in one pipe cell, which reacts like Create ({@code FluidNetwork} never mixes):
+ * the pipe breaks and its contents are consumed, water+lava leaving cobblestone
+ * ({@link FlowNetwork#reactToCollisions}). With {@code PIPE_VOLUME_PER_CELL = 0} every run
+ * degenerates to a wire and this reproduces the old instant transfers.
  */
 public final class PipeFlowExecutor {
     /**
@@ -55,6 +57,10 @@ public final class PipeFlowExecutor {
         }
         new SettlePass(network, ledger, solution).execute(flowed);
         network.flush();
+        // Any cell where two fluids were driven together this tick reacts LAST — Create's
+        // crossing-the-streams (pipe breaks, water+lava leaves cobblestone). Deferred past the
+        // flush so no pipe is broken while the passes are still reading its stored volume.
+        network.reactToCollisions();
 
         return new Actuals(ledger.edgeMovedMb(), ledger.movedAny(), ledger.settling());
     }

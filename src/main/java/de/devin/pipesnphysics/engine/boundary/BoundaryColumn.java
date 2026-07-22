@@ -302,13 +302,20 @@ public final class BoundaryColumn {
      * draw in when its head falls below it ("vacuum").
      *
      * By default an open end is an EMPTY, receive-only outlet — it spills but never
-     * reclaims. When {@link #intakeFluid intake} is enabled and the world in front holds a
-     * drinkable body, the mouth becomes a ONE-WAY intake {@link #isInfiniteSource source}
-     * instead: it supplies that fluid whenever the network sits below the mouth (a
+     * reclaims. When {@link #intakeFluid intake} is enabled, the mouth faces a drinkable
+     * body, AND the mouth is VERTICAL, it becomes a ONE-WAY intake {@link #isInfiniteSource
+     * source} instead: it supplies that fluid whenever the network sits below the mouth (a
      * "vacuum"), exactly like a hose pulley but fixed at the mouth. {@code networkSpilled}
      * = some open end on this network spilled within the cooldown; while true, a FINITE
      * source is not pulled (so the network cannot suck a block it just spat out, including
      * one that flowed to a sibling mouth) — lakes/cauldrons are unaffected.
+     *
+     * A HORIZONTAL mouth NEVER draws in ({@link #drawsInThrough}) — it is a spill outlet
+     * only. A sideways mouth sits at the elevation of whatever it spills, so drinking would
+     * just reclaim its own spilled block, tick after tick (the "why can a horizontal pipe
+     * suck in water?" oscillation). Suction intake is a vertical act: a riser dipping DOWN
+     * into a body, or opening UP beneath one. The cooldown gate below is the finer,
+     * finite-source guard on the vertical mouths that DO intake.
      *
      * One-wayness plus the consume-safe check are what keep the v1 oscillation dead.
      * Modelling a source as a two-way brimming reservoir made the engine drain its own
@@ -320,7 +327,9 @@ public final class BoundaryColumn {
     public static BoundaryColumn forOpenEnd(Level level, Node openEndNode, boolean networkSpilled) {
         BlockPos space = openEndNode.pos();
         double bottom = SableCompat.getWorldY(level, space) - 0.5;
-        FluidStack intake = intakeFluid(level, space, networkSpilled);
+        FluidStack intake = drawsInThrough(openEndNode.openFace())
+                ? intakeFluid(level, space, networkSpilled)
+                : FluidStack.EMPTY;
         boolean canIntake = !intake.isEmpty();
         // Capacity (and so capacitance) is the atmospheric stand-in — a stiff boundary at
         // the mouth — but contentMb carries the HONEST per-tick yield ({@code intake}'s
@@ -330,6 +339,11 @@ public final class BoundaryColumn {
         return new BoundaryColumn(space, space, bottom, 1, OPEN_END_CAPACITY_MB,
                 canIntake ? intake : FluidStack.EMPTY,
                 canIntake ? intake.getAmount() : 0, openEndNode.openFace(), canIntake, false, 1.0);
+    }
+
+    /** Only a VERTICAL mouth may draw fluid IN — a horizontal one is a pure spill outlet (see {@link #forOpenEnd}). */
+    private static boolean drawsInThrough(Direction openFace) {
+        return openFace != null && openFace.getAxis().isVertical();
     }
 
     /**

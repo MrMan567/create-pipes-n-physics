@@ -23,14 +23,24 @@ public final class TankMassFormulas {
     }
 
     /**
-     * Compute the downward gravitational impulse for a fluid mass.
+     * Net vertical mass contribution of a tank's fluid, in kg: positive = downward weight (a
+     * liquid), negative = upward lift (a lighter-than-air gas acting like a balloon).
      *
-     * @param massKg          fluid mass in kg
-     * @param timestepSeconds physics timestep duration
-     * @return impulse Y component (negative = downward)
+     * <p>Lift is density-INDEPENDENT — a gas cell lifts by its fill volume, not by its tiny
+     * sub-zero density. Scaling buoyancy by {@code density/1000} floors it at ~1% of gravity, the
+     * exact regression CLAUDE.md §4 warns against for the gas head model, so a gas would just weigh
+     * a hair less than nothing instead of lifting.
+     *
+     * @param lighterThanAir whether the fluid is lighter than air AND buoyancy is enabled
+     * @param liftPerBucket  config: kg of lift per bucket of gas
      */
-    public static double gravityImpulseY(double massKg, double timestepSeconds) {
-        return -massKg * 9.81 * timestepSeconds;
+    public static double netMassKg(int fluidAmountMb, int fluidDensity, boolean lighterThanAir,
+                                   double massPerBucket, double liftPerBucket) {
+        if (lighterThanAir) {
+            double buckets = fluidAmountMb / 1000.0;
+            return -buckets * liftPerBucket;
+        }
+        return fluidMassKg(fluidAmountMb, fluidDensity, massPerBucket);
     }
 
     /**

@@ -36,19 +36,35 @@ import java.util.List;
 
 /**
  * Gives Create's fluid valve a fine-grained throttle: a 0-90 degree opening the valve passes
- * proportionally (90 = fully open). A Valve Handle on its shaft cranks it — each turn adds the
- * handle's set angle (handled in {@link ValveHandleBlockEntityMixin} via {@code adjustThrottle},
- * which applies the handle's INTENT rather than its imprecise actual rotation) — and a
- * scroll-value box on the side faces sets it directly. The handle visual tracks the angle, the
- * solver reads it through {@link ValveThrottle} to scale the run's conductance, and the goggle
- * shows the throughput. Inert when the engine or the throttle feature is off in config.
+ * proportionally (90 = fully open). It is opened/closed THREE ways, all landing on the same angle:
+ * raw SHAFT ROTATION cranks it (positive speed opens, negative closes, idle holds — Create's own
+ * "spin to open", integrated onto the 0-90 scale so a motor or gearshift drives it like any other
+ * kinetic block); a Valve Handle adds its precise set angle ({@link ValveHandleBlockEntityMixin}
+ * via {@code adjustThrottle} — the handle's kinetic burst is a fixed chunk, NOT its set angle, so
+ * we apply its INTENT and briefly suppress the shaft integration so the crank is not counted
+ * twice); and a scroll-value box on the side faces sets it directly. The handle visual tracks the
+ * angle, the solver reads it through {@link ValveThrottle} to scale the run's conductance, and the
+ * goggle shows the throughput. Inert when the engine or the throttle feature is off in config.
  */
 @Mixin(value = FluidValveBlockEntity.class, remap = false)
 public abstract class FluidValveBlockEntityMixin extends KineticBlockEntity implements ValveThrottle {
     @Unique
     private static final int FULL_OPEN_DEGREES = 90;
+    /**
+     * Ticks after a Valve Handle applies its precise set angle during which raw shaft rotation is
+     * IGNORED. The handle also spins the valve's shaft (a fixed ~10-tick kinetic burst), so without
+     * this the one crank would land twice — once as intent, once integrated from the burst.
+     */
+    @Unique
+    private static final int HANDLE_CRANK_COOLDOWN_TICKS = 12;
     @Unique
     private ScrollValueBehaviour pipesnphysics$throttle;
+    /** Fractional-degree carry, so a slow shaft still cranks the angle one whole degree at a time. */
+    @Unique
+    private double pipesnphysics$shaftCarry;
+    /** Countdown of the post-handle suppression window ({@link #HANDLE_CRANK_COOLDOWN_TICKS}). */
+    @Unique
+    private int pipesnphysics$handleCrankCooldown;
     @Shadow
     LerpedFloat pointer;
 
@@ -100,8 +116,44 @@ public abstract class FluidValveBlockEntityMixin extends KineticBlockEntity impl
     @Override
     public void pipesnphysics$adjustThrottle(int delta) {
         if (pipesnphysics$throttle == null || !PipesNPhysicsConfig.ENABLE_VALVE_THROTTLE.get()) return;
+        // A Valve Handle applied its precise intent; ignore the shaft burst it is about to spin
+        // through us (set before the value check so a clamped no-op crank still suppresses).
+        pipesnphysics$handleCrankCooldown = HANDLE_CRANK_COOLDOWN_TICKS;
         int next = Mth.clamp(pipesnphysics$throttle.getValue() + delta, 0, FULL_OPEN_DEGREES);
         if (next != pipesnphysics$throttle.getValue()) pipesnphysics$throttle.setValue(next); // syncs + re-aims the handle
+    }
+
+    /**
+     * Crank the throttle from raw shaft rotation each server tick — Create's fluid valve is opened by
+     * spinning its shaft, which the throttle rewrite had disconnected (only the handle/scroll moved it).
+     * Positive speed opens, negative closes, and a stopped shaft holds the angle (no live-speed gate, so
+     * an idle valve never snaps shut). The rate mirrors Create's own pointer chase ({@code |speed|/16/20}
+     * of full travel per tick) mapped onto 0-90 degrees, with a fractional carry so a slow shaft still
+     * advances. Skipped for {@link #HANDLE_CRANK_COOLDOWN_TICKS} after a handle crank (that burst is
+     * already applied as intent), and inert with the feature off (Create's native shaft behaviour runs).
+     */
+    @Inject(method = "tick", at = @At("HEAD"))
+    private void pipesnphysics$crankFromShaft(CallbackInfo ci) {
+        if (pipesnphysics$throttle == null || level == null || level.isClientSide()) return;
+        if (!PipesNPhysicsConfig.ENABLE_VALVE_THROTTLE.get()) return;
+        if (pipesnphysics$handleCrankCooldown > 0) {
+            pipesnphysics$handleCrankCooldown--;
+            return;
+        }
+        float speed = getSpeed();
+        if (speed == 0) {
+            pipesnphysics$shaftCarry = 0;
+            return;
+        }
+        double rate = Mth.clamp(Math.abs(speed) / 16.0 / 20.0, 0, 1) * FULL_OPEN_DEGREES;
+        pipesnphysics$shaftCarry += Math.signum(speed) * rate;
+        int whole = (int) pipesnphysics$shaftCarry;
+        if (whole == 0) return;
+        pipesnphysics$shaftCarry -= whole;
+        int next = Mth.clamp(pipesnphysics$throttle.getValue() + whole, 0, FULL_OPEN_DEGREES);
+        if (next != pipesnphysics$throttle.getValue()) {
+            pipesnphysics$throttle.setValue(next); // the callback wakes the network + re-aims the handle
+        }
     }
 
     @Unique

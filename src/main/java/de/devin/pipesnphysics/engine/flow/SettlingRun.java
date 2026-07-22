@@ -95,6 +95,14 @@ final class SettlingRun {
     boolean settle() {
         if (cells.isEmpty()) return false;
 
+        // Crossing the streams with NO flow: a tank joined to the run holds a fluid the mouth
+        // cell's resting fluid is incompatible with — the two meet at the boundary exactly as
+        // Create pulls a tank's fluid into a pipe already carrying another. The brigade never
+        // catches this on two idle tanks (each fluid's pass bails with a single participant, the
+        // opposite endpoint walling it), so a water pipe touching a lava tank would just sit.
+        // Checked BEFORE the gas/sealed bails, which would otherwise skip a full primed run.
+        if (reactToBoundaryCollision()) return false;
+
         // A gas neither pools at the bottom nor drains downhill; hold it in place for now.
         if (lighterThanAir(presentFluid())) return false;
 
@@ -150,6 +158,47 @@ final class SettlingRun {
 
     private boolean isCrestBroken() {
         return solution.isCrestBroken(edge.index());
+    }
+
+    /**
+     * Register Create's crossing-the-streams for an idle run: each end reservoir presses its own
+     * fluid down its side of the run (a tank joined to a pipe pushes its fluid at the mouth — no
+     * flow needed), and where that column meets an INCOMPATIBLE fluid the two react, exactly as
+     * Create pulls a tank's fluid into a pipe already carrying another. The meeting point is the
+     * MOUTH cell for a uniform run into a rejecting tank, or an interface DEEP in the run where two
+     * tanks' columns touch — water settled in from the water end, lava from the lava end, meeting
+     * mid-run (each mouth cell then matches its OWN tank, so the old end-cell-only check saw no
+     * collision and the fluids just sat there touching). Two foreign pipe cells with no reservoir
+     * driving them still just block, as two idle fluids do.
+     */
+    private boolean reactToBoundaryCollision() {
+        // Non-short-circuit `|`: a run walled by a rejecting tank at BOTH ends reacts at both.
+        return pressColumn(edge.a(), false) | pressColumn(edge.b(), true);
+    }
+
+    /**
+     * Walk in from one end reservoir through the cells its own fluid fills — the column it presses
+     * into the run — and react at the first cell holding a fluid it REJECTS (can neither accept nor
+     * supply). Stops at a dry cell (a gap it would simply fill: no contact yet) or a compatible
+     * foreign fluid (a multi-fluid tank carrying it — not a collision). No fill-level gate, exactly
+     * as Create's own collision checks none.
+     */
+    private boolean pressColumn(int nodeIndex, boolean fromB) {
+        Reservoir reservoir = network.reservoirAt(nodeIndex);
+        if (reservoir == null || !reservoir.isFiniteReservoir() || !reservoir.holdsFluid()) {
+            return false;
+        }
+        FluidStack pressed = reservoir.contents();
+        for (int step = 0; step < cells.size(); step++) {
+            int i = fromB ? cells.size() - 1 - step : step;
+            BlockPos pos = cells.get(i);
+            PipeStore.Store cell = network.cellAt(pos);
+            if (cell == null || cell.amount() <= 0) return false;              // dry gap: no contact
+            if (FluidStack.isSameFluidSameComponents(cell.fluid(), pressed)) continue; // own column
+            if (!reservoir.rejects(cell.fluid())) return false;               // compatible: no react
+            return network.collides(pos, cell, pressed);                      // crossing the streams
+        }
+        return false;
     }
 
     /**
@@ -420,6 +469,9 @@ final class SettlingRun {
                         PipeGeometry.adjacentCell(network.graph, supply, nodeIndex));
                 if (feed == null || feed.amount() <= 0) continue;
                 fluid = feed.fluid();
+                // A running pump packing its supply fluid into an outlet cell holding a DIFFERENT one
+                // is crossing the streams (a dead-headed pump has no brigade run to catch it).
+                if (network.collides(endCell, cell, fluid)) return true;
                 if (cell.room(fluid) <= 0) continue;
                 if (feed.amount() >= network.cellCapacity) {
                     // The supply column has arrived: it CONDUCTS — draw from the reservoir

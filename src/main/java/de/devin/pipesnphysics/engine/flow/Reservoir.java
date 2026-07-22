@@ -167,4 +167,20 @@ public final class Reservoir {
     FluidStack contents() {
         return column.contents();
     }
+
+    /**
+     * Whether this reservoir is HARD-incompatible with {@code fluid} — its handler can NEITHER
+     * accept it (a lava tank refusing water) NOR already hold it (so a tank OF that fluid, or a
+     * multi-fluid basin carrying it, is not a collision). This is the crossing-the-streams test at
+     * a tank↔pipe boundary; like Create it checks no fill level, only compatibility. Budget-free:
+     * it probes the live handler, so a reservoir whose per-tick budgets are spent still reads true.
+     */
+    boolean rejects(FluidStack fluid) {
+        if (fluid.isEmpty()) return false;
+        IFluidHandler handler = column.handler(level);
+        if (handler == null) return false; // can't tell → never break a pipe on a hunch
+        if (handler.fill(fluid.copyWithAmount(1), FluidAction.SIMULATE) > 0) return false;
+        return BoundaryColumn.drainMatching(handler, fluid.copyWithAmount(1), FluidAction.SIMULATE)
+                .isEmpty();
+    }
 }

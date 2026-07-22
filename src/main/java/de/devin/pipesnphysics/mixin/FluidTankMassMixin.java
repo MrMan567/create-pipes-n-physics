@@ -77,11 +77,14 @@ public class FluidTankMassMixin implements BlockEntitySubLevelActor {
 
         FluidStack fluidStack = tank.getFluid();
         int density = fluidStack.getFluid().getFluidType().getDensity(fluidStack);
-        double massKg = TankMassFormulas.fluidMassKg(
-                fluidAmount, density, PipesNPhysicsConfig.FLUID_MASS_PER_BUCKET.get());
+        boolean lift = PipesNPhysicsConfig.ENABLE_GAS_BUOYANCY.get()
+                && fluidStack.getFluid().getFluidType().isLighterThanAir();
+        double massKg = TankMassFormulas.netMassKg(fluidAmount, density, lift,
+                PipesNPhysicsConfig.FLUID_MASS_PER_BUCKET.get(),
+                PipesNPhysicsConfig.FLUID_LIFT_PER_BUCKET.get());
         double fillFraction = TankMassFormulas.fillFraction(
                 fluidAmount, capacity);
 
-        SablePhysicsCompat.applyFluidWeight(subLevel, self.getBlockPos(), fillFraction, massKg);
+        SablePhysicsCompat.applyFluidWeight(subLevel, self.getBlockPos(), fillFraction, massKg, timeStep);
     }
 }

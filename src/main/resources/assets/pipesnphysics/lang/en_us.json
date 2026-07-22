@@ -49,6 +49,7 @@
   "pipesnphysics.gui.goggles.visc_syrupy": "syrupy",
   "pipesnphysics.gui.goggles.visc_thick": "thick",
   "pipesnphysics.gui.goggles.fluid_weight": "Weight: ",
+  "pipesnphysics.gui.goggles.fluid_lift": "Lift: ",
   "pipesnphysics.gui.goggles.kg": " kg",
 
   "pipesnphysics.gui.valve.throttle": "Valve Flow",

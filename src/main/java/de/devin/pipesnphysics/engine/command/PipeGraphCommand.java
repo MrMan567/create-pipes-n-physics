@@ -31,7 +31,10 @@ import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.network.chat.ClickEvent;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.HoverEvent;
+import net.minecraft.network.chat.Style;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.block.state.BlockState;
@@ -83,11 +86,13 @@ public final class PipeGraphCommand {
         BlockPos target = ((BlockHitResult) hit).getBlockPos();
         ServerLevel level = player.serverLevel();
 
+        Report report = new Report(player);
         Graph graph = FluidEngine.buildGraph(level, target);
         if (graph.isEmpty()) {
             // Not a pipe seed — inspect the block itself: what the engine classifies it as and why fluid
             // does (or does not) flow to it, then dump the network it touches, if any.
-            sendBlockReport(player, level, target);
+            sendBlockReport(report, level, target);
+            report.flush();
             return 1;
         }
         // Read the engine's OWN recent solution (the same source the goggle reads), not an
@@ -95,7 +100,8 @@ public final class PipeGraphCommand {
         Resolved resolved = recentSolve(level, target);
         if (resolved == null) return 1; // network vanished between build and solve
 
-        sendText(player, level, resolved.graph(), resolved.solution(), target);
+        sendText(report, level, resolved.graph(), resolved.solution(), target);
+        report.flush();
         PacketDistributor.sendToPlayer(player,
                 buildPayload(level, resolved.graph(), resolved.solution(), target));
         return 1;
@@ -142,9 +148,9 @@ public final class PipeGraphCommand {
      * whether an adjacent pipe actually opens toward it. When it touches a network the normal graph dump
      * follows. This is the compat-authoring counterpart to the player pipe goggle.
      */
-    private static void sendBlockReport(ServerPlayer player, ServerLevel level, BlockPos pos) {
+    private static void sendBlockReport(Report report, ServerLevel level, BlockPos pos) {
         BlockState state = level.getBlockState(pos);
-        send(player, "§e--- Engine view: §f" + state.getBlock().getName().getString()
+        report.line("§e--- Engine view: §f" + state.getBlock().getName().getString()
                 + " §7@ " + pos.toShortString() + " §e---");
 
         // Fluid capability, and on which faces. No handler anywhere and not a vanilla target → the engine
@@ -158,41 +164,41 @@ public final class PipeGraphCommand {
         if (vanilla) {
             // Even with a NeoForge cap (a cauldron), the engine deliberately skips these in the handler
             // branch and drinks them through an open pipe MOUTH — so its handler role is moot.
-            send(player, "§7Fluid cap: §evanilla fluid target §7— drained as an OPEN_END through an open pipe mouth, not a tank node");
+            report.line("§7Fluid cap: §evanilla fluid target §7— drained as an OPEN_END through an open pipe mouth, not a tank node");
         } else if (nullSide != null) {
-            send(player, "§7Fluid cap: §aside-agnostic §7(couples every run that touches it)");
+            report.line("§7Fluid cap: §aside-agnostic §7(couples every run that touches it)");
         } else if (!faces.isEmpty()) {
-            send(player, "§7Fluid cap: §eside-specific §7on faces §f" + faces
+            report.line("§7Fluid cap: §eside-specific §7on faces §f" + faces
                     + " §7(each face is its own tank / network)");
         } else {
-            send(player, "§7Fluid cap: §cnone §7— the engine cannot treat this block as a tank");
+            report.line("§7Fluid cap: §cnone §7— the engine cannot treat this block as a tank");
         }
 
         // Role + relay-detector state, only meaningful for a real handler node (not a vanilla open-end target).
         if (!vanilla && (nullSide != null || !faces.isEmpty())) {
-            send(player, "§7Role: §f" + HandlerRoles.explain(level, pos));
+            report.line("§7Role: §f" + HandlerRoles.explain(level, pos));
             if (!HandlerRoles.hasExplicitRole(state) && PipesNPhysicsConfig.AUTO_DETECT_RELAY_HANDLERS.get()) {
                 int strikes = RelayDetector.strikeCount(pos);
                 if (RelayDetector.isRelay(pos)) {
-                    send(player, "§7Detector: §elearned relay §7this session (this position)");
+                    report.line("§7Detector: §elearned relay §7this session (this position)");
                 } else if (strikes > 0) {
-                    send(player, "§7Detector: §f" + strikes + " §7spontaneous-gain strike(s) so far");
+                    report.line("§7Detector: §f" + strikes + " §7spontaneous-gain strike(s) so far");
                 }
             }
-            sendFaceProbe(player, level, pos, nullSide);
-            send(player, "§7Column (what the engine resolves): §f"
+            sendFaceProbe(report, level, pos, nullSide);
+            report.line("§7Column (what the engine resolves): §f"
                     + columnReport(level, pos, resolveAccessFace(level, pos)));
         }
 
         // Is an adjacent pipe/pump actually plumbed toward this block? Then dump the network it touches.
-        BlockPos seed = reportNeighbors(player, level, pos);
+        BlockPos seed = reportNeighbors(report, level, pos);
         if (seed != null) {
             Graph g = FluidEngine.buildGraph(level, seed);
             if (!g.isEmpty()) {
                 Solution s = FluidEngine.solveFresh(level, seed);
-                send(player, "§7— network it connects to (seed " + seed.toShortString() + ") —");
-                sendText(player, level, g, s, pos);
-                PacketDistributor.sendToPlayer(player, buildPayload(level, g, s, seed));
+                report.line("§7— network it connects to (seed " + seed.toShortString() + ") —");
+                sendText(report, level, g, s, pos);
+                PacketDistributor.sendToPlayer(report.player(), buildPayload(level, g, s, seed));
             }
         }
     }
@@ -205,18 +211,18 @@ public final class PipeGraphCommand {
      * face's holds/give/take, flagging any face that gives MORE than the {@code null} side — the handler the
      * engine should be reading through.
      */
-    private static void sendFaceProbe(ServerPlayer player, ServerLevel level, BlockPos pos, IFluidHandler nullSide) {
+    private static void sendFaceProbe(Report report, ServerLevel level, BlockPos pos, IFluidHandler nullSide) {
         FluidStack probe = probeFluid(level, pos);
         int nullGive = nullSide == null ? -1 : nullSide.drain(Integer.MAX_VALUE, FluidAction.SIMULATE).getAmount();
-        send(player, "§7Handler per face §8(probe " + probe.getHoverName().getString() + "):");
-        if (nullSide != null) send(player, "§d  null-side: " + oneProbe(nullSide, probe));
+        report.line("§7Handler per face §8(probe " + probe.getHoverName().getString() + "):");
+        if (nullSide != null) report.line("§d  null-side: " + oneProbe(nullSide, probe));
         for (Direction d : Direction.values()) {
             IFluidHandler cap = FluidCaps.at(level, pos, d);
             if (cap == null) continue;
             int give = cap.drain(Integer.MAX_VALUE, FluidAction.SIMULATE).getAmount();
             String flag = nullSide != null && cap != nullSide && give > nullGive
                     ? " §e← gives more than null-side; engine reads null → sees this block EMPTY" : "";
-            send(player, "§d  " + d + ": " + oneProbe(cap, probe) + flag);
+            report.line("§d  " + d + ": " + oneProbe(cap, probe) + flag);
         }
     }
 
@@ -294,7 +300,7 @@ public final class PipeGraphCommand {
      * Returns a seed to dump the touched network, preferring a pipe that genuinely opens toward the
      * block; null when nothing adjacent connects.
      */
-    private static BlockPos reportNeighbors(ServerPlayer player, ServerLevel level, BlockPos pos) {
+    private static BlockPos reportNeighbors(Report report, ServerLevel level, BlockPos pos) {
         BlockPos seed = null;
         boolean any = false;
         for (Direction face : Direction.values()) {
@@ -302,7 +308,7 @@ public final class PipeGraphCommand {
             if (!level.isLoaded(neighbor)) continue;
             BlockState nState = level.getBlockState(neighbor);
             if (nState.getBlock() instanceof PumpBlock) {
-                send(player, "§7  " + face + ": §badjacent pump");
+                report.line("§7  " + face + ": §badjacent pump");
                 any = true;
                 if (seed == null) seed = neighbor.immutable();
                 continue;
@@ -311,25 +317,25 @@ public final class PipeGraphCommand {
             if (pipe == null) continue;
             any = true;
             boolean opensBack = pipe.canHaveFlowToward(nState, face.getOpposite());
-            send(player, "§7  " + face + ": pipe " + (opensBack
+            report.line("§7  " + face + ": pipe " + (opensBack
                     ? "§aopens toward it ✓"
                     : "§cpresent but does NOT open back ✗ §7(stale connection / not plumbed this side)"));
             if (opensBack) seed = neighbor.immutable();          // prefer a genuinely-connected pipe
             else if (seed == null) seed = neighbor.immutable();  // still dump the network so the graph shows
         }
-        if (!any) send(player, "§7Neighbours: §cno adjacent pipe or pump §7— nothing to connect to");
+        if (!any) report.line("§7Neighbours: §cno adjacent pipe or pump §7— nothing to connect to");
         return seed;
     }
 
-    private static void sendText(ServerPlayer player, ServerLevel level, Graph g, Solution s, BlockPos target) {
-        send(player, "§e--- Pipe Graph ---");
-        send(player, "§7Nodes: §f" + g.nodes().size() + "  §7Edges: §f" + g.edges().size());
-        send(player, locateTarget(g, target));
-        printNodes(player, level, g, s, target);
-        sendFluidStats(player, level, g);
-        send(player, "§e--- Edges ---");
-        printEdges(player, g, s, target);
-        printTransfers(player, s);
+    private static void sendText(Report report, ServerLevel level, Graph g, Solution s, BlockPos target) {
+        report.line("§e--- Pipe Graph ---");
+        report.line("§7Nodes: §f" + g.nodes().size() + "  §7Edges: §f" + g.edges().size());
+        report.line(locateTarget(g, target));
+        printNodes(report, level, g, s, target);
+        sendFluidStats(report, level, g);
+        report.line("§e--- Edges ---");
+        printEdges(report, level, g, s, target);
+        printTransfers(report, s);
     }
 
     /**
@@ -355,13 +361,13 @@ public final class PipeGraphCommand {
     }
 
     /** One chat line per node (position, kind, heads, RPM) plus its fluid/pulley/probe/dock detail lines. */
-    private static void printNodes(ServerPlayer player, ServerLevel level, Graph g, Solution s, BlockPos target) {
+    private static void printNodes(Report report, ServerLevel level, Graph g, Solution s, BlockPos target) {
         FluidStack probeFluid = firstPresentFluid(level, g);
         for (Node n : g.nodes()) {
             Double head = s.nodeHeads().get(n.index());
             Double ceiling = s.nodeCeilings().get(n.index());
             String block = blockName(level, n);
-            send(player, String.format("  §f%s §7%s §b%s §7y=§f%.1f%s%s%s%s%s",
+            report.line(String.format("  §f%s §7%s §b%s §7y=§f%.1f%s%s%s%s%s",
                     n.pos().toShortString(), n.kind(), block,
                     n.worldY(),
                     head != null ? String.format(" §7head=§f%.2f", head) : "",
@@ -371,7 +377,7 @@ public final class PipeGraphCommand {
                     n.pos().equals(target) ? " §6← flagged" : ""));
             BoundaryColumn column = columnOf(level, n);
             if (column != null && !column.contents().isEmpty() && column.contentMb() > 0) {
-                send(player, "      §7" + (n.isOpenEnd()
+                report.line("      §7" + (n.isOpenEnd()
                         ? "draws §f" + column.contents().getHoverName().getString()
                         : fluidSummary(column)));
             }
@@ -380,7 +386,7 @@ public final class PipeGraphCommand {
             if (n.isClosedGate() || n.kind() == Node.Kind.JUNCTION) {
                 PipeStore.Store slot = PipeStore.at(level, n.pos());
                 if (slot != null) {
-                    send(player, String.format("      §7slot holds §f%d§7/%d mB%s", slot.amount(),
+                    report.line(String.format("      §7slot holds §f%d§7/%d mB%s", slot.amount(),
                             PipeStore.capacityMb(), slot.amount() > 0
                                     ? " §f" + slot.fluid().getHoverName().getString() : ""));
                 }
@@ -390,15 +396,15 @@ public final class PipeGraphCommand {
             if (n.isHandler()) {
                 BlockState state = level.getBlockState(n.pos());
                 if (HandlerRoles.hasExplicitRole(state) || HandlerRoles.isRelayEndpoint(level, n.pos())) {
-                    send(player, "      §erole: " + HandlerRoles.explain(level, n.pos()));
+                    report.line("      §erole: " + HandlerRoles.explain(level, n.pos()));
                 }
             }
             String pulley = pulleyDiagnostic(level, n);
-            if (pulley != null) send(player, "      §c" + pulley);
+            if (pulley != null) report.line("      §c" + pulley);
             String probe = handlerProbe(level, n, probeFluid);
-            if (probe != null) send(player, "      §d" + probe);
+            if (probe != null) report.line("      §d" + probe);
             String dock = dockingDiagnostic(level, n);
-            if (dock != null) send(player, "      §6" + dock);
+            if (dock != null) report.line("      §6" + dock);
         }
     }
 
@@ -407,8 +413,7 @@ public final class PipeGraphCommand {
      * a holds sub-line with the run's stored fluid cell by cell, and the gravity draw-lip
      * elevation at each handler end's opening (where that tank stops giving).
      */
-    private static void printEdges(ServerPlayer player, Graph g, Solution s, BlockPos target) {
-        ServerLevel level = player.serverLevel();
+    private static void printEdges(Report report, ServerLevel level, Graph g, Solution s, BlockPos target) {
         for (Edge e : g.edges()) {
             EdgeFlow flow = s.edgeFlows().get(e.index());
             int rate = PipeProbe.actualEdgeFlow(g, s, e); // mB actually moved, not the hydraulic flow
@@ -426,36 +431,52 @@ public final class PipeGraphCommand {
             }
             Solution.Reason reason = s.edgeReasons().get(e.index());
             Node a = g.node(e.a()), b = g.node(e.b());
-            send(player, String.format("  §e%s §f%s §7↔ §f%s §7len=%d §7%s §7solved=%d actual=%d mB/t%s%s",
+            report.line(String.format("  §e%s §f%s §7↔ §f%s §7len=%d §7%s §7solved=%d actual=%d mB/t%s%s",
                     GraphOverlayPayload.edgeLetter(e.index()),
                     a.pos().toShortString(), b.pos().toShortString(),
                     e.length(), dir, flow.mbPerTick(), rate,
                     reason != null ? " §8[" + reason + "]" : "",
                     e.pipes().contains(target) ? " §6← flagged" : ""));
             String holds = holdsLine(level, e);
-            if (holds != null) send(player, "      " + holds);
+            if (holds != null) report.line("      " + holds);
             String lips = lipLine(level, g, e);
-            if (lips != null) send(player, "      " + lips);
+            if (lips != null) report.line("      " + lips);
         }
     }
 
-    /** The run's stored fluid: total over capacity plus the cell-by-cell breakdown, a-end first. */
+    /**
+     * The run's stored fluid: total over capacity plus the cell-by-cell breakdown, a-end first. Each
+     * non-empty cell shows what it holds — just its mB when the whole run carries one fluid, or
+     * {@code mB:Fluid} per cell once the run is MIXED (a collision front, a switched fluid mid-flow),
+     * so "what each pipe holds in terms of fluid" is legible rather than a single run-wide label.
+     */
     private static String holdsLine(ServerLevel level, Edge e) {
         if (PipeStore.capacityMb() <= 0 || e.pipes().isEmpty()) return null;
-        StringBuilder cells = new StringBuilder();
-        FluidStack held = FluidStack.EMPTY;
+        int count = e.pipes().size();
+        int[] amounts = new int[count];
+        FluidStack[] fluids = new FluidStack[count];
+        FluidStack header = FluidStack.EMPTY;
         int total = 0;
-        for (BlockPos pos : e.pipes()) {
-            PipeStore.Store cell = PipeStore.at(level, pos);
-            int mb = cell == null ? 0 : cell.amount();
-            if (held.isEmpty() && mb > 0) held = cell.fluid();
-            total += mb;
-            if (!cells.isEmpty()) cells.append(' ');
-            cells.append(mb);
+        boolean mixed = false;
+        for (int i = 0; i < count; i++) {
+            PipeStore.Store cell = PipeStore.at(level, e.pipes().get(i));
+            amounts[i] = cell == null ? 0 : cell.amount();
+            fluids[i] = cell == null ? FluidStack.EMPTY : cell.fluid();
+            total += amounts[i];
+            if (amounts[i] > 0) {
+                if (header.isEmpty()) header = fluids[i];
+                else if (!FluidStack.isSameFluidSameComponents(header, fluids[i])) mixed = true;
+            }
+        }
+        StringBuilder cells = new StringBuilder();
+        for (int i = 0; i < count; i++) {
+            if (i > 0) cells.append(' ');
+            cells.append(amounts[i]);
+            if (mixed && amounts[i] > 0) cells.append(':').append(fluids[i].getHoverName().getString());
         }
         return String.format("§7holds §f%d§7/%d mB%s §8cells %s", total,
-                e.pipes().size() * PipeStore.capacityMb(),
-                held.isEmpty() ? "" : " §f" + held.getHoverName().getString() + "§7", cells);
+                count * PipeStore.capacityMb(),
+                header.isEmpty() ? "" : " §f" + header.getHoverName().getString() + "§7", cells);
     }
 
     /** The gravity draw-lip elevation of each handler end's opening cell ({@code PipeWindow.lipY}). */
@@ -474,16 +495,16 @@ public final class PipeGraphCommand {
     }
 
     /** The tick's planned endpoint transfers (diagnostics — execution is the brigade). */
-    private static void printTransfers(ServerPlayer player, Solution s) {
+    private static void printTransfers(Report report, Solution s) {
         if (s.hasTransfer()) {
             for (Solution.Transfer transfer : s.transfers()) {
-                send(player, String.format("§a> %d mB %s : %s → %s",
+                report.line(String.format("§a> %d mB %s : %s → %s",
                         transfer.fluid().getAmount(),
                         transfer.fluid().getHoverName().getString(),
                         transfer.from().toShortString(), transfer.to().toShortString()));
             }
         } else {
-            send(player, "§7> no transfer this tick");
+            report.line("§7> no transfer this tick");
         }
     }
 
@@ -800,7 +821,7 @@ public final class PipeGraphCommand {
      * buoyancy sign), viscosity (flow rate), and temperature. Flags a lighter-than-air
      * fluid, which inverts the gravity model.
      */
-    private static void sendFluidStats(ServerPlayer player, ServerLevel level, Graph g) {
+    private static void sendFluidStats(Report report, ServerLevel level, Graph g) {
         List<FluidStack> totals = new ArrayList<>();
         for (Node n : g.nodes()) {
             BoundaryColumn column = columnOf(level, n);
@@ -814,17 +835,58 @@ public final class PipeGraphCommand {
         }
         if (totals.isEmpty()) return;
 
-        send(player, "§e--- Fluids ---");
+        report.line("§e--- Fluids ---");
         for (FluidStack fluid : totals) {
             FluidType type = fluid.getFluid().getFluidType();
-            send(player, String.format("  §b%s§7: §f%d mB  §7density §f%d §7visc §f%d §7temp §f%dK%s",
+            report.line(String.format("  §b%s§7: §f%d mB  §7density §f%d §7visc §f%d §7temp §f%dK%s",
                     fluid.getHoverName().getString(), fluid.getAmount(),
                     type.getDensity(), type.getViscosity(), type.getTemperature(),
                     type.isLighterThanAir() ? "  §e(lighter than air ↑)" : ""));
         }
     }
 
-    private static void send(ServerPlayer player, String message) {
-        player.sendSystemMessage(Component.literal(message));
+    /**
+     * Accumulates the whole /pipegraph dump so it can be sent as one clickable block: every line
+     * is emitted carrying a COPY_TO_CLIPBOARD click event whose payload is the ENTIRE report as
+     * plain text, so a click anywhere on the output drops the full report onto the clipboard (handy
+     * for pasting a network's state into a bug report). Lines keep their {@code §} colour codes on
+     * screen; the clipboard copy is stripped to plain text.
+     */
+    private static final class Report {
+        private final ServerPlayer player;
+        private final List<String> lines = new ArrayList<>();
+
+        Report(ServerPlayer player) {
+            this.player = player;
+        }
+
+        ServerPlayer player() {
+            return player;
+        }
+
+        void line(String text) {
+            lines.add(text);
+        }
+
+        /** Emit every accumulated line, each click-to-copy of the full plain-text dump. */
+        void flush() {
+            String clipboard = plainText();
+            Style style = Style.EMPTY
+                    .withClickEvent(new ClickEvent(ClickEvent.Action.COPY_TO_CLIPBOARD, clipboard))
+                    .withHoverEvent(new HoverEvent(HoverEvent.Action.SHOW_TEXT,
+                            Component.literal("§eClick to copy the full report to clipboard")));
+            for (String text : lines) {
+                player.sendSystemMessage(Component.literal(text).withStyle(style));
+            }
+        }
+
+        /** The accumulated lines joined with newlines, colour codes removed — what lands on the clipboard. */
+        private String plainText() {
+            StringBuilder out = new StringBuilder();
+            for (String text : lines) {
+                out.append(text.replaceAll("§.", "")).append('\n');
+            }
+            return out.toString();
+        }
     }
 }

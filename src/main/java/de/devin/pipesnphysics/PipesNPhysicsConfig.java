@@ -29,6 +29,7 @@ public class PipesNPhysicsConfig {
     public static final ModConfigSpec.BooleanValue ENABLE_NETWORK_CACHE;
     public static final ModConfigSpec.BooleanValue ENABLE_DYNAMIC_TANK_MASS;
     public static final ModConfigSpec.BooleanValue EXPERIMENTAL_TANK_COG;
+    public static final ModConfigSpec.BooleanValue ENABLE_GAS_BUOYANCY;
     public static final ModConfigSpec.BooleanValue ENABLE_CENTRIFUGE;
     public static final ModConfigSpec.DoubleValue CENTRIFUGE_STRENGTH;
     public static final ModConfigSpec.BooleanValue ENABLE_CENTRIFUGE_UNMIX;
@@ -43,6 +44,7 @@ public class PipesNPhysicsConfig {
     public static final ModConfigSpec.BooleanValue ENABLE_SUBLEVEL_CONNECTION_REFRESH;
     public static final ModConfigSpec.BooleanValue ENABLE_CROSS_LEVEL_PIPING;
     public static final ModConfigSpec.DoubleValue FLUID_MASS_PER_BUCKET;
+    public static final ModConfigSpec.DoubleValue FLUID_LIFT_PER_BUCKET;
 
     // Client
     public static final ModConfigSpec.BooleanValue SHOW_PIPE_GOGGLE_INFO;
@@ -62,10 +64,71 @@ public class PipesNPhysicsConfig {
     static {
         ModConfigSpec.Builder server = new ModConfigSpec.Builder();
 
+        // ================================================================= Engine
         server.push("engine");
         ENABLE_ENGINE = server
                 .comment("Master switch. When false, Create's vanilla pipe transport runs unmodified.")
                 .define("enableEngine", true);
+
+        // -------------------------------------------------------------- Behaviors
+        server.comment("Optional engine behaviors — how open ends, pumps, relays, and the graph",
+                        "cache act. Toggles (and their tuning), separate from the raw flow numbers.")
+                .push("behaviors");
+        PUMP_DRAIN_ANY_LEVEL = server
+                .comment("Let a pump drain a tank from a connection ABOVE the fluid's surface — i.e. pull a",
+                        "tank down past a side or top pipe instead of stopping once the level drops below it",
+                        "(as if the pump had a dip tube reaching the bottom). Only applies where a pump is",
+                        "actively drawing from the tank; plain gravity flow still can't leave an opening above",
+                        "the waterline. The suction limit still bounds how far the pump can lift.")
+                .define("pumpDrainAnyLevel", false);
+        ENABLE_OPEN_END_INTAKE = server
+                .comment("Let a VERTICAL open pipe end draw fluid IN from the world when the network is",
+                        "under suction (its head sits below the pipe mouth): a self-regenerating source",
+                        "(a lake), a cauldron, or a finite/hand-placed source block. A HORIZONTAL mouth",
+                        "never draws in — it is a spill outlet only, or it would just reclaim its own",
+                        "spill. To keep a vertical mouth from sucking back what it spilled, a network",
+                        "that spilled from ANY open end recently will not pull a finite source",
+                        "(lakes/cauldrons are unaffected).")
+                .define("enableOpenEndIntake", true);
+        OPEN_END_INTAKE_COOLDOWN_TICKS = server
+                .comment("After an open end on a network spills, how many ticks before that network",
+                        "may pull a finite source again (the anti-reclaim window). Lakes and cauldrons",
+                        "ignore this. Larger = safer against flicker on networks that both push and pull.")
+                .defineInRange("openEndIntakeCooldownTicks", 20, 0, 200);
+        FORCE_OPEN_END_OUTPUT = server
+                .comment("Let an open-ended pipe keep draining fluid OUT even when the space it faces is",
+                        "already filled by a fluid source block (its own earlier spill, or a natural pool),",
+                        "instead of backing the network up. The space is already full, so the extra fluid",
+                        "is DISCARDED. Off by default because it destroys fluid; turn it on for an open end",
+                        "used as an overflow/drain into a body of fluid.")
+                .define("forceOpenEndOutput", false);
+        AUTO_DETECT_RELAY_HANDLERS = server
+                .comment("Automatically detect fluid-handler blocks that are NOT passive tanks — relays",
+                        "like a docking connector or a flexible hose — and stop equalizing them as",
+                        "reservoirs. A real tank only changes fill by our transfers; a relay spontaneously",
+                        "GAINS fluid from its own pairing/cascade (a consumer only ever loses it). A block",
+                        "type seen gaining fluid on its own several times is treated as a drain-priority",
+                        "relay endpoint (a one-way source while it holds fluid, a one-way sink while empty),",
+                        "so it is drained/filled on demand instead of being wrongly held 'balanced'. Override",
+                        "with the block tags is_reservoir (force normal tank), relay_endpoint (force relay),",
+                        "sink_only (receive-only), or ignore_fluid_handler (skip); Create tanks and basins",
+                        "are never demoted.")
+                .define("autoDetectRelayHandlers", true);
+        ENABLE_NETWORK_CACHE = server
+                .comment("Reuse each pipe network's discovered graph across ticks instead of re-scanning",
+                        "it from the world every solve. Every edit that can change a network's shape",
+                        "(break/place, pump flips, valve angles, chunk loads) evicts the cached graph,",
+                        "and entries expire after a few ticks anyway so event-less edits (pistons,",
+                        "contraption assembly) are picked up promptly. Also governs the Sable sub-level",
+                        "pipe-scan cache. Turn off only to rule caching out while debugging odd network",
+                        "behavior.")
+                .define("enableNetworkCache", true);
+        server.pop();
+
+        // ----------------------------------------------------------- Flow scaling
+        server.comment("The numeric tuning of the hydraulics — how fast, how much, and how high",
+                        "fluid moves. These set the feel of every network.")
+                .push("flowScaling");
         PIPE_CONDUCTANCE = server
                 .comment("Flow in mB/tick that one pipe segment passes per block of head difference.",
                         "Higher values equalize tanks faster and raise throughput everywhere.")
@@ -95,32 +158,10 @@ public class PipesNPhysicsConfig {
                 .comment("How many blocks the head at a pipe's highest point may sit below that point",
                         "before the liquid column breaks (the siphon / cavitation limit).")
                 .defineInRange("suctionLimitBlocks", 8.0, 0.0, 256.0);
-        PUMP_DRAIN_ANY_LEVEL = server
-                .comment("Let a pump drain a tank from a connection ABOVE the fluid's surface — i.e. pull a",
-                        "tank down past a side or top pipe instead of stopping once the level drops below it",
-                        "(as if the pump had a dip tube reaching the bottom). Only applies where a pump is",
-                        "actively drawing from the tank; plain gravity flow still can't leave an opening above",
-                        "the waterline. The suction limit above still bounds how far the pump can lift.")
-                .define("pumpDrainAnyLevel", false);
-        ENABLE_OPEN_END_INTAKE = server
-                .comment("Let an open pipe end draw fluid IN from the world when the network is under",
-                        "suction (its head sits below the pipe mouth): a self-regenerating source (a",
-                        "lake), a cauldron, or a finite/hand-placed source block. To keep it from",
-                        "sucking back what it just spilled, a network that spilled from ANY open end",
-                        "recently will not pull a finite source (lakes/cauldrons are unaffected).")
-                .define("enableOpenEndIntake", true);
-        OPEN_END_INTAKE_COOLDOWN_TICKS = server
-                .comment("After an open end on a network spills, how many ticks before that network",
-                        "may pull a finite source again (the anti-reclaim window). Lakes and cauldrons",
-                        "ignore this. Larger = safer against flicker on networks that both push and pull.")
-                .defineInRange("openEndIntakeCooldownTicks", 20, 0, 200);
-        FORCE_OPEN_END_OUTPUT = server
-                .comment("Let an open-ended pipe keep draining fluid OUT even when the space it faces is",
-                        "already filled by a fluid source block (its own earlier spill, or a natural pool),",
-                        "instead of backing the network up. The space is already full, so the extra fluid",
-                        "is DISCARDED. Off by default because it destroys fluid; turn it on for an open end",
-                        "used as an overflow/drain into a body of fluid.")
-                .define("forceOpenEndOutput", false);
+        server.pop();
+
+        // ---------------------------------------------------------------- Valves
+        server.comment("The crank-to-open fluid valve throttle.").push("valves");
         ENABLE_VALVE_THROTTLE = server
                 .comment("Let a fluid valve throttle its flow by a 0-90 degree angle set with the scroll",
                         "value (the box on its side faces). The shaft still opens and closes the valve;",
@@ -135,30 +176,13 @@ public class PipesNPhysicsConfig {
                         "(very restrictive until near open). Only reshapes the knob's feel; the engine's",
                         "flow model stays linear.")
                 .defineEnum("valveCharacteristic", ValveCharacteristic.LINEAR);
-        AUTO_DETECT_RELAY_HANDLERS = server
-                .comment("Automatically detect fluid-handler blocks that are NOT passive tanks — relays",
-                        "like a docking connector or a flexible hose — and stop equalizing them as",
-                        "reservoirs. A real tank only changes fill by our transfers; a relay spontaneously",
-                        "GAINS fluid from its own pairing/cascade (a consumer only ever loses it). A block",
-                        "type seen gaining fluid on its own several times is treated as a drain-priority",
-                        "relay endpoint (a one-way source while it holds fluid, a one-way sink while empty),",
-                        "so it is drained/filled on demand instead of being wrongly held 'balanced'. Override",
-                        "with the block tags is_reservoir (force normal tank), relay_endpoint (force relay),",
-                        "sink_only (receive-only), or ignore_fluid_handler (skip); Create tanks and basins",
-                        "are never demoted.")
-                .define("autoDetectRelayHandlers", true);
-        ENABLE_NETWORK_CACHE = server
-                .comment("Reuse each pipe network's discovered graph across ticks instead of re-scanning",
-                        "it from the world every solve. Every edit that can change a network's shape",
-                        "(break/place, pump flips, valve angles, chunk loads) evicts the cached graph,",
-                        "and entries expire after a few ticks anyway so event-less edits (pistons,",
-                        "contraption assembly) are picked up promptly. Also governs the Sable sub-level",
-                        "pipe-scan cache. Turn off only to rule caching out while debugging odd network",
-                        "behavior.")
-                .define("enableNetworkCache", true);
         server.pop();
+        server.pop(); // engine
 
-        server.push("sableCompat");
+        // ================================================================= Sable
+        server.comment("Integration with the Sable physics mod — everything below only does anything",
+                        "when a contraption is an assembled Sable sub-level (inert otherwise).")
+                .push("sable");
         ENABLE_OPEN_END_WORLD_PLACEMENT = server
                 .comment("When an open-ended pipe on a Sable sub-level spills fluid,",
                         "place the fluid block in the real world at the projected position.")
@@ -178,9 +202,10 @@ public class PipesNPhysicsConfig {
                         "dimension it overlaps. Uses the same one-way vacuum intake and anti-reclaim guards",
                         "as ordinary open-end intake, plus a spatial (broadphase) query per mouth.")
                 .define("enableCrossLevelPiping", true);
-        server.pop();
 
-        server.push("tankMass");
+        // ------------------------------------------------------------- Tank mass
+        server.comment("Fluid weight and buoyancy on a sub-level (heavier when full, lift from a gas).")
+                .push("tankMass");
         ENABLE_DYNAMIC_TANK_MASS = server
                 .comment("Enable dynamic mass for fluid tanks on Sable sub-levels.",
                         "Fuller tanks become heavier, affecting sub-level physics.")
@@ -189,11 +214,25 @@ public class PipesNPhysicsConfig {
                 .comment("Mass in kg added per bucket of fluid stored in a tank.")
                 .defineInRange("fluidMassPerBucket", 0.1, 0.001, 100.0);
         EXPERIMENTAL_TANK_COG = server
-                .comment("EXPERIMENTAL: shift center of gravity based on fluid fill level.")
+                .comment("EXPERIMENTAL: settle the fluid's mass toward the low side of the tank by fill",
+                        "level (a fuller tank sits lower). Off still adds the mass — just at the block",
+                        "centre — so a tank's weight always shifts the contraption's centre of gravity.")
                 .define("experimentalTankCenterOfGravity", true);
+        ENABLE_GAS_BUOYANCY = server
+                .comment("Let a tank holding a lighter-than-air fluid provide upward LIFT instead of",
+                        "weight (a gas cell acts like a balloon). Applied as an upward force, never as",
+                        "negative mass, so it can't destabilise the contraption's mass distribution.")
+                .define("enableGasBuoyancy", true);
+        FLUID_LIFT_PER_BUCKET = server
+                .comment("Lift in kg per bucket of a lighter-than-air fluid. Deliberately independent of",
+                        "the fluid's (sub-zero) density: a gas cell lifts by its fill volume, not by how",
+                        "far below air its density sits. 0 disables the effect while keeping the toggle on.")
+                .defineInRange("fluidLiftPerBucket", 0.1, 0.0, 100.0);
         server.pop();
 
-        server.push("centrifuge");
+        // ------------------------------------------------------------ Centrifuge
+        server.comment("Fling fluid outward on a spinning contraption, and reverse-mix separation.")
+                .push("centrifuge");
         ENABLE_CENTRIFUGE = server
                 .comment("Fling fluid outward on a spinning Sable contraption: a cell's orbital speed adds",
                         "a centrifugal term to its effective elevation, so fluid collects in the faster-moving",
@@ -223,7 +262,9 @@ public class PipesNPhysicsConfig {
                 .defineInRange("centrifugeMinAngularSpeed", 0.0, 0.0, 1000.0);
         server.pop();
 
-        server.push("momentum");
+        // -------------------------------------------------------------- Momentum
+        server.comment("Slosh fluid opposite the acceleration of an accelerating contraption.")
+                .push("momentum");
         ENABLE_MOMENTUM_HEAD = server
                 .comment("Slosh fluid on an ACCELERATING contraption: when its linear velocity changes, fluid is",
                         "pushed opposite the acceleration (toward the back when speeding up, forward when braking),",
@@ -240,7 +281,8 @@ public class PipesNPhysicsConfig {
                 .defineInRange("momentumMinAccel", 0.0, 0.0, 1000.0);
         server.pop();
 
-        server.push("debug");
+        // ----------------------------------------------------------------- Debug
+        server.comment("Throwaway sub-level diagnostics.").push("debug");
         DEBUG_SUBLEVEL_SPIN = server
                 .comment("DEBUG SPIKE: read a Sable sub-level's rigid-body angular velocity server-side",
                         "and action-bar the spin rate (rad/s + RPM), axis, and linear speed to players in",
@@ -248,11 +290,15 @@ public class PipesNPhysicsConfig {
                         "Off by default; a throwaway probe for the centrifuge-recipe investigation.")
                 .define("debugSubLevelSpin", false);
         server.pop();
+        server.pop(); // sable
 
         SERVER_SPEC = server.build();
 
         ModConfigSpec.Builder client = new ModConfigSpec.Builder();
-        client.push("goggles");
+
+        // ================================================================= Engine
+        client.push("engine");
+        client.comment("Engineer's Goggles readouts for pipes and pumps.").push("goggles");
         SHOW_PIPE_GOGGLE_INFO = client
                 .comment("Show engine stats (status, fluid, flow, pressure) when looking",
                         "at a pipe with Engineer's Goggles.")
@@ -270,7 +316,8 @@ public class PipesNPhysicsConfig {
                 .comment("How many seconds the pump range indicator lingers after looking away.")
                 .defineInRange("pumpRangePreserveSeconds", 5, 1, 60);
         client.pop();
-        client.push("controls");
+
+        client.comment("In-hand editing of a pipe network.").push("controls");
         ENABLE_PIPE_SWAP = client
                 .comment("Shift + right-click a pipe element (pump, valve, smart fluid pipe, pipe) held in",
                         "hand onto another pipe element to replace it in place — the old block's drops are",
@@ -279,7 +326,9 @@ public class PipesNPhysicsConfig {
                         "integrated server; a dedicated server always allows the swap.)")
                 .define("enablePipeSwap", true);
         client.pop();
-        client.push("pipeRendering");
+
+        client.comment("Drawing the fluid inside pipes, and running the engine inside Ponder.")
+                .push("rendering");
         PIPE_LEVEL_RENDER = client
                 .comment("Draw the fluid inside (glass) pipes. What is drawn is the pipe's REAL stored",
                         "content, synced from the server, so the fill always matches the actual fluid",
@@ -297,7 +346,12 @@ public class PipesNPhysicsConfig {
                         "instead of Create's stock pipe transport. Off = Ponder shows Create's behavior.")
                 .define("enablePonderEngine", true);
         client.pop();
-        client.push("sableFluidPhysics");
+        client.pop(); // engine
+
+        // ================================================================= Sable
+        client.comment("Client rendering of fluid on Sable sub-levels (inert without Sable).")
+                .push("sable");
+        client.comment("Tilted, wavy fluid surfaces in tanks on a moving sub-level.").push("fluidPhysics");
         FLUID_TILT_ENABLED = client
                 .comment("Enable tilted fluid rendering in tanks on Sable sub-levels.")
                 .define("fluidTiltEnabled", true);
@@ -314,6 +368,7 @@ public class PipesNPhysicsConfig {
                 .comment("Hide fluid textures, showing only debug wireframe.")
                 .define("fluidHideTexture", false);
         client.pop();
+        client.pop(); // sable
         CLIENT_SPEC = client.build();
     }
 }

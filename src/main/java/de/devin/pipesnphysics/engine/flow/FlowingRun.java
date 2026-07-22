@@ -62,10 +62,33 @@ final class FlowingRun {
     }
 
     void tick() {
+        // A run driven for one fluid whose cells hold a DIFFERENT one is crossing the streams: react
+        // at the boundary (Create breaks the pipe) instead of pistoning the resident fluid downstream
+        // into the wrong sink. Skip the rest of the run this tick — the colliding cell breaks after
+        // the flush and the network re-solves next tick.
+        if (reactToForeignFluid()) return;
         deliver();
         shiftForward();
         intake();
         stampFlowAnimation();
+    }
+
+    /**
+     * The first cell (from the source side) holding a fluid different from this run's pass fluid —
+     * where this flow's front meets a foreign fluid. Records the collision and reports it so the run
+     * moves nothing this tick; the resting-adjacent case (no driven flow) is left to the settle,
+     * which just blocks, exactly as two idle fluids do.
+     */
+    private boolean reactToForeignFluid() {
+        for (BlockPos pos : cells) {
+            PipeStore.Store cell = network.cellAt(pos);
+            if (cell == null || cell.amount() <= 0) continue;
+            if (!FluidStack.isSameFluidSameComponents(cell.fluid(), fluid)) {
+                network.collide(pos, cell.fluid(), fluid);
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -82,6 +105,10 @@ final class FlowingRun {
         }
         PipeStore.Store slot = network.slotAt(downstreamNode());
         if (slot == null) return;
+        BlockPos slotPos = network.graph.node(downstreamNode()).pos();
+        // Two fluids converging at a junction: this run's fluid meets a different one already pooled
+        // in the slot — crossing the streams at the junction cell.
+        if (network.collides(slotPos, slot, fluid)) return;
         if (cells.isEmpty()) {
             topUpSlotThroughWire(slot);
             return;

@@ -1,7 +1,9 @@
 package de.devin.pipesnphysics.engine.flow;
 
+import com.simibubi.create.content.fluids.FluidReactions;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.compat.SableCompat;
+import de.devin.pipesnphysics.engine.EngineTickHandler;
 import de.devin.pipesnphysics.engine.boundary.BoundaryColumn;
 import de.devin.pipesnphysics.engine.boundary.OpenEndPipes;
 import de.devin.pipesnphysics.engine.graph.Edge;
@@ -11,6 +13,7 @@ import de.devin.pipesnphysics.engine.store.PipeStore;
 import de.devin.pipesnphysics.engine.store.PipeWindow;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.Level;
+import net.neoforged.neoforge.fluids.FluidStack;
 
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -54,6 +57,8 @@ public final class FlowNetwork {
 
     private final Map<BlockPos, PipeStore.Store> cells = new HashMap<>();
     private final Map<Integer, Reservoir> reservoirs = new HashMap<>();
+    /** Cells where two different fluids were driven together this tick — reacted after the flush. */
+    private final Map<BlockPos, Collision> collisions = new HashMap<>();
 
     public FlowNetwork(Level level, Graph graph) {
         this.level = level;
@@ -147,6 +152,55 @@ public final class FlowNetwork {
     public void flush() {
         for (PipeStore.Store cell : cells.values()) {
             if (cell != null) cell.flush();
+        }
+    }
+
+    // ---------------------------------------------------------------- fluid collisions
+
+    /** Two fluids driven together at a pipe cell: the resident one and the one pushed into it. */
+    private record Collision(FluidStack resident, FluidStack incoming) {}
+
+    /**
+     * Record that {@code incoming} was driven into the pipe cell at {@code pos}, which already holds
+     * a different {@code resident} fluid — Create's "crossing the streams". Deduped per cell; applied
+     * once after the flush ({@link #reactToCollisions}), so no pipe is broken mid-execution.
+     */
+    void collide(BlockPos pos, FluidStack resident, FluidStack incoming) {
+        if (resident.isEmpty() || incoming.isEmpty()
+                || FluidStack.isSameFluidSameComponents(resident, incoming)) {
+            return;
+        }
+        collisions.putIfAbsent(pos.immutable(), new Collision(resident.copy(), incoming.copy()));
+    }
+
+    /**
+     * Whether pushing {@code incoming} into {@code cell} at {@code pos} collides with a different
+     * fluid already resting there — records it for the reaction and reports true so the caller
+     * moves nothing. Empty or same-fluid destinations are no collision (ordinary flow / back-up).
+     */
+    boolean collides(BlockPos pos, PipeStore.Store cell, FluidStack incoming) {
+        if (incoming.isEmpty() || cell.amount() <= 0
+                || FluidStack.isSameFluidSameComponents(cell.fluid(), incoming)) {
+            return false;
+        }
+        collide(pos, cell.fluid(), incoming);
+        return true;
+    }
+
+    /**
+     * Apply every collision recorded this tick through Create's own {@link FluidReactions}: the pipe
+     * breaks and a reactive pair leaves its block (water+lava → cobblestone), exactly the
+     * crossing-the-streams path our transport-cancel mixin removed. Server-only (world mutation,
+     * advancement, {@code PipeCollisionEvent}); each break wakes the network so the now-stale cached
+     * graph is re-discovered next tick.
+     */
+    public void reactToCollisions() {
+        if (collisions.isEmpty() || level.isClientSide()) return;
+        for (Map.Entry<BlockPos, Collision> entry : collisions.entrySet()) {
+            BlockPos pos = entry.getKey();
+            FluidReactions.handlePipeFlowCollision(level, pos, entry.getValue().resident(),
+                    entry.getValue().incoming());
+            EngineTickHandler.markChanged(level, pos);
         }
     }
 }
