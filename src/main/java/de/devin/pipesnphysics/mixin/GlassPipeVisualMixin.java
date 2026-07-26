@@ -3,7 +3,7 @@ package de.devin.pipesnphysics.mixin;
 import com.simibubi.create.content.fluids.FluidTransportBehaviour;
 import com.simibubi.create.content.fluids.PipeConnection;
 import com.simibubi.create.content.fluids.pipes.GlassPipeVisual;
-import de.devin.pipesnphysics.compat.CreatePipeRendering;
+import de.devin.pipesnphysics.client.render.PipeFluidRenderer;
 import net.minecraft.core.Direction;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -12,21 +12,14 @@ import org.spongepowered.asm.mixin.injection.ModifyConstant;
 import org.spongepowered.asm.mixin.injection.Redirect;
 
 /**
- * Pulls a pipe's fluid surface back from an OPEN mouth so it stops z-fighting the rim.
+ * Hands in-pipe fluid rendering to the engine: while it is enabled, a real pipe's {@code getFlow}
+ * reads null here so Create's visual draws nothing — {@code PipeFluidRenderer} draws the cell's
+ * synced stored content instead. Virtual (ponder/schematic) pipes keep Create's animation, as does
+ * everything when the engine is off.
  *
- * At a fluid front with nothing ahead (an open end or a dead end) Create insets the
- * rendered fill by a hairline {@code 1e-6}, which leaves the surface quad coplanar with
- * the pipe opening — they fight for depth and flicker. Widening that inset to a real gap
- * advances the fluid a touch less and separates the two faces. Only the no-continuation
- * fronts hit this constant; a pipe whose flow continues into a neighbour keeps progress at
- * 1 and renders seamless. Mirrors {@link TransparentStraightPipeRendererMixin}.
- *
- * It also hands the in-pipe LEVEL renderer ({@code PIPE_LEVEL_RENDER}) ownership of cells
- * with a solved waterline: when the flag is on, a cell whose pipe behaviour carries level data
- * ({@link de.devin.pipesnphysics.compat.PipeLevelData}, a dedicated synced field — NOT the fluid
- * amount) is hidden from Create (its {@code getFlow} reads null, so Create's loop skips it) and
- * {@code client.PipeLevelRenderer} draws the partial fill instead. Unstamped cells are untouched, so
- * Create keeps drawing them.
+ * Also widens Create's hairline {@code 1e-6} open-end fill inset to a real gap so a fluid front at
+ * an open mouth stops z-fighting the pipe rim (relevant when Create IS drawing — engine off /
+ * ponder). Mirrors {@link TransparentStraightPipeRendererMixin}.
  */
 @Mixin(value = GlassPipeVisual.class, remap = false)
 public class GlassPipeVisualMixin {
@@ -37,11 +30,8 @@ public class GlassPipeVisualMixin {
 
     @Redirect(method = "beginFrame", at = @At(value = "INVOKE",
             target = "Lcom/simibubi/create/content/fluids/FluidTransportBehaviour;getFlow(Lnet/minecraft/core/Direction;)Lcom/simibubi/create/content/fluids/PipeConnection$Flow;"))
-    private PipeConnection.Flow pipesnphysics$hideLevelFlow(FluidTransportBehaviour pipe, Direction side) {
-        if (CreatePipeRendering.hidesFromCreate(pipe)) return null;
-        PipeConnection.Flow flow = pipe.getFlow(side);
-        // A face capped by a solid block carries no flow; fill its half from the network side so the
-        // terminal cell of a run stopped by a placed block renders full, not half.
-        return flow != null ? flow : CreatePipeRendering.deadEndFillFlow(pipe, side);
+    private PipeConnection.Flow pipesnphysics$hideEngineOwnedFlow(FluidTransportBehaviour pipe, Direction side) {
+        if (PipeFluidRenderer.hidesFromCreate(pipe)) return null;
+        return pipe.getFlow(side);
     }
 }

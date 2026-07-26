@@ -104,12 +104,19 @@ public abstract class PumpBlockEntityMixin extends KineticBlockEntity {
                 .add(GoggleText.lang("gui.goggles.mb_per_tick").style(ChatFormatting.DARK_GRAY))
                 .forGoggles(tooltip, 1);
 
-        // Name the binding limiter on the default view when the pump runs below cap.
+        // Name the binding limiter on the default view when the pump runs below cap. Three factors
+        // can hold it down — lift, pipe run, and supply. The solver's hydraulic flow is
+        // cap·headFactor·friction; the source/sink then throttle THAT to what actually moves, so
+        // supplyFactor = actual / hydraulic. The smallest factor is the binding constraint, so a
+        // starved pump reads "limited by supply" instead of being mislabelled lift/pipe-run.
         if (data != null && data.hasPumpLoad() && rate > 0 && rate < flowCap * 0.95f
                 && headSupplied > 1e-6) {
             float headFactor = (float) ((headSupplied - data.pumpHeadAgainst()) / headSupplied);
-            String capKey = headFactor < data.pumpFrictionFactor()
-                    ? "gui.goggles.pump_cap_lift" : "gui.goggles.pump_cap_friction";
+            float friction = data.pumpFrictionFactor();
+            float supply = pipesnphysics$supplyFactor(rate, flowCap, headFactor, friction);
+            String capKey = supply <= headFactor && supply <= friction ? "gui.goggles.pump_cap_supply"
+                    : headFactor < friction ? "gui.goggles.pump_cap_lift"
+                    : "gui.goggles.pump_cap_friction";
             GoggleText.lang(capKey).style(ChatFormatting.DARK_GRAY).forGoggles(tooltip, 2);
         }
 
@@ -173,5 +180,30 @@ public abstract class PumpBlockEntityMixin extends KineticBlockEntity {
                     .add(GoggleText.text(Math.round(friction * 100f) + "%").style(ChatFormatting.GOLD))
                     .forGoggles(tooltip, 3);
         }
+        // The third factor: how much of the pump's hydraulic flow the source/sink actually let
+        // through. lift × pipe-run × supply reconstructs the throughput bar above.
+        float supply = pipesnphysics$supplyFactor(rate, flowCap, headFactor, friction);
+        if (supply < 0.985f) {
+            GoggleText.lang("gui.goggles.load_supply")
+                    .style(ChatFormatting.DARK_GRAY)
+                    .add(GoggleText.text(Math.round(supply * 100f) + "%").style(ChatFormatting.GOLD))
+                    .forGoggles(tooltip, 3);
+        }
+    }
+
+    /**
+     * The share of the pump's HYDRAULIC flow that actually reaches the far endpoint: actual moved /
+     * (cap · headFactor · friction). Below 1 when the source can't supply — or the sink can't accept
+     * — the rate the pump curve allows; the third factor, beside lift and pipe run, that holds
+     * throughput under the cap. Gravity assist (headFactor > 1) can't push past the pump's own
+     * throughput cap, so the lift share is clamped to 1 in the denominator — else assist would
+     * fabricate a supply deficit. Result clamped to [0,1]; 1 when there is no hydraulic flow.
+     */
+    @Unique
+    private static float pipesnphysics$supplyFactor(int rate, double flowCap,
+                                                    float headFactor, float friction) {
+        double hydraulic = flowCap * Math.clamp(headFactor, 0f, 1f) * friction;
+        if (hydraulic <= 1e-6) return 1f;
+        return (float) Math.clamp(rate / hydraulic, 0.0, 1.0);
     }
 }

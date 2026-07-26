@@ -5,27 +5,44 @@ import com.simibubi.create.foundation.item.ItemDescription;
 import com.simibubi.create.foundation.item.KineticStats;
 import com.simibubi.create.foundation.item.TooltipModifier;
 import de.devin.pipesnphysics.compat.SableCompat;
+import de.devin.pipesnphysics.datagen.PnpLanguageProvider;
+import de.devin.pipesnphysics.display.PnpDisplaySources;
 import de.devin.pipesnphysics.engine.EngineTickHandler;
-import de.devin.pipesnphysics.engine.OpenEndPipes;
-import de.devin.pipesnphysics.engine.RelayDetector;
+import de.devin.pipesnphysics.engine.boundary.OpenEndPipes;
+import de.devin.pipesnphysics.engine.boundary.RelayDetector;
 import de.devin.pipesnphysics.engine.command.PipeGraphCommand;
+import de.devin.pipesnphysics.engine.graph.GraphCache;
 import de.devin.pipesnphysics.engine.net.EnginePackets;
 import de.devin.pipesnphysics.handler.NetworkEditHandler;
+import de.devin.pipesnphysics.handler.PipeContentCarry;
 import de.devin.pipesnphysics.handler.PipeSwapHandler;
+import de.devin.pipesnphysics.recipe.CentrifugeRecipes;
 import net.createmod.catnip.lang.FontHelper;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.server.MinecraftServer;
 import net.neoforged.bus.api.IEventBus;
 import net.neoforged.fml.ModContainer;
 import net.neoforged.fml.common.Mod;
 import net.neoforged.fml.config.ModConfig;
+import net.neoforged.fml.event.config.ModConfigEvent;
 import net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent;
 import net.neoforged.neoforge.common.NeoForge;
+import net.neoforged.neoforge.event.AddReloadListenerEvent;
+import net.neoforged.neoforge.event.TagsUpdatedEvent;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
 import net.neoforged.neoforge.event.server.ServerStoppedEvent;
 import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
+import net.neoforged.neoforge.server.ServerLifecycleHooks;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+/**
+ * Hello and welcome to PipesNPhysics!
+ * You are probably looking into how to build centrifuge recipes and make your fluid components work. Therefore head over to
+ *
+ * @see de.devin.pipesnphysics.api.CentrifugeApi
+ * @see de.devin.pipesnphysics.api.FluidHandlerApi
+ */
 @Mod(PipesNPhysics.ID)
 public class PipesNPhysics {
     public static final String ID = "pipesnphysics";
@@ -44,6 +61,8 @@ public class PipesNPhysics {
 
         modBus.addListener(this::onCommonSetup);
         modBus.addListener(EnginePackets::register);
+        modBus.addListener(PnpLanguageProvider::gather);
+        PnpDisplaySources.register(modBus);
         // Dev/test-only: a side-specific fluid handler so the per-face endpoint path is GameTestable.
         if (!net.neoforged.fml.loading.FMLEnvironment.production) {
             modBus.addListener(TestSideHandlers::register);
@@ -54,11 +73,25 @@ public class PipesNPhysics {
         NeoForge.EVENT_BUS.register(NetworkEditHandler.class);
         NeoForge.EVENT_BUS.addListener((RegisterCommandsEvent event) ->
                 PipeGraphCommand.register(event.getDispatcher()));
+        NeoForge.EVENT_BUS.addListener((AddReloadListenerEvent event) ->
+                event.addListener(new CentrifugeRecipes()));
+        // Block tags (fluid_conduits, ignore_fluid_handler) and the valve-throttle toggle are
+        // build-time inputs of the network graph, so a tag or server-config reload flushes the
+        // cache. Both events can fire OFF the server thread (tag sync on the client thread in
+        // singleplayer, config reload on the file-watcher thread), so hop to it — the cache's maps
+        // are server-thread only.
+        NeoForge.EVENT_BUS.addListener((TagsUpdatedEvent event) -> {
+            if (event.getUpdateCause() == TagsUpdatedEvent.UpdateCause.SERVER_DATA_LOAD) flushGraphCache();
+        });
+        modBus.addListener((ModConfigEvent.Reloading event) -> {
+            if (event.getConfig().getSpec() == PipesNPhysicsConfig.SERVER_SPEC) flushGraphCache();
+        });
         NeoForge.EVENT_BUS.addListener((ServerStoppedEvent event) -> {
             SableCompat.clearCaches();
             EngineTickHandler.clear();
             OpenEndPipes.clear();
             RelayDetector.clear();
+            PipeContentCarry.clear();
             TestSideHandlers.clear();
         });
     }
@@ -67,7 +100,14 @@ public class PipesNPhysics {
         return ResourceLocation.fromNamespaceAndPath(ID, path);
     }
 
+    /** Flush the graph cache on the server thread; a no-op before a server exists (cache empty). */
+    private static void flushGraphCache() {
+        MinecraftServer server = ServerLifecycleHooks.getCurrentServer();
+        if (server != null) server.execute(GraphCache::clear);
+    }
+
     private void onCommonSetup(FMLCommonSetupEvent event) {
         LOGGER.info("Common setup...");
+        event.enqueueWork(PnpDisplaySources::associate);
     }
 }

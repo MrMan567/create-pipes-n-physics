@@ -10,16 +10,19 @@ import net.minecraft.resources.ResourceLocation;
 import java.util.List;
 
 /**
- * Sent server → client when a player runs {@code /pipegraph}. Contains a snapshot
- * of one network's nodes and directional edges; the client stores it and draws
- * an in-world overlay for a fixed time.
+ * Sent server → client when a player runs {@code /pipegraph} and on each live refresh.
+ * Contains one network's nodes and directional edges plus the {@code seed} (packed BlockPos)
+ * the network was built from; the client stores it, draws an in-world overlay for a fixed time,
+ * and periodically re-requests it by {@code seed} so a live (bursty) flow keeps tracking instead
+ * of freezing on the single tick the command ran.
  */
-public record GraphOverlayPayload(List<NodeEntry> nodes, List<EdgeEntry> edges) implements CustomPacketPayload {
+public record GraphOverlayPayload(long seed, List<NodeEntry> nodes, List<EdgeEntry> edges) implements CustomPacketPayload {
     public static final ResourceLocation ID = ResourceLocation.fromNamespaceAndPath(PipesNPhysics.ID, "graph_overlay");
     public static final Type<GraphOverlayPayload> TYPE = new Type<>(ID);
 
     public static final StreamCodec<RegistryFriendlyByteBuf, GraphOverlayPayload> STREAM_CODEC =
             StreamCodec.composite(
+                    ByteBufCodecs.VAR_LONG, GraphOverlayPayload::seed,
                     NodeEntry.CODEC.apply(ByteBufCodecs.list()), GraphOverlayPayload::nodes,
                     EdgeEntry.CODEC.apply(ByteBufCodecs.list()), GraphOverlayPayload::edges,
                     GraphOverlayPayload::new
@@ -46,10 +49,14 @@ public record GraphOverlayPayload(List<NodeEntry> nodes, List<EdgeEntry> edges) 
 
     /**
      * One node, by world position with its kind and a short multi-line label (the
-     * block it is plus a fluid summary for sources/sinks). {@code label} is empty for
-     * nodes the overlay should not annotate (junctions). Lines are separated by {@code \n}.
+     * block it is plus a fluid summary for sources/sinks). {@code kind} picks the box
+     * style the client draws AND decides whether a label ships at all: {@code label} is
+     * empty for nodes the overlay should not annotate (junctions). Lines are separated
+     * by {@code \n}. {@code surfaceY} is the engine's computed fluid surface elevation for
+     * a finite reservoir ({@code NaN} otherwise) — the height a settled pipe equalizes to,
+     * drawn in-world so it can be compared against Create's rendered tank fluid.
      */
-    public record NodeEntry(int x, int y, int z, byte kind, String label) {
+    public record NodeEntry(int x, int y, int z, byte kind, float surfaceY, String label) {
         public static final byte KIND_HANDLER = 0;
         public static final byte KIND_PUMP = 1;
         public static final byte KIND_JUNCTION = 2;
@@ -61,6 +68,7 @@ public record GraphOverlayPayload(List<NodeEntry> nodes, List<EdgeEntry> edges) 
                         ByteBufCodecs.VAR_INT, NodeEntry::y,
                         ByteBufCodecs.VAR_INT, NodeEntry::z,
                         ByteBufCodecs.BYTE, NodeEntry::kind,
+                        ByteBufCodecs.FLOAT, NodeEntry::surfaceY,
                         ByteBufCodecs.STRING_UTF8, NodeEntry::label,
                         NodeEntry::new
                 );
@@ -68,8 +76,9 @@ public record GraphOverlayPayload(List<NodeEntry> nodes, List<EdgeEntry> edges) 
 
     /**
      * One edge as an ordered list of points (from source-side endpoint through the
-     * pipe cells to the sink-side endpoint), plus a flow rate. The client draws
-     * a polyline and an arrowhead pointing toward the last point.
+     * pipe cells to the sink-side endpoint), plus a flow rate. Each point is a packed
+     * BlockPos long ({@code BlockPos.asLong}). The client draws a polyline and an
+     * arrowhead pointing toward the last point.
      *
      * direction: 0 = NONE (drawn dim/no arrow), 1 = flowing along points order,
      * 2 = stalled (pressurized along points order but nothing moves — no arrow),

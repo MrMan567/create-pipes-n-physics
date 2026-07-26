@@ -181,11 +181,14 @@ public class OpenEndedPipeMixin {
     }
 
     /**
-     * Drain a fluid source at {@code pos}, CONSUMING it: a cauldron/honey block drains itself; a finite
-     * source drops to level 14 (flows away); a self-regenerating lake is left as the source (its
-     * getNewLiquid would re-source level 14 anyway). Mirrors Create's own consume — the old mixin left
-     * EVERY source in place (level 0), which minted infinite fluid from a finite one (so finite/sub-level
-     * intake had to be gated off). EMPTY if there is no drainable source here.
+     * Drain a fluid source at {@code pos}, CONSUMING it: a cauldron/honey block drains itself; a
+     * WATERLOGGED block is un-waterlogged IN PLACE (the fence/slab/stairs stays, its water leaves);
+     * a finite source drops to level 14 (flows away); a self-regenerating lake is left as the source
+     * (its getNewLiquid would re-source level 14 anyway). Mirrors Create's own consume — the old mixin
+     * left EVERY source in place (level 0), which minted infinite fluid from a finite one (so
+     * finite/sub-level intake had to be gated off), and had no waterlog branch, so draining a
+     * waterlogged block OVERWROTE it with flowing water (destroying the block). EMPTY if there is no
+     * drainable source here.
      */
     @Unique
     private FluidStack pipesnphysics$drainSourceAt(BlockPos pos, boolean simulate) {
@@ -198,6 +201,13 @@ public class OpenEndedPipeMixin {
 
         FluidStack stack = new FluidStack(fluidState.getType(), 1000);
         if (simulate) return stack;
+        if (state.hasProperty(BlockStateProperties.WATERLOGGED)) {
+            // Clear the waterlogging and leave the block itself, exactly as Create's removeFluidFromSpace
+            // does — never overwrite the waterloggable block with a flowing-water block.
+            world.setBlock(pos, state.setValue(BlockStateProperties.WATERLOGGED, false), Block.UPDATE_ALL);
+            world.scheduleTick(pos, Fluids.WATER, 1);
+            return stack;
+        }
         BlockState drainedState = fluidState.createLegacyBlock().setValue(LiquidBlock.LEVEL, 14);
         boolean regenerates = drainedState.getFluidState().getType() instanceof FlowingFluidAccessor flowing
                 && flowing.create$getNewLiquid(world, pos, drainedState).equals(fluidState);

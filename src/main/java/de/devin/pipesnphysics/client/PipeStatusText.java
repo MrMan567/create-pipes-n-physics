@@ -41,7 +41,15 @@ public final class PipeStatusText {
      * deliver. The "No Flow: settled…" reason line already explains that state.
      */
     public static boolean showsReach(PipeStatusPayload data) {
-        return data.hasHeadroom() && data.status() != PipeStatusPayload.STATUS_NO_FLOW;
+        // An air break is bound by the CREST height, not by how much a pump can lift, so the generic
+        // "Lift left / Reach limit" number is noise on a crest-broken run — the crest action line
+        // (lower the crest / raise the supply / add a pump) replaces it.
+        // A check-valve stop is about DIRECTION, not lift — its reach number is noise the same way.
+        return data.hasHeadroom()
+                && data.status() != PipeStatusPayload.STATUS_NO_FLOW
+                && data.statusDetail() != PipeStatusPayload.DETAIL_CREST
+                && data.statusDetail() != PipeStatusPayload.DETAIL_BELOW_OPENING
+                && data.statusDetail() != PipeStatusPayload.DETAIL_CHECK_VALVE;
     }
 
     private static String noFlowKey(PipeStatusPayload data) {
@@ -61,8 +69,10 @@ public final class PipeStatusText {
             case PipeStatusPayload.DETAIL_VALVE -> "gui.goggles.detail.valve";
             case PipeStatusPayload.DETAIL_PUMP_OFF -> "gui.goggles.detail.pump_off";
             case PipeStatusPayload.DETAIL_CREST -> "gui.goggles.detail.crest";
+            case PipeStatusPayload.DETAIL_BELOW_OPENING -> "gui.goggles.detail.below_opening";
             case PipeStatusPayload.DETAIL_SINK_FULL -> "gui.goggles.detail.sink_full";
             case PipeStatusPayload.DETAIL_SOURCE_DRY -> "gui.goggles.detail.source_dry";
+            case PipeStatusPayload.DETAIL_CHECK_VALVE -> "gui.goggles.detail.check_valve";
             default -> data.status() == PipeStatusPayload.STATUS_STALLED
                     ? "gui.goggles.stalled" : "gui.goggles.blocked";
         };

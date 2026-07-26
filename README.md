@@ -9,50 +9,88 @@
 
 A Create mod addon for pipes and physics. Built with **Java** and **NeoForge 1.21.1**.
 
-## What's Included
+## For developers — depending on the API
 
-- **NeoForge 1.21.1** with Create 6.0.10 dependency
-- **Create Registrate** — Create's registration system, pre-configured
-- **Ponder & Flywheel** — Create's rendering and documentation libraries
-- **JEI** — recipe viewer integration (optional, compile-only)
-- **Mixin support** — pre-configured mixins
-- **GitHub Actions** — automatic builds on push/PR
-- **Gradle 8.10** with configuration cache enabled
+Pipes'n Physics exposes a small public API under `de.devin.pipesnphysics.api` so other mods
+can define how their fluids behave in the network (centrifuge separations, handler roles).
 
-## Getting Started
+### 1. Add the dependency (compile-time)
 
-### 1. Use this template
+The API is resolvable from JitPack — no CurseForge/Modrinth release needed:
 
-Click **"Use this template"** on GitHub, or clone and rename.
-
-### 2. Configure your mod
-
-Edit `gradle.properties`:
-
-```properties
-mod_id=yourmod
-mod_name=Your Mod Name
-mod_version=0.1.0
-mod_group_id=com.yourname.yourmod
-mod_authors=YourName
-mod_description=Your mod description.
-mod_license=MIT
+```gradle
+repositories {
+    maven { url 'https://jitpack.io' }
+}
+dependencies {
+    // any tag, branch, or commit as the version
+    compileOnly 'com.github.StaticFX:create-pipes-n-physics:v2.3.0'
+}
 ```
 
-### 3. Rename packages
+### 2. Declare the dependency (runtime)
 
-1. Rename `src/main/java/com/example/examplemod/` to match your `mod_group_id`
-2. Update `ExampleMod.java` — change `ID` to your `mod_id`
-3. Rename `src/main/resources/examplemod.mixins.json` to `{mod_id}.mixins.json`
-4. Update the package path inside the mixins JSON
+Add an entry to **your** `src/main/resources/META-INF/neoforge.mods.toml` so the loader knows
+Pipes'n Physics must be present. Use `required` if your integration is essential, or `optional`
+if it is a bonus:
 
-### 4. Build and run
+```toml
+[[dependencies.yourmodid]]
+    modId = "pipesnphysics"
+    type = "required"          # or "optional"
+    versionRange = "[2.3.0,)"
+    ordering = "AFTER"          # load Pipes'n Physics before you
+    side = "BOTH"
+```
 
-```bash
-./gradlew build          # Build the mod
-./gradlew runClient      # Launch Minecraft with your mod
-./gradlew runServer      # Launch a dedicated server
-./gradlew runData        # Run data generators
+If you declare it **optional**, guard your API calls so the classes only load when the mod is
+present — otherwise a missing dependency throws `NoClassDefFoundError`:
+
+```java
+if (ModList.get().isLoaded("pipesnphysics")) {
+    PnpCompat.register(); // a SEPARATE class; only it references de.devin.pipesnphysics.api.*
+}
+```
+
+### 3. Use the API (from your mod's setup)
+
+**Centrifuge — dynamic separation** (`CentrifugeApi`): a hook that reads the fluid (including its
+data components) and returns the components it splits into.
+
+```java
+CentrifugeApi.registerSeparator(input -> {
+    if (input.getFluid() != MyFluids.MIXED.get()) return null;
+    return new CentrifugeRecipe(
+        new FluidStack(MyFluids.MIXED.get(), 20),                       // consumed per operation
+        List.of(new FluidStack(MyFluids.PART_A.get(), 10),              // outputs, densest first
+                new FluidStack(MyFluids.PART_B.get(), 10)),
+        3.0);                                                           // min spin (rad/s), 0 for none
+});
+```
+
+**Centrifuge — static separation** (datapack): drop a file in
+`data/<namespace>/centrifuging/*.json` — no code required:
+
+```json
+{
+  "input":   { "id": "yourmod:mixed", "amount": 20 },
+  "outputs": [ { "id": "yourmod:part_a", "amount": 10 },
+               { "id": "yourmod:part_b", "amount": 10 } ],
+  "min_angular_speed": 3.0
+}
+```
+
+`min_angular_speed` (radians/second) is optional and defaults to 0. It is a per-recipe spin floor on
+top of the global `centrifugeMinAngularSpeed` config, so a stubborn mixture can demand a faster spin
+than the default. From code, `new CentrifugeRecipe(input, outputs, minAngularSpeed)` sets it; the
+two-argument form leaves it at 0.
+
+**Handler roles** (`FluidHandlerApi`): tell the engine how to treat your fluid-holding block
+— `RESERVOIR` (a tank), `RELAY`, `CONDUIT`, `SINK_ONLY`, or `IGNORE`. Call after your blocks
+are registered.
+
+```java
+FluidHandlerApi.setRole(MyBlocks.FLUID_DRUM.get(), FluidHandlerRole.RESERVOIR);
 ```
 
 ## License

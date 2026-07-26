@@ -7,11 +7,13 @@ package de.devin.pipesnphysics.engine.solve;
 public final class UnionFind {
     private final int[] parent;
 
+    /** A forest of {@code n} singleton components, each node its own root. */
     public UnionFind(int n) {
         parent = new int[n];
         for (int i = 0; i < n; i++) parent[i] = i;
     }
 
+    /** Canonical root of {@code i}'s component, halving the path as it walks. */
     public int find(int i) {
         while (parent[i] != i) {
             parent[i] = parent[parent[i]];
@@ -20,6 +22,7 @@ public final class UnionFind {
         return i;
     }
 
+    /** Merge the components of {@code a} and {@code b}. */
     public void union(int a, int b) {
         parent[find(a)] = find(b);
     }

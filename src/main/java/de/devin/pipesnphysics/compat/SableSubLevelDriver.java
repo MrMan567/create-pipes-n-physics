@@ -1,6 +1,7 @@
 package de.devin.pipesnphysics.compat;
 
-import com.simibubi.create.content.fluids.FluidPropagator;
+import com.simibubi.create.content.fluids.FluidTransportBehaviour;
+import com.simibubi.create.foundation.blockEntity.SmartBlockEntity;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.engine.EngineTickHandler;
 import dev.ryanhcode.sable.api.sublevel.ServerSubLevelContainer;
@@ -12,6 +13,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import org.joml.Quaterniond;
 import org.joml.Vector3d;
@@ -32,6 +34,11 @@ import java.util.function.BiConsumer;
  * sub-level's plot chunks and seeds its pipe cells so the engine drives them like any other
  * network (the QUIET sleep gate still throttles re-solves of idle ones). References full Sable, so
  * it is only loaded when full Sable is present (gated in {@link SableCompat#seedSubLevels}).
+ *
+ * <p>The pipe cells of each plot chunk are CACHED ({@link #pipeCells}): scanning every block
+ * entity of every contraption chunk through a full behaviour resolution each tick dominated the
+ * driver's cost while doing nothing at all on an idle server. Sleeping cells are also skipped
+ * against the engine's own QUIET state instead of being marked and bounced off it downstream.
  *
  * <p>It also REFRESHES each newly-seen pipe's connection shape once ({@link #refreshConnections}).
  * That raw {@code setBlockState} assembly skips the neighbour {@code updateShape} that normally sets
@@ -60,10 +67,27 @@ final class SableSubLevelDriver {
      */
     private static final Map<ServerSubLevel, PoseSample> POSES = new WeakHashMap<>();
 
+    /**
+     * Pipe cells per plot chunk, so the per-tick seed walks a prebuilt list instead of re-resolving
+     * every block entity on the contraption through the chunk map and behaviour lookup. Keyed on the
+     * {@link PlotChunkHolder} identity (weak, like {@link #REFRESHED}): re-assembly and plot growth
+     * mint new holders, so their caches start fresh. Invalidation is a fingerprint, not an event:
+     * the chunk's block-entity COUNT catches any add or remove within a tick (player edits also fire
+     * the normal place/break wakes independently of this list), and a full rescan every
+     * {@link #RESCAN_TICKS} catches the count-neutral residue — the same staleness the engine's idle
+     * heartbeat already accepts elsewhere. A stale EXTRA position seeds a dead cell harmlessly.
+     */
+    private static final Map<PlotChunkHolder, ChunkPipes> PIPES = new WeakHashMap<>();
+
+    private static final int RESCAN_TICKS = 20;
     private static final double POSE_EPS_SQ = 1.0e-6;
     private static final double ROT_EPS = 1.0e-5;
 
     private record PoseSample(Vector3d position, Quaterniond orientation) {}
+
+    private record ChunkPipes(int beCount, long scannedAt, List<BlockPos> pipes) {}
+
+    private enum Motion { NONE, MOVED, ASSEMBLED }
 
     private SableSubLevelDriver() {}
 
@@ -71,36 +95,72 @@ final class SableSubLevelDriver {
         ServerSubLevelContainer container = SubLevelContainer.getContainer(level);
         if (container == null) return;
         boolean refresh = PipesNPhysicsConfig.ENABLE_SUBLEVEL_CONNECTION_REFRESH.get();
+        long now = level.getGameTime();
         for (ServerSubLevel sub : container.getAllSubLevels()) {
             if (sub.isRemoved()) continue;
             // A moved/tilted contraption re-projects every head, so escalate its seeds to an URGENT
             // wake (bypassing the QUIET sleep) for the tick the motion is detected; otherwise a settled
             // sub-level network only re-equalizes on its heartbeat, lagging the motion in 1s stair-steps.
-            BiConsumer<Level, BlockPos> subSeed = poseChanged(sub) ? EngineTickHandler::markChanged : seed;
+            // markMoved, not markChanged: motion re-solves the network but does not reshape it, so the
+            // cached graph must survive — else a cruising contraption pays a full rebuild every tick.
+            // FIRST SIGHT is the exception: assembly is a topology event, and a reused plot slot may
+            // still carry the PREVIOUS contraption's cached graph — markChanged evicts it.
+            Motion motion = poseChanged(sub);
+            BiConsumer<Level, BlockPos> subSeed = switch (motion) {
+                case ASSEMBLED -> EngineTickHandler::markChanged;
+                case MOVED -> EngineTickHandler::markMoved;
+                case NONE -> seed;
+            };
+            boolean moved = motion != Motion.NONE;
             Set<BlockPos> refreshed = refresh ? REFRESHED.computeIfAbsent(sub, k -> new HashSet<>()) : null;
             for (PlotChunkHolder holder : sub.getPlot().getLoadedChunks()) {
-                // Copy the keys: seeding only touches the engine's dirty set, but the BE map is the
-                // live chunk's, so a snapshot is the safe way to iterate it (and to setBlock during it).
-                List<BlockPos> positions = new ArrayList<>(holder.getChunk().getBlockEntities().keySet());
-                for (BlockPos pos : positions) {
-                    if (FluidPropagator.getPipe(level, pos) == null) continue;
-                    if (refreshed != null && refreshed.add(pos.immutable())) refreshConnections(level, pos);
+                for (BlockPos pos : pipeCells(holder, now)) {
+                    if (refreshed != null && refreshed.add(pos)) refreshConnections(level, pos);
+                    if (!moved && EngineTickHandler.isQuiet(level, pos, now)) continue;
                     subSeed.accept(level, pos);
                 }
             }
         }
     }
 
-    /** Whether this sub-level's logical pose moved or rotated since the last tick (true on first sight). */
-    private static boolean poseChanged(ServerSubLevel sub) {
+    /**
+     * This chunk's pipe cells, rescanned when its block-entity count changes or the cache ages out.
+     * Rescans every tick when the network-cache toggle is off, so the debug escape hatch rules out
+     * this cache too (a count-neutral event-less BE swap could otherwise lag the rescan interval).
+     */
+    private static List<BlockPos> pipeCells(PlotChunkHolder holder, long now) {
+        Map<BlockPos, BlockEntity> blockEntities = holder.getChunk().getBlockEntities();
+        ChunkPipes cached = PIPES.get(holder);
+        if (cached != null && cached.beCount() == blockEntities.size()
+                && now - cached.scannedAt() < RESCAN_TICKS
+                && PipesNPhysicsConfig.ENABLE_NETWORK_CACHE.get()) {
+            return cached.pipes();
+        }
+        // The block entities are already in hand as the map's values, so membership is the same
+        // behaviour lookup the pipe heartbeat mixin uses — no per-position chunk re-resolution.
+        List<BlockPos> pipes = new ArrayList<>();
+        for (Map.Entry<BlockPos, BlockEntity> entry : blockEntities.entrySet()) {
+            if (entry.getValue() instanceof SmartBlockEntity smart
+                    && smart.getBehaviour(FluidTransportBehaviour.TYPE) != null) {
+                pipes.add(entry.getKey().immutable());
+            }
+        }
+        List<BlockPos> frozen = List.copyOf(pipes);
+        PIPES.put(holder, new ChunkPipes(blockEntities.size(), now, frozen));
+        return frozen;
+    }
+
+    /** Whether this sub-level moved or rotated since the last tick, with first sight kept distinct. */
+    private static Motion poseChanged(ServerSubLevel sub) {
         Pose3dc pose = sub.logicalPose();
-        if (pose == null) return false;
+        if (pose == null) return Motion.NONE;
         Vector3d position = new Vector3d(pose.position());
         Quaterniond orientation = new Quaterniond(pose.orientation());
         PoseSample last = POSES.put(sub, new PoseSample(position, orientation));
-        return last == null
-                || last.position().distanceSquared(position) > POSE_EPS_SQ
-                || 1.0 - Math.abs(last.orientation().dot(orientation)) > ROT_EPS;
+        if (last == null) return Motion.ASSEMBLED;
+        return last.position().distanceSquared(position) > POSE_EPS_SQ
+                || 1.0 - Math.abs(last.orientation().dot(orientation)) > ROT_EPS
+                ? Motion.MOVED : Motion.NONE;
     }
 
     /**
@@ -122,5 +182,6 @@ final class SableSubLevelDriver {
     static void clear() {
         REFRESHED.clear();
         POSES.clear();
+        PIPES.clear();
     }
 }

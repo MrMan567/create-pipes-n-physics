@@ -40,13 +40,20 @@ public abstract class FluidTankWeightGoggleMixin {
         if (fluid.isEmpty()) return;
 
         int density = fluid.getFluid().getFluidType().getDensity(fluid);
-        double massKg = TankMassFormulas.fluidMassKg(fluid.getAmount(), density,
-                PipesNPhysicsConfig.FLUID_MASS_PER_BUCKET.get());
+        boolean lift = PipesNPhysicsConfig.ENABLE_GAS_BUOYANCY.get()
+                && fluid.getFluid().getFluidType().isLighterThanAir();
+        double netKg = TankMassFormulas.netMassKg(fluid.getAmount(), density, lift,
+                PipesNPhysicsConfig.FLUID_MASS_PER_BUCKET.get(),
+                PipesNPhysicsConfig.FLUID_LIFT_PER_BUCKET.get());
 
-        pipesnphysics$lang("gui.goggles.fluid_weight")
+        // A lighter-than-air gas reads as upward LIFT (aqua), a liquid as downward weight; the number
+        // is the magnitude either way, so the sign lives in the label instead of a stray minus.
+        boolean buoyant = netKg < 0;
+        pipesnphysics$lang(buoyant ? "gui.goggles.fluid_lift" : "gui.goggles.fluid_weight")
                 .style(ChatFormatting.GRAY)
                 .add(new LangBuilder(PipesNPhysics.ID)
-                        .text(LangNumberFormat.format(massKg)).style(ChatFormatting.WHITE))
+                        .text(LangNumberFormat.format(Math.abs(netKg)))
+                        .style(buoyant ? ChatFormatting.AQUA : ChatFormatting.WHITE))
                 .add(pipesnphysics$lang("gui.goggles.kg").style(ChatFormatting.DARK_GRAY))
                 .forGoggles(tooltip);
         cir.setReturnValue(true);

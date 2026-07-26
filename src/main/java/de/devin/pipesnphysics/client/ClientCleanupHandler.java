@@ -1,6 +1,7 @@
 package de.devin.pipesnphysics.client;
 
 import de.devin.pipesnphysics.PipesNPhysics;
+import de.devin.pipesnphysics.client.render.PipeFluidRenderer;
 import de.devin.pipesnphysics.engine.net.PipeStatusClient;
 import de.devin.pipesnphysics.engine.render.GraphOverlay;
 import net.minecraft.client.Minecraft;
@@ -47,6 +48,7 @@ public final class ClientCleanupHandler {
         PumpRangeClient.clear();
         PipeStatusClient.clear();
         GraphOverlay.clear();
-        PipeLevelRenderer.clear();
+        PipeFluidRenderer.clear();
+        ValveArrowClient.clear();
     }
 }

@@ -2,11 +2,14 @@ package de.devin.pipesnphysics.compat;
 
 import de.devin.pipesnphysics.PipesNPhysics;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
+import dev.ryanhcode.sable.api.physics.force.ForceGroup;
+import dev.ryanhcode.sable.api.physics.force.ForceGroups;
 import dev.ryanhcode.sable.api.physics.mass.MassTracker;
+import dev.ryanhcode.sable.physics.config.dimension_physics.DimensionPhysicsData;
 import dev.ryanhcode.sable.companion.math.Pose3dc;
 import dev.ryanhcode.sable.sublevel.ServerSubLevel;
-import dev.ryanhcode.sable.sublevel.system.SubLevelPhysicsSystem;
 import net.minecraft.core.BlockPos;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Vector3d;
@@ -19,24 +22,69 @@ public class SablePhysicsCompat {
     private static final Map<String, Double> lastAppliedMass = new HashMap<>();
 
     public static void applyFluidWeight(ServerSubLevel subLevel, BlockPos controllerPos,
-                                        double fillFraction, double massKg) {
-        if (massKg <= 0) return;
+                                        double fillFraction, double massKg, double timeStep) {
+        if (massKg == 0) return;
 
-        if (PipesNPhysicsConfig.EXPERIMENTAL_TANK_COG.get()) {
-            applyViaMassTracker(subLevel, controllerPos, fillFraction, massKg);
-        } else {
-            applyViaForce(subLevel, massKg);
+        // Buoyant lift (a lighter-than-air gas) is the ONE case applied as a force: it pushes UP, and a
+        // negative mass in the tracker could drive the contraption's total mass through zero → an
+        // inverse-mass singularity → NaN/launch. Drop any COG mass this controller applied while it
+        // held a liquid so a liquid→gas swap doesn't leak it (cheap once the key is gone —
+        // withdraw early-returns).
+        if (massKg < 0) {
+            withdraw(subLevel, controllerPos);
+            applyBuoyantLift(subLevel, controllerPos, massKg, timeStep);
+            return;
         }
+
+        // Positive weight is a real MASS on the tracker, so a full tank actually shifts the
+        // contraption's center of gravity — a downward force would sink it without tipping, which felt
+        // wrong. EXPERIMENTAL_TANK_COG then only chooses WHERE the mass sits (fill-shifted vs centred).
+        applyViaMassTracker(subLevel, controllerPos, fillFraction, massKg);
     }
 
-    private static void applyViaForce(ServerSubLevel subLevel, double massKg) {
-        SubLevelPhysicsSystem system = SubLevelPhysicsSystem.get(subLevel.getLevel());
-        if (system == null) return;
-        var pipeline = system.getPipeline();
-        if (pipeline == null) return;
+    /**
+     * Buoyant lift for a gas tank: an upward gravitational impulse (gravity·mass·dt — magnitude scales
+     * with gravity and the substep, NOT the raw mass, which would over-scale by 1/(g·dt) and rocket the
+     * ship off) applied AT the tank's position, so an off-centre gas cell tips that side up rather than
+     * lifting the contraption evenly — the force counterpart of a liquid's COG-shifting mass. Routed
+     * through Sable's LEVITATION force group exactly like Aeronautics' balloons; never a negative
+     * tracker mass, which could zero the total mass → an inverse-mass singularity.
+     */
+    private static void applyBuoyantLift(ServerSubLevel subLevel, BlockPos tankPos, double massKg,
+                                         double timeStep) {
+        // gravity·mass·dt is the gravitational impulse as a vector; massKg < 0 (a gas) flips it to UP.
+        Vector3d worldForce = DimensionPhysicsData.getGravity(subLevel.getLevel())
+                .mul(massKg * timeStep, new Vector3d());
 
-        Vector3d force = new Vector3d(0, -massKg, 0);
-        pipeline.applyLinearAndAngularImpulse(subLevel, force, new Vector3d(0, 0, 0), true);
+        // Sable's force accumulator works in the contraption's own (unrotated) frame, so rotate the
+        // world impulse into it — the lift stays vertical as the ship pitches (identity when level).
+        Pose3dc pose = subLevel.logicalPose();
+        Vector3d localForce = pose != null
+                ? pose.transformNormalInverse(worldForce, new Vector3d())
+                : worldForce;
+
+        ForceGroup group = levitationGroup();
+        if (group == null) return;
+
+        // Apply at the tank's block centre; applyImpulseAtPoint adds torque = (point − centre of mass) × F.
+        Vector3d point = new Vector3d(tankPos.getX() + 0.5, tankPos.getY() + 0.5, tankPos.getZ() + 0.5);
+        subLevel.getOrCreateQueuedForceGroup(group)
+                .getForceTotal()
+                .applyImpulseAtPoint(subLevel, point, localForce);
+    }
+
+    /**
+     * The LEVITATION force group, resolved from the registry by id (cached). Avoids touching Sable's
+     * Veil-based {@code RegistryObject}, which isn't on our compile classpath; the registry is populated
+     * long before any physics tick runs.
+     */
+    private static ForceGroup levitationGroup;
+
+    private static ForceGroup levitationGroup() {
+        if (levitationGroup == null) {
+            levitationGroup = ForceGroups.REGISTRY.get(ResourceLocation.fromNamespaceAndPath("sable", "levitation"));
+        }
+        return levitationGroup;
     }
 
     private static final Map<String, Vec3> lastAppliedOffset = new HashMap<>();
@@ -46,7 +94,11 @@ public class SablePhysicsCompat {
         if (tracker == null) return;
 
         String key = subLevel.getUniqueId() + ":" + controllerPos.toShortString();
-        Vec3 offset = tiltAwareOffset(subLevel, fillFraction);
+        // Where the fluid mass sits within the block: fill-shifted (the fluid settles to the low side)
+        // when the experimental COG is on, else the plain block centre — either way it is real mass.
+        Vec3 offset = PipesNPhysicsConfig.EXPERIMENTAL_TANK_COG.get()
+                ? tiltAwareOffset(subLevel, fillFraction)
+                : new Vec3(0.5, 0.5, 0.5);
 
         Double prevMass = lastAppliedMass.get(key);
         if (prevMass != null && Math.abs(prevMass - massKg) < 0.001) return;

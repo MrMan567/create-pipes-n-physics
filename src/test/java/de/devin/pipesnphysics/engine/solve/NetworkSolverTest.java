@@ -98,15 +98,21 @@ class NetworkSolverTest {
      * mirrors the liquid model exactly (elevation coefficient −1 instead of +1), independent of
      * how light the fluid is. The buoyant lift across an elevation gap equals the gap itself, so
      * gas climbs as hard as a liquid sinks. (Regression: a relative-density scale once floored
-     * buoyancy near 1% of gravity, so ordinary gases equalized by volume like a liquid.)
+     * buoyancy near 1% of gravity, so ordinary gases equalized by volume like a liquid.) The gas
+     * head anchors at the column TOP (minus the interface): two vessels topping out LEVEL read
+     * equal heads at equal fills regardless of their heights — the base anchor gave a taller tank
+     * a full block of phantom priority and unequal-height pairs churned instead of equalizing.
      */
     @Test
     void surfaceHeadInvertsGravityForGasAtFullStrength() {
-        double low = NetworkSolver.surfaceHead(64, 2, true);
-        double high = NetworkSolver.surfaceHead(84, 2, true);
+        double low = NetworkSolver.surfaceHead(64, 68, 2, true);
+        double high = NetworkSolver.surfaceHead(84, 88, 2, true);
         assertTrue(low > high, "a lower gas column outranks a higher one, so gas flows upward");
         assertEquals(20, low - high, 1e-9, "buoyant lift equals the full 20-block elevation gap");
-        assertEquals(66, NetworkSolver.surfaceHead(64, 2, false), 1e-9, "liquids stack downward unchanged");
+        assertEquals(66, NetworkSolver.surfaceHead(64, 68, 2, false), 1e-9, "liquids stack downward unchanged");
+        assertEquals(NetworkSolver.surfaceHead(57, 60, 1.5, true),
+                NetworkSolver.surfaceHead(56, 60, 1.5, true), 1e-9,
+                "equal tops + equal fills = equal gas heads, whatever the column heights");
     }
 
     /**
@@ -116,17 +122,17 @@ class NetworkSolverTest {
      */
     @Test
     void buoyancyTowerFlowsUphillMirroringGravity() {
-        double lowBaseY = 64, highBaseY = 84, fill = 2;
+        double lowBaseY = 64, highBaseY = 84, height = 4, fill = 2;
         List<BranchSpec> branches = List.of(BranchSpec.passive(0, 1, 40));
 
         List<NodeSpec> liquid = List.of(
-                new NodeSpec(TANK_CAPACITANCE, NetworkSolver.surfaceHead(lowBaseY, fill, false)),
-                new NodeSpec(TANK_CAPACITANCE, NetworkSolver.surfaceHead(highBaseY, fill, false)));
+                new NodeSpec(TANK_CAPACITANCE, NetworkSolver.surfaceHead(lowBaseY, lowBaseY + height, fill, false)),
+                new NodeSpec(TANK_CAPACITANCE, NetworkSolver.surfaceHead(highBaseY, highBaseY + height, fill, false)));
         assertTrue(step(liquid, branches).flows()[0] < 0, "liquid sinks toward the lower tank");
 
         List<NodeSpec> gas = List.of(
-                new NodeSpec(TANK_CAPACITANCE, NetworkSolver.surfaceHead(lowBaseY, fill, true)),
-                new NodeSpec(TANK_CAPACITANCE, NetworkSolver.surfaceHead(highBaseY, fill, true)));
+                new NodeSpec(TANK_CAPACITANCE, NetworkSolver.surfaceHead(lowBaseY, lowBaseY + height, fill, true)),
+                new NodeSpec(TANK_CAPACITANCE, NetworkSolver.surfaceHead(highBaseY, highBaseY + height, fill, true)));
         assertTrue(step(gas, branches).flows()[0] > 0, "gas rises toward the higher tank");
     }
 
@@ -226,6 +232,91 @@ class NetworkSolverTest {
         BranchSpec siphonable = new BranchSpec(0, 1, 40, 0, 0, 56, 0.5);
         Result flowing = step(tanks, List.of(siphonable));
         assertTrue(flowing.flows()[0] > 0, "a modest crest is siphoned over");
+    }
+
+    /**
+     * Suction can HOLD a column over a crest, never CREATE one: a DRY crest above the reachable
+     * potential must gate the branch (nothing pushes fluid up an air-filled leg), while the same
+     * geometry with a primed (wet) crest siphons. A pump whose boost REACHES the crest still
+     * primes a dry line — that is how a siphon gets established in the first place.
+     */
+    @Test
+    void dryCrestDoesNotSelfPrimeButWetOrPumpedOnesFlow() {
+        List<NodeSpec> tanks = List.of(
+                new NodeSpec(TANK_CAPACITANCE, 60),
+                new NodeSpec(TANK_CAPACITANCE, 50));
+
+        BranchSpec dry = new BranchSpec(0, 1, 40, 0, 0, 62, 0.5, false);
+        Result gated = step(tanks, List.of(dry));
+        assertEquals(0, gated.flows()[0], 1e-9, "a dry crest above the surface never self-primes");
+        assertTrue(gated.crestBlocked()[0], "the gate reports the air break");
+
+        BranchSpec wet = new BranchSpec(0, 1, 40, 0, 0, 62, 0.5, true);
+        assertTrue(step(tanks, List.of(wet)).flows()[0] > 0, "the primed column siphons");
+
+        BranchSpec pumped = new BranchSpec(0, 1, 40, 6, +1, 62, 0.5, false);
+        assertTrue(step(tanks, List.of(pumped)).flows()[0] > 0,
+                "a pump lifting the potential over the crest primes a dry line");
+
+        BranchSpec submerged = new BranchSpec(0, 1, 40, 0, 0, 55, 0.5, false);
+        assertTrue(step(tanks, List.of(submerged)).flows()[0] > 0,
+                "a crest below the supply surface needs no priming (an ordinary downhill bump)");
+    }
+
+    /**
+     * The SUCTION-side dual is config-gated: the pump's boost only exists on its push flank, so a
+     * pump above a low tank never self-primes its own dry riser (owner-confirmed realism) — unless
+     * the pack opts in ({@code enablePumpSelfPriming}). A self-priming branch (a running pump
+     * pulling across it) gets the SUCTION allowance for establishment, bounded by the same limit
+     * that afterwards sustains the column — never past it.
+     */
+    @Test
+    void drySuctionCrestPrimesOnlyWithTheSelfPrimingGrant() {
+        List<NodeSpec> tanks = List.of(
+                new NodeSpec(TANK_CAPACITANCE, 60),
+                new NodeSpec(TANK_CAPACITANCE, 50));
+
+        // A suction flank carries NO emf; the riser's floor sits one block above the supply, dry.
+        BranchSpec strict = new BranchSpec(0, 1, 40, 0, 0, 61.5, 61, 0.5, false);
+        Result gated = step(tanks, List.of(strict));
+        assertEquals(0, gated.flows()[0], 1e-9, "a dry suction riser never self-primes by default");
+        assertTrue(gated.crestBlocked()[0], "the strict gate reports the air break");
+
+        BranchSpec granted = new BranchSpec(0, 1, 40, 0, 0, 61.5, 61, 0.5, false, true);
+        assertTrue(step(tanks, List.of(granted)).flows()[0] > 0,
+                "the self-priming grant establishes through the dry riser");
+
+        BranchSpec beyondTheLimit = new BranchSpec(0, 1, 40, 0, 0, 70.5, 70, 0.5, false, true);
+        assertEquals(0, step(tanks, List.of(beyondTheLimit)).flows()[0], 1e-9,
+                "self-priming cannot establish past the suction limit");
+    }
+
+    /**
+     * The self-prime bar is the crest cell's LIP (its floor datum), not its centre: a supply
+     * whose own potential reaches the crest cell's lip wets it and pours over by plain gravity
+     * (weir flow — a tank draining through a run at its own level). Only a floor ABOVE the supply
+     * is a true air break. Regression: hard-gating the floor-to-centre band let one idle tick's
+     * settle drain a crest cell and permanently lock a working gravity run out.
+     */
+    @Test
+    void dryCrestFlowsOnceTheSupplyReachesItsFloor() {
+        // Crest cell centred at 60.5 with its lip (the connection aperture bottom) at 60.375 —
+        // the side cell of a tank whose base block sits at 60. The far-side interpolation drags
+        // the head AT the crest below the supply either way; only supply-vs-floor decides.
+        BranchSpec dryAtTankLevel = new BranchSpec(0, 1, 40, 0, 0, 60.5, 60.375, 0.2, false);
+
+        List<NodeSpec> supplyAtTheLip = List.of(
+                new NodeSpec(TANK_CAPACITANCE, 60.45),
+                new NodeSpec(TANK_CAPACITANCE, 50));
+        assertTrue(step(supplyAtTheLip, List.of(dryAtTankLevel)).flows()[0] > 0,
+                "a supply reaching the dry crest's lip pours over it");
+
+        List<NodeSpec> supplyUnderTheLip = List.of(
+                new NodeSpec(TANK_CAPACITANCE, 60.3),
+                new NodeSpec(TANK_CAPACITANCE, 50));
+        Result gated = step(supplyUnderTheLip, List.of(dryAtTankLevel));
+        assertEquals(0, gated.flows()[0], 1e-9, "below the crest's lip a dry crest still gates");
+        assertTrue(gated.crestBlocked()[0], "the gate reports the air break");
     }
 
     @Test

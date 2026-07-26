@@ -1,14 +1,8 @@
 package de.devin.pipesnphysics.mixin;
 
 import com.simibubi.create.content.fluids.FluidTransportBehaviour;
-import com.simibubi.create.content.fluids.PipeConnection;
 import com.simibubi.create.foundation.blockEntity.behaviour.BlockEntityBehaviour;
-import de.devin.pipesnphysics.PipesNPhysicsConfig;
-import de.devin.pipesnphysics.compat.CreatePipeRendering;
 import de.devin.pipesnphysics.engine.EngineTickHandler;
-import net.minecraft.core.BlockPos;
-import net.minecraft.core.Direction;
-import net.minecraft.world.level.Level;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -19,29 +13,29 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * and marks the network as dirty so the engine picks it up on the next server tick.
  *
  * The cancel happens on both server and client so Create's pressure propagation and
- * flow creation don't fight the engine. The one piece we KEEP is
- * {@link PipeConnection#tickFlowProgress} — pure cosmetics that advances the fill
- * animation Create draws — so engine-seeded fluid fronts visibly travel down a pipe
- * instead of popping full. It moves no fluid and starts no flows on its own.
+ * flow creation don't fight the engine. Create's Flow objects are no longer written, ticked,
+ * or drawn under the engine — the pipe render mixins hide them and the client draws each
+ * cell's real stored content ({@code PipeFluidRenderer}) — so their fill cosmetics
+ * ({@code tickFlowProgress}) are not ticked either; a stale persisted flow from an older
+ * world stays frozen and hidden.
  *
- * EXCEPT cells the in-pipe LEVEL renderer owns ({@code CreatePipeRendering.ownsAnimation}):
- * their front is integrated by the engine into a dedicated synced field, and letting Create
- * advance its Flow progress underneath would run a second, disagreeing integrator. Skipping
- * the call also skips its client cosmetics (the idle rim drip particles) on those cells —
- * acceptable, the renderer owns them. Stock-rendered cells (flag off, gas, junctions) keep
- * the tick unchanged.
- *
- * The high {@code priority} is load-bearing for cross-mod compat. Another Create addon may ALSO
- * hijack {@code tick()} with its own {@code @At("HEAD") cancellable} injector that calls
- * {@code ci.cancel()} — CROWNS does exactly this ({@code FluidTransportBehaviourMixin} reimplements
- * the tick to mix real-gas state). Two HEAD-cancellable injectors race: whichever executes first
- * cancels, and the other's callback is skipped by the injected cancellation return. If theirs wins,
- * OUR {@link EngineTickHandler#markDirty} never fires and the engine's per-tick heartbeat dies — the
- * network never wakes and the whole engine looks broken. A higher-priority mixin is applied later, so
- * its HEAD callback is woven in FRONT and runs first: this makes us cancel before any lower-priority
- * addon (CROWNS ships priority 900). Under our engine we own pipe transport anyway, so suppressing a
- * reimplemented Create tick is correct; CROWNS's per-endpoint gas-state mixing still runs through
- * {@code FluidTank.fill}, which our IFluidHandler transfers hit.
+ * The high {@code priority} biases this cancel to win when another Create addon ALSO hijacks
+ * {@code tick()} with an {@code @At("HEAD") cancellable} injector — CROWNS does exactly this
+ * ({@code FluidTransportBehaviourMixin} reimplements the tick to mix real-gas state, cancelling at
+ * HEAD with default priority 1000). Two HEAD-cancellable injectors race: whichever executes first
+ * cancels, and the other's callback is skipped by the injected cancellation return — and the race
+ * has been OBSERVED going either way across launches, so nothing may depend on winning it. The two
+ * things that must survive a loss are both hosted race-proof elsewhere:
+ * {@link EngineTickHandler#markDirty}, the engine's heartbeat, lives on the pipe block entity's own
+ * tick ({@link PipeHeartbeatMixin}); and the PUMP's transport suppression lives on the pump
+ * behaviour's SUBCLASS tick ({@link PumpTransferTickMixin}) — the pump override re-pressurizes its
+ * connections AFTER {@code super.tick()}, so this base-level cancel never stops it, and a peer
+ * winning the race then ran Create's flow management against real pump pressure: a PARALLEL
+ * Create-side transfer the engine never saw, silently draining sources into Create's own endpoint
+ * buffers (the pump-spill flake). With the pump tick cancelled at its own method, a peer's
+ * reimplemented pipe transport is genuinely inert — no pressure source remains, so no flow can
+ * start. CROWNS's per-endpoint gas-state mixing still runs through {@code FluidTank.fill}, which
+ * our IFluidHandler transfers hit.
  */
 @Mixin(value = FluidTransportBehaviour.class, remap = false, priority = 1500)
 public abstract class GravityFlowMixin extends BlockEntityBehaviour {
@@ -49,22 +43,13 @@ public abstract class GravityFlowMixin extends BlockEntityBehaviour {
 
     @Inject(method = "tick", at = @At("HEAD"), cancellable = true)
     private void pipesnphysics$cancelCreateTransport(CallbackInfo ci) {
-        if (!PipesNPhysicsConfig.ENABLE_ENGINE.get()) return;
-        if (blockEntity.isVirtual()) return; // Ponder scenes & schematics keep Create's animation
-        Level level = blockEntity.getLevel();
-        if (level == null) return;
-        if (!level.isClientSide()) {
-            EngineTickHandler.markDirty(level, blockEntity.getBlockPos());
-        }
-
-        FluidTransportBehaviour self = (FluidTransportBehaviour) (Object) this;
-        BlockPos pos = blockEntity.getBlockPos();
-        if (!CreatePipeRendering.ownsAnimation(self)) {
-            for (Direction dir : Direction.values()) {
-                PipeConnection conn = self.getConnection(dir);
-                if (conn != null) conn.tickFlowProgress(level, pos);
-            }
-        }
-        ci.cancel();
+        // The suppression decision is shared with the pump's subclass-tick cancel
+        // (PumpTransferTickMixin) so the two sites can never disagree: engine on + real block, or
+        // ponder's client-side virtual level where the engine runs live (PonderEngineDriver owns
+        // the fluid; server-side virtual and flag-off keep Create's animation). Create's Flow
+        // objects are then no longer written, ticked, or drawn — the pipe render mixins hide them
+        // and PipeFluidRenderer draws the cells' stored content — so a stale persisted flow from
+        // an older world stays frozen and hidden.
+        if (EngineTickHandler.suppressesCreateTransport(blockEntity)) ci.cancel();
     }
 }

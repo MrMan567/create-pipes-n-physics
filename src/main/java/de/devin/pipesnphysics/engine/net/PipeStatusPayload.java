@@ -13,6 +13,10 @@ import org.jetbrains.annotations.Nullable;
  * Server → client answer to a {@link PipeStatusRequest}: what the queried pipe
  * cell is doing this tick. Rendered into the goggle tooltip by the pipe goggle
  * mixin via {@link PipeStatusClient}.
+ *
+ * STATUS_* and DETAIL_* are two independent enums, each riding its own byte on
+ * the wire ({@code status} and {@code statusDetail}): the status is the headline
+ * state, the detail names the culprit behind it — not a sub-code of the status.
  */
 public record PipeStatusPayload(
         BlockPos pos,
@@ -30,8 +34,10 @@ public record PipeStatusPayload(
         float suctionMarginBlocks,
         boolean hasPumpLoad,
         float pumpHeadAgainst,
-        float pumpFrictionFactor
+        float pumpFrictionFactor,
+        int holdsMb
 ) implements CustomPacketPayload {
+    // The headline state — the "status" byte on the wire.
     public static final byte STATUS_NOT_CONNECTED = 0;
     public static final byte STATUS_NO_FLOW = 1;
     public static final byte STATUS_FLOWING = 2;
@@ -39,6 +45,7 @@ public record PipeStatusPayload(
     public static final byte STATUS_STALLED = 4;
     public static final byte STATUS_NO_HEAD = 5;
 
+    // The culprit behind a non-flowing status — the independent "statusDetail" byte on the wire.
     public static final byte DETAIL_NONE = 0;
     public static final byte DETAIL_VALVE = 1;
     public static final byte DETAIL_PUMP_OFF = 2;
@@ -51,6 +58,10 @@ public record PipeStatusPayload(
     public static final byte DETAIL_HELD = 7;
     /** A dry no-flow run whose powered pump has nothing on its push side — nowhere to deliver. */
     public static final byte DETAIL_PUMP_NO_OUTPUT = 8;
+    /** A CREST-gated LEVEL run whose supply fluid stands below the pipe's aperture — no climb involved. */
+    public static final byte DETAIL_BELOW_OPENING = 9;
+    /** A run stopped by a ONE-WAY valve: the pressure wants to flow against its direction. */
+    public static final byte DETAIL_CHECK_VALVE = 10;
 
     public static final Type<PipeStatusPayload> TYPE =
             new Type<>(PipesNPhysics.asResource("pipe_status"));
@@ -58,9 +69,10 @@ public record PipeStatusPayload(
     public static final StreamCodec<RegistryFriendlyByteBuf, PipeStatusPayload> STREAM_CODEC =
             StreamCodec.of(PipeStatusPayload::write, PipeStatusPayload::read);
 
+    /** The all-zero answer for a position with no network: every optional section is absent. */
     public static PipeStatusPayload notConnected(BlockPos pos) {
         return new PipeStatusPayload(pos, STATUS_NOT_CONNECTED, 0, null, FluidStack.EMPTY,
-                false, 0, false, 0, 0, DETAIL_NONE, false, 0, false, 0, 0);
+                false, 0, false, 0, 0, DETAIL_NONE, false, 0, false, 0, 0, 0);
     }
 
     private static void write(RegistryFriendlyByteBuf buf, PipeStatusPayload payload) {
@@ -80,6 +92,7 @@ public record PipeStatusPayload(
         buf.writeBoolean(payload.hasPumpLoad);
         buf.writeFloat(payload.pumpHeadAgainst);
         buf.writeFloat(payload.pumpFrictionFactor);
+        buf.writeVarInt(payload.holdsMb);
     }
 
     private static PipeStatusPayload read(RegistryFriendlyByteBuf buf) {
@@ -99,11 +112,12 @@ public record PipeStatusPayload(
         boolean hasPumpLoad = buf.readBoolean();
         float pumpHeadAgainst = buf.readFloat();
         float pumpFrictionFactor = buf.readFloat();
+        int holdsMb = buf.readVarInt();
         return new PipeStatusPayload(pos, status, mbPerTick,
                 directionId < 0 ? null : Direction.from3DDataValue(directionId),
                 fluid, hasPressure, pressure, hasHeadroom, headroom, headTotal,
                 statusDetail, hasSuctionMargin, suctionMargin,
-                hasPumpLoad, pumpHeadAgainst, pumpFrictionFactor);
+                hasPumpLoad, pumpHeadAgainst, pumpFrictionFactor, holdsMb);
     }
 
     @Override

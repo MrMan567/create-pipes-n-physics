@@ -41,6 +41,12 @@ class SableCompanionImpl implements SableCompatProvider {
     }
 
     @Override
+    public String getSubLevelId(Level level, BlockPos pos) {
+        SubLevelAccess sub = SableCompanion.INSTANCE.getContaining(level, pos);
+        return sub == null ? null : sub.getUniqueId().toString();
+    }
+
+    @Override
     public boolean isSubLevelReady(Level level, BlockPos pos) {
         SubLevelAccess sub = SableCompanion.INSTANCE.getContaining(level, pos);
         if (sub == null) return true;

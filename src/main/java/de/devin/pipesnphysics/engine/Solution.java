@@ -1,5 +1,7 @@
 package de.devin.pipesnphysics.engine;
 
+import de.devin.pipesnphysics.engine.graph.Edge;
+import de.devin.pipesnphysics.engine.graph.Graph;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.neoforged.neoforge.fluids.FluidStack;
@@ -14,7 +16,13 @@ import java.util.Set;
  *
  * Carries:
  *   edgeFlows    — one entry per graph edge, giving direction + rate (NONE if idle),
- *   transfers    — the endpoint-to-endpoint fluid movements to apply this tick,
+ *   transfers    — the per-pass endpoint intents (what each column could give/take); the
+ *                  actual movement is executed by the brigade from `passes`, these remain
+ *                  for stall classification and diagnostics,
+ *   passes       — per fluid pass, the signed solved flow per edge; {@link PipeFlowExecutor}
+ *                  executes them through the pipes' stored volume,
+ *   actualFlow   — per edge, the mB that REALLY moved this tick (strongest boundary movement),
+ *                  filled in by the executor after the solve; what goggles/overlays show,
  *   nodeHeads    — player-facing hydraulic head per graph node index (blocks):
  *                  anchored at real reservoirs and static across zero-flow branches,
  *                  so a dead-headed pump shows ambient instead of phantom vacuum;
@@ -50,12 +58,15 @@ import java.util.Set;
  *                  renderer's backed-up guard; this adds the case the solver used to drop,
  *   active       — whether any meaningful flow exists (used to keep ticking).
  *
- * {@link FluidEngine#apply} executes the transfers; the rest feeds the /pipegraph
- * visualizer and the pipe goggle overlay.
+ * {@link FluidEngine#apply} hands the passes to {@link PipeFlowExecutor}, which executes them
+ * as plug flow through the pipes' stored volume; transfers remain for stall classification and
+ * diagnostics only. The head fields feed the /pipegraph visualizer and the pipe goggle overlay.
  */
 public record Solution(
         List<EdgeFlow> edgeFlows,
         List<Transfer> transfers,
+        List<FlowPass> passes,
+        int[] actualFlow,
         Map<Integer, Double> nodeHeads,
         Map<Integer, Double> nodeCeilings,
         Map<Integer, Double> nodeAnchors,
@@ -70,7 +81,14 @@ public record Solution(
         boolean active
 ) {
     /** Why a blocked/stalled edge cannot move its fluid, when the solver knows. */
-    public enum Reason { VALVE, PUMP_OFF, CREST, SINK_FULL, SOURCE_DRY }
+    public enum Reason { VALVE, PUMP_OFF, CREST, SINK_FULL, SOURCE_DRY, CHECK_VALVE }
+
+    /**
+     * One fluid pass's solved flow, signed per edge index (positive = a→b), in mB/t. The transfer
+     * brigade ({@link PipeFlowExecutor}) executes these through the pipes' stored volume; passes
+     * run in the solve's order (largest fluid first).
+     */
+    public record FlowPass(FluidStack fluid, double[] edgeFlow) {}
 
     /**
      * A pump's operating point on its (linear) pump curve, so the goggle can show
@@ -101,14 +119,33 @@ public record Solution(
         }
     }
 
+    /** The zero-flow decision for a graph: every edge NONE, nothing planned, inactive. */
     public static Solution idle(Graph graph) {
         List<EdgeFlow> flows = new ArrayList<>(graph.edges().size());
         for (Edge e : graph.edges()) flows.add(EdgeFlow.none(e.index()));
-        return new Solution(flows, List.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(),
+        return new Solution(flows, List.of(), List.of(), new int[graph.edges().size()],
+                Map.of(), Map.of(), Map.of(), Map.of(), Map.of(),
                 Set.of(), Set.of(), Set.of(), Set.of(), Map.of(), Map.of(), false);
     }
 
+    /** Whether any endpoint transfer was planned this tick (diagnostics — execution is the brigade). */
     public boolean hasTransfer() {
         return !transfers.isEmpty();
+    }
+
+    /**
+     * Whether an edge is BACKED UP: full of fluid pressed against a stop (a pump holding a shut
+     * gate or an over-high sink, a dead conduit against a full tank) rather than merely idle.
+     * The settle phase treats such an edge fill-only — pressure packs it, never drains it.
+     */
+    public boolean isBackedUp(int edgeIndex) {
+        return heldEdges.contains(edgeIndex)
+                || noHeadEdges.contains(edgeIndex)
+                || (stalledEdges.contains(edgeIndex) && edgeReasons.get(edgeIndex) == Reason.SINK_FULL);
+    }
+
+    /** Whether the solver broke this edge's liquid column at its crest (a broken siphon). */
+    public boolean isCrestBroken(int edgeIndex) {
+        return blockedEdges.contains(edgeIndex) && edgeReasons.get(edgeIndex) == Reason.CREST;
     }
 }

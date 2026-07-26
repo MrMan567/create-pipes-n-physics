@@ -1,0 +1,4 @@
+# JitPack build config. NeoForge 1.21.1 needs JDK 21; publish the mod jar to the
+# local maven repo so JitPack can serve it as com.github.StaticFX:create-pipes-n-physics:<tag>.
+jdk:
+  - openjdk21
