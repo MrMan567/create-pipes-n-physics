@@ -393,6 +393,50 @@ public class OpenEndTests {
     }
 
     /**
+     * A fluid tank stacked directly on a conduit (createpropulsion liquid burner) must NOT
+     * join the burner's network without a pipe — otherwise gravity equalization drains the
+     * tank into the burner and breaks Propulsion's intended intake layout.
+     */
+    @GameTest(template = "common/long_equalization", templateNamespace = PipesNPhysics.ID, timeoutTicks = 100)
+    public static void fluidConduitDoesNotBleedFromStackedTank(GameTestHelper helper) {
+        Block burner = BuiltInRegistries.BLOCK
+                .getOptional(ResourceLocation.parse("createpropulsion:liquid_burner")).orElse(null);
+        if (burner == null) {
+            helper.succeed(); // mod not present in this runtime — nothing to verify
+            return;
+        }
+
+        BlockPos pipe = new BlockPos(0, 3, 0);
+        BlockPos burnerPos = new BlockPos(0, 3, 1);
+        BlockPos tank = new BlockPos(0, 4, 1);
+        helper.runAfterDelay(2, () -> {
+            for (BlockPos p : new BlockPos[]{pipe, burnerPos, tank}) helper.setBlock(p, Blocks.AIR);
+            helper.setBlock(burnerPos, burner.defaultBlockState());
+            helper.setBlock(tank, AllBlocks.FLUID_TANK.get().defaultBlockState());
+            helper.setBlock(pipe, pipeState(AllBlocks.FLUID_PIPE.get(), Direction.SOUTH)); // toward the burner (+z)
+        });
+
+        helper.runAfterDelay(6, () -> {
+            Graph graph = GraphBuilder.build(helper.getLevel(), helper.absolutePos(pipe));
+            BlockPos absTank = helper.absolutePos(tank);
+            BlockPos absBurner = helper.absolutePos(burnerPos);
+            boolean tankInGraph = graph.nodes().stream().anyMatch(n -> n.pos().equals(absTank));
+            boolean directLink = graph.edges().stream().anyMatch(e -> {
+                if (!e.pipes().isEmpty()) return false;
+                BlockPos a = graph.node(e.a()).pos();
+                BlockPos b = graph.node(e.b()).pos();
+                return (a.equals(absTank) && b.equals(absBurner)) || (b.equals(absTank) && a.equals(absBurner));
+            });
+            if (tankInGraph || directLink) {
+                helper.fail("stacked tank must not couple to conduit burner (tankInGraph="
+                        + tankInGraph + ", directLink=" + directLink + ")");
+                return;
+            }
+            helper.succeed();
+        });
+    }
+
+    /**
      * The headline request: a hand-placed water block in front of an open mouth, with a
      * tank below pulling a vacuum, must be sucked IN. The network never spilled, so the
      * finite-source gate is open and the engine plans to draw from the mouth.

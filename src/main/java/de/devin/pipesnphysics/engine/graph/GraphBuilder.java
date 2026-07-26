@@ -391,9 +391,11 @@ public final class GraphBuilder {
 
     /**
      * Explore a fluid-conduit block: a fluid-holding node the BFS traverses THROUGH,
-     * linking it to adjacent pumps, pipes, other conduits, and plain handlers on every
-     * face — so a row of conduits (e.g. chained liquid burners) becomes one connected
-     * network the solver equalizes, the way Create's transport used to feed them.
+     * linking it to adjacent pumps, pipes, and other conduits — so a row of conduits
+     * (e.g. chained liquid burners) becomes one connected network the solver equalizes,
+     * the way Create's transport used to feed them. Plain reservoirs (tanks, basins)
+     * are NOT auto-linked here; they join only through an actual pipe opening, so a
+     * tank stacked on a burner does not gravity-drain into it.
      */
     private static void discoverConduit(Level level, BlockPos cur, Discovery discovery, Queue<BlockPos> frontier) {
         discovery.handlers.add(cur);
@@ -408,18 +410,21 @@ public final class GraphBuilder {
                 frontier.add(neighbor.immutable());
                 continue;
             }
-            if (FluidCaps.at(level, neighbor, face.getOpposite()) != null
-                    && !HandlerRoles.isIgnored(level, neighbor)) {
-                BlockPos handlerPos = neighbor.immutable();
-                discovery.handlers.add(handlerPos);
-                conns.add(handlerPos);
-                backLink(discovery, handlerPos, cur);
-                if (isConduit(level, neighbor)) frontier.add(handlerPos);
+            if (isConduit(level, neighbor)) {
+                BlockPos conduitPos = neighbor.immutable();
+                discovery.handlers.add(conduitPos);
+                conns.add(conduitPos);
+                backLink(discovery, conduitPos, cur);
+                frontier.add(conduitPos);
                 continue;
             }
-            if (FluidPropagator.getPipe(level, neighbor) != null) {
-                conns.add(neighbor.immutable());
-                frontier.add(neighbor.immutable());
+            var neighborPipe = FluidPropagator.getPipe(level, neighbor);
+            if (neighborPipe != null) {
+                BlockState nState = level.getBlockState(neighbor);
+                if (neighborPipe.canHaveFlowToward(nState, face.getOpposite())) {
+                    conns.add(neighbor.immutable());
+                    frontier.add(neighbor.immutable());
+                }
             }
         }
         mergeConnections(discovery, cur, conns);
