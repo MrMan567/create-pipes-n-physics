@@ -10,11 +10,11 @@ import net.neoforged.neoforge.registries.DeferredHolder;
 import net.neoforged.neoforge.registries.DeferredRegister;
 
 /**
- * Registers the pipe and pump display-link sources into Create's {@code display_source}
- * registry and, once the block-entity registry is frozen, associates them with Create's
- * pipe and pump block-entity types. The mod owns none of those blocks, so association
- * happens in setup rather than through Registrate's {@code associate} (which would need
- * the types resolved at builder time, before Create registers them).
+ * Registers the pipe, pump, and tank display-link sources into Create's
+ * {@code display_source} registry and, once the block-entity registry is frozen,
+ * associates them with Create's block-entity types. The mod owns none of those blocks,
+ * so association happens in setup rather than through Registrate's {@code associate}
+ * (which would need the types resolved at builder time, before Create registers them).
  */
 public final class PnpDisplaySources {
     private static final DeferredRegister<DisplaySource> SOURCES =
@@ -26,12 +26,14 @@ public final class PnpDisplaySources {
     public static final DeferredHolder<DisplaySource, PipeNetworkDisplaySource> PUMP =
             SOURCES.register("pump", () ->
                     new PipeNetworkDisplaySource(PipeDisplayMetric.PUMP_METRICS, "display_source.pump_metric", true));
+    public static final DeferredHolder<DisplaySource, TankContentsDisplaySource> TANK =
+            SOURCES.register("tank", TankContentsDisplaySource::new);
 
     public static void register(IEventBus modBus) {
         SOURCES.register(modBus);
     }
 
-    /** Wire the sources onto Create's pipe/pump BE types; call after the BE registry is frozen. */
+    /** Wire the sources onto Create's pipe/pump/tank BE types; call after the BE registry is frozen. */
     public static void associate() {
         DisplaySource pipe = PIPE.get();
         associate(pipe, AllBlockEntityTypes.FLUID_PIPE.get());
@@ -39,6 +41,8 @@ public final class PnpDisplaySources {
         associate(pipe, AllBlockEntityTypes.GLASS_FLUID_PIPE.get());
         associate(pipe, AllBlockEntityTypes.SMART_FLUID_PIPE.get());
         associate(PUMP.get(), AllBlockEntityTypes.MECHANICAL_PUMP.get());
+        associate(TANK.get(), AllBlockEntityTypes.FLUID_TANK.get());
+        associate(TANK.get(), AllBlockEntityTypes.CREATIVE_FLUID_TANK.get());
     }
 
     private static void associate(DisplaySource source, BlockEntityType<?> type) {

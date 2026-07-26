@@ -17,7 +17,14 @@ import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.api.FluidHandlerApi;
 import de.devin.pipesnphysics.api.FluidHandlerRole;
 import de.devin.pipesnphysics.client.PipeStatusText;
+import com.simibubi.create.content.redstone.displayLink.DisplayLinkBlock;
+import com.simibubi.create.content.redstone.displayLink.DisplayLinkBlockEntity;
+import com.simibubi.create.content.redstone.displayLink.DisplayLinkContext;
+import com.simibubi.create.content.redstone.displayLink.target.DisplayTargetStats;
 import de.devin.pipesnphysics.display.PipeDisplayMetric;
+import de.devin.pipesnphysics.display.PnpDisplaySources;
+import de.devin.pipesnphysics.display.TankContentsDisplaySource;
+import de.devin.pipesnphysics.display.TankDisplayMetric;
 import de.devin.pipesnphysics.engine.EdgeFlow;
 import de.devin.pipesnphysics.engine.EngineTickHandler;
 import de.devin.pipesnphysics.engine.FlowSolver;
@@ -45,6 +52,7 @@ import de.devin.pipesnphysics.mixin.FluidTankAccessor;
 import de.devin.pipesnphysics.mixin.PipeConnectionAccessor;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.network.chat.MutableComponent;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.resources.ResourceLocation;
@@ -355,6 +363,54 @@ public class GoggleProbeTests {
 
             helper.succeed();
         });
+    }
+
+    /**
+     * A display link glued to ANY cell of a multiblock tank reads the WHOLE vessel: the
+     * fluid capability resolves through the controller, so amount and capacity sum both
+     * cells (4,000 of the 2-cell 16,000 = 25%), and the link's stored Metric index routes
+     * to the selected readout through the real {@code provideText} path. The link GUI and
+     * board rendering are Create's — verify those visually in-game.
+     */
+    @GameTest(template = "common/empty_canvas", templateNamespace = PipesNPhysics.ID, timeoutTicks = 100)
+    public static void tankDisplaySourceReadsTheMultiblockTotal(GameTestHelper helper) {
+        var tank = AllBlocks.FLUID_TANK.get();
+        BlockPos lower = new BlockPos(1, 1, 0);
+        BlockPos upper = new BlockPos(1, 2, 0);
+        BlockPos link = new BlockPos(1, 3, 0);
+        helper.setBlock(lower, tank.defaultBlockState());
+        helper.setBlock(upper, tank.defaultBlockState());
+        helper.setBlock(link, AllBlocks.DISPLAY_LINK.get().defaultBlockState()
+                .setValue(DisplayLinkBlock.FACING, Direction.UP)); // faces up = glued to the tank below
+        helper.runAfterDelay(20, () -> { // let the two cells merge into one vessel
+            fill(helper, lower, 4000);
+            if (!(helper.getBlockEntity(link) instanceof DisplayLinkBlockEntity linkBe)) {
+                helper.fail("no display link block entity");
+                return;
+            }
+            DisplayLinkContext context = new DisplayLinkContext(helper.getLevel(), linkBe);
+            DisplayTargetStats stats = new DisplayTargetStats(1, 32, null);
+            TankContentsDisplaySource source = PnpDisplaySources.TANK.get();
+
+            linkBe.getSourceConfig().putInt("Metric", TankDisplayMetric.METRICS.indexOf(TankDisplayMetric.FILL));
+            String fillLine = line(source.provideText(context, stats));
+            if (!"25%".equals(fillLine)) {
+                helper.fail("fill metric through the upper cell read '" + fillLine + "', expected 25%");
+                return;
+            }
+            linkBe.getSourceConfig().putInt("Metric", TankDisplayMetric.METRICS.indexOf(TankDisplayMetric.FLUID));
+            String fluidLine = line(source.provideText(context, stats));
+            String water = new FluidStack(Fluids.WATER, 1).getHoverName().getString();
+            if (!water.equals(fluidLine)) {
+                helper.fail("fluid metric read '" + fluidLine + "', expected '" + water + "'");
+                return;
+            }
+            helper.succeed();
+        });
+    }
+
+    private static String line(List<MutableComponent> lines) {
+        return lines.isEmpty() ? "" : lines.get(0).getString();
     }
 
     /**

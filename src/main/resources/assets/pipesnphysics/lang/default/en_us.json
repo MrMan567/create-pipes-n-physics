@@ -76,6 +76,7 @@
 
   "pipesnphysics.display_source.pipe": "Pipe Flow",
   "pipesnphysics.display_source.pump": "Pump Output",
+  "pipesnphysics.display_source.tank": "Tank Contents",
 
   "pipesnphysics.display_source.pipe_metric.title": "Metric",
   "pipesnphysics.display_source.pipe_metric.flow": "Flow rate",
@@ -96,7 +97,15 @@
   "pipesnphysics.display_source.pump_metric.status": "Status",
   "pipesnphysics.display_source.pump_metric.summary": "Summary",
 
+  "pipesnphysics.display_source.tank_metric.title": "Metric",
+  "pipesnphysics.display_source.tank_metric.summary": "Summary",
+  "pipesnphysics.display_source.tank_metric.amount": "Amount",
+  "pipesnphysics.display_source.tank_metric.capacity": "Capacity",
+  "pipesnphysics.display_source.tank_metric.fill": "Fill level",
+  "pipesnphysics.display_source.tank_metric.fluid": "Fluid",
+
   "pipesnphysics.display_source.unit.mb": " mB/t",
+  "pipesnphysics.display_source.unit.mb_amount": " mB",
   "pipesnphysics.display_source.unit.blocks": " blocks",
   "pipesnphysics.display_source.unit.blocks_up": " blocks ↑",
 

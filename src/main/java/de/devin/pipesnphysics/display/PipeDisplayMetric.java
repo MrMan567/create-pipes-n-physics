@@ -8,6 +8,13 @@ import net.minecraft.network.chat.MutableComponent;
 
 import java.util.List;
 
+import static de.devin.pipesnphysics.display.DisplayLine.blocks;
+import static de.devin.pipesnphysics.display.DisplayLine.blocksUp;
+import static de.devin.pipesnphysics.display.DisplayLine.dash;
+import static de.devin.pipesnphysics.display.DisplayLine.mbRate;
+import static de.devin.pipesnphysics.display.DisplayLine.percent;
+import static de.devin.pipesnphysics.display.DisplayLine.tr;
+
 /**
  * One selectable readout a display link can pull off a pipe network cell. Each
  * metric turns a solved {@link Readout} into a single display line; the pipe and
@@ -15,7 +22,7 @@ import java.util.List;
  * link GUI), so the stored index maps back to a metric within that source's list.
  */
 public enum PipeDisplayMetric {
-    FLOW("flow", r -> mb(r.data().mbPerTick())),
+    FLOW("flow", r -> mbRate(r.data().mbPerTick())),
     FLUID("fluid", r -> fluid(r.data())),
     DIRECTION("direction", r -> direction(r.data())),
     PRESSURE("pressure", r -> r.data().hasPressure() ? blocks(r.data().pressureBlocks()) : dash()),
@@ -23,7 +30,7 @@ public enum PipeDisplayMetric {
     STATUS("status", r -> status(r.data())),
     SUMMARY("summary", PipeDisplayMetric::pipeSummary),
 
-    CAPACITY("capacity", r -> mb(r.cap())),
+    CAPACITY("capacity", r -> mbRate(r.cap())),
     THROUGHPUT("throughput", r -> percent(r.throughput())),
     CAN_LIFT("lift", r -> blocksUp(r.canLift())),
     LIMITER("limiter", PipeDisplayMetric::limiter),
@@ -71,7 +78,7 @@ public enum PipeDisplayMetric {
     private static MutableComponent pipeSummary(Readout r) {
         PipeStatusPayload d = r.data();
         if (d.status() != PipeStatusPayload.STATUS_FLOWING || d.mbPerTick() <= 0) return status(d);
-        MutableComponent line = mb(d.mbPerTick());
+        MutableComponent line = mbRate(d.mbPerTick());
         if (d.flowDirection() != null) line.append(" ").append(tr("direction." + d.flowDirection().getName()));
         if (!d.fluid().isEmpty()) line.append(" (").append(d.fluid().getHoverName()).append(")");
         return line;
@@ -111,29 +118,5 @@ public enum PipeDisplayMetric {
     private static MutableComponent direction(PipeStatusPayload d) {
         Direction dir = d.flowDirection();
         return dir == null ? dash() : tr("direction." + dir.getName());
-    }
-
-    private static MutableComponent mb(double v) {
-        return Component.literal(LangNumberFormat.format(v)).append(tr("display_source.unit.mb"));
-    }
-
-    private static MutableComponent blocks(double v) {
-        return Component.literal(LangNumberFormat.format(v)).append(tr("display_source.unit.blocks"));
-    }
-
-    private static MutableComponent blocksUp(double v) {
-        return Component.literal(LangNumberFormat.format(v)).append(tr("display_source.unit.blocks_up"));
-    }
-
-    private static MutableComponent percent(double v) {
-        return Component.literal(Math.round(v) + "%");
-    }
-
-    private static MutableComponent dash() {
-        return Component.literal("—");
-    }
-
-    private static MutableComponent tr(String key) {
-        return Component.translatable("pipesnphysics." + key);
     }
 }
