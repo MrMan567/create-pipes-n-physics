@@ -172,18 +172,27 @@ final class FlowingRun {
     /**
      * Deliver the tail cell's own fluid (plug flow may carry a different fluid than the pass)
      * into the sink — but the column must ARRIVE first: a tail cell still filling toward the flow
-     * depth delivers nothing (the settle phase drains the last residue once flow stops).
+     * depth delivers nothing, unless the whole column has already arrived ({@link
+     * #columnFullyArrived}) and drains forward.
      */
     private void deliverFromTail(Reservoir sink) {
         PipeStore.Store tail = network.cellAt(cells.getLast());
-        if (tail == null || tail.amount() < flowDepthMb) return;
+        if (tail == null) return;
+        boolean arrived = tail.amount() < flowDepthMb && columnFullyArrived();
+        if (tail.amount() < flowDepthMb && !arrived) return;
         int budget = Math.min(exitBudget, tail.amount());
-        if (budget <= 0) return;
-        int filled = sink.fill(tail.fluid(), budget);
-        if (filled <= 0) return;
-        tail.extract(filled);
-        exitBudget -= filled;
-        pass.ledger().moved(edge, filled);
+        if (budget > 0) {
+            int filled = sink.fill(tail.fluid(), budget);
+            if (filled > 0) {
+                tail.extract(filled);
+                exitBudget -= filled;
+                pass.ledger().moved(edge, filled);
+            }
+        }
+        // A fully-arrived run conducts THROUGH to its source for the remainder — the sub-depth
+        // endgame degenerates to a wire, so the sink still receives the source's last dregs
+        // (which sit a consumers-first tick behind the tail and would otherwise orbit).
+        if (arrived) deliverThroughWire(sink);
     }
 
     /** A zero-cell edge is a wire: pull straight through from the upstream side into the sink. */
@@ -215,15 +224,60 @@ final class FlowingRun {
             got = pass.pullArrivingAt(upstreamNode(), wanted, budget, flowDepthMb, visited);
         } else {
             PipeStore.Store tail = network.cellAt(cells.getLast());
-            if (tail == null || tail.amount() < flowDepthMb
-                    || !FluidStack.isSameFluidSameComponents(tail.fluid(), wanted)) {
+            if (tail == null) return 0;
+            if (tail.amount() > 0 && !FluidStack.isSameFluidSameComponents(tail.fluid(), wanted)) {
                 return 0;
             }
-            got = tail.extract(budget).getAmount();
+            boolean arrived = tail.amount() < flowDepthMb && columnFullyArrived();
+            if (tail.amount() < flowDepthMb && !arrived) return 0;
+            got = tail.amount() > 0 ? tail.extract(budget).getAmount() : 0;
+            // The wire-remnant pull-through: the consumer reaches past the arrived column into
+            // the source's last dregs, which a consumers-first tick could never catch in the tail.
+            if (arrived && got < budget) {
+                Reservoir source = network.reservoirAt(upstreamNode());
+                if (source != null) got += source.drain(wanted, budget - got);
+            }
         }
         exitBudget -= got;
         pass.ledger().moved(edge, got);
         return got;
+    }
+
+    /**
+     * Whether the tail is the end of everything this run will ever carry: the whole stored column
+     * plus what the source reservoir can still give no longer reaches the flow depth, so the
+     * depth gate could never open again — the column has fully ARRIVED and drains forward (the
+     * "dry source lets the column drain forward" rule). Without this, the last sub-depth residual
+     * strands in the pipe once the source runs dry — and beside an open bowl it ORBITS: the
+     * settle pours it back into the empty basin, the pump lifts it out again, forever (the
+     * separation-rig oscillation). A run fed through a junction/pump keeps the plain gate (its
+     * remaining supply is unknowable); a self-refilling source always answers in full, so the
+     * gate holds there.
+     *
+     * The boundary is INCLUSIVE — a total of EXACTLY the depth is arrived too: its tail can only
+     * meet the gate on the tick the source gives its last mB, and by the next solve the pass is
+     * dead (an empty source assembles no flow), so no consumer ever observes it — the total
+     * orbited basin↔pipe forever at precisely one value ("still oscillates at around 60 mB").
+     * The probe therefore asks one mB PAST the shortfall: a live supply answers beyond the
+     * depth, an exhausted one cannot.
+     */
+    private boolean columnFullyArrived() {
+        Reservoir source = network.reservoirAt(upstreamNode());
+        if (source == null) return false;
+        int stored = 0;
+        for (BlockPos pos : cells) {
+            PipeStore.Store cell = network.cellAt(pos);
+            if (cell != null) stored += cell.amount();
+        }
+        if (stored >= flowDepthMb) return false;
+        return stored + source.probeSupply(fluid, flowDepthMb - stored + 1) <= flowDepthMb;
+    }
+
+    /** The dual of {@link #pullFromTail}: put refused fluid back into this run's downstream end. */
+    int refundToTail(FluidStack refused, int amount, Set<Integer> visited) {
+        if (cells.isEmpty()) return pass.refundArrivingAt(upstreamNode(), refused, amount, visited);
+        PipeStore.Store tail = network.cellAt(cells.getLast());
+        return tail == null ? 0 : tail.insert(refused, amount);
     }
 
     /**
@@ -237,14 +291,13 @@ final class FlowingRun {
     }
 
     /**
-     * Fluid a two-phase wire move could not place after all is refunded to the source, never
-     * voided silently. A junction pull can span several feeders, so a leftover has no single
-     * owner to return to past the first reservoir; the SIMULATE probe makes this branch
-     * near-unreachable, hence warn-and-void as the last resort.
+     * Fluid a two-phase wire move could not place after all is refunded to where the pull took it
+     * from — the upstream reservoir, junction slot, or feeder tails — never voided silently. The
+     * SIMULATE probe makes any leftover a foreign sink's contract violation, and the pull just made
+     * the room, so the warn is a genuinely unreachable last resort.
      */
     private void reinsertLeftover(int leftover) {
-        Reservoir source = network.reservoirAt(upstreamNode());
-        if (source != null) leftover -= source.refund(fluid, leftover);
+        leftover -= pass.refundArrivingAt(upstreamNode(), fluid, leftover, pass.freshVisitSet());
         if (leftover > 0) {
             PipesNPhysics.LOGGER.warn("Voided {} mB of {} at {} (sink accepted less than simulated)",
                     leftover, fluid.getFluid(), network.graph.node(upstreamNode()).pos());

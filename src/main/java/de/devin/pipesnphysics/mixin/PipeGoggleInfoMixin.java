@@ -8,6 +8,7 @@ import com.simibubi.create.foundation.blockEntity.SmartBlockEntity;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.client.GoggleText;
 import de.devin.pipesnphysics.client.PipeStatusText;
+import de.devin.pipesnphysics.engine.FlowSolver;
 import de.devin.pipesnphysics.engine.net.PipeStatusClient;
 import de.devin.pipesnphysics.engine.net.PipeStatusPayload;
 import net.createmod.catnip.lang.LangBuilder;
@@ -68,6 +69,11 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
             if (data.statusDetail() == PipeStatusPayload.DETAIL_CREST) {
                 pipesnphysics$lang("gui.goggles.air_break_fix")
                         .style(ChatFormatting.RED)
+                        .forGoggles(tooltip, 1);
+            } else if (data.statusDetail() == PipeStatusPayload.DETAIL_BELOW_OPENING) {
+                // No climb involved — the honest fix is simply more fluid in the supply.
+                pipesnphysics$lang("gui.goggles.below_opening_fix")
+                        .style(ChatFormatting.GOLD)
                         .forGoggles(tooltip, 1);
             }
         }
@@ -207,7 +213,9 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
                 .style(ChatFormatting.DARK_GRAY)
                 .add(pipesnphysics$text(LangNumberFormat.format(type.getDensity())).style(ChatFormatting.GRAY))
                 .forGoggles(tooltip, 2);
-        int viscosity = type.getViscosity();
+        // The EFFECTIVE viscosity the engine flows this fluid at HERE — a molten fluid reads
+        // thinner in an ultrawarm dimension, so the number matches how the pipe behaves.
+        int viscosity = (int) Math.round(FlowSolver.effectiveViscosity(getLevel(), data.fluid()));
         String tag = viscosity <= 1000 ? "thin" : viscosity <= 3000 ? "syrupy" : "thick";
         pipesnphysics$lang("gui.goggles.viscosity")
                 .style(ChatFormatting.DARK_GRAY)

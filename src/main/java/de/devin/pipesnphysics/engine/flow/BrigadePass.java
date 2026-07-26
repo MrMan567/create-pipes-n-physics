@@ -100,6 +100,27 @@ public final class BrigadePass {
         return got;
     }
 
+    /**
+     * The dual of {@link #pullArrivingAt}: return fluid a consumer could not place after all to
+     * where a pull at this node takes it from — the reservoir, the junction/gate slot, or the
+     * feeders' tails, recursing through wires. The pull that just emptied these stores guarantees
+     * the room, so nothing is voided short of a handler refusing its own fluid back.
+     */
+    int refundArrivingAt(int nodeIndex, FluidStack fluid, int amount, Set<Integer> visited) {
+        if (amount <= 0 || !visited.add(nodeIndex)) return 0;
+        Reservoir reservoir = network.reservoirAt(nodeIndex);
+        if (reservoir != null) return reservoir.refund(fluid, amount);
+
+        PipeStore.Store slot = network.slotAt(nodeIndex);
+        if (slot != null) return slot.insert(fluid, amount);
+        int returned = 0;
+        for (FlowingRun feeder : feedersInto.getOrDefault(nodeIndex, List.of())) {
+            if (returned >= amount) break;
+            returned += feeder.refundToTail(fluid, amount - returned, visited);
+        }
+        return returned;
+    }
+
     Set<Integer> freshVisitSet() {
         return new HashSet<>();
     }

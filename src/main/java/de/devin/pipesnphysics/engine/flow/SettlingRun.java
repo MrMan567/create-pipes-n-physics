@@ -48,9 +48,11 @@ final class SettlingRun {
     }
 
     /**
-     * Whether this content is a lighter-than-air gas, which the settle HOLDS in place — runs and
-     * node slots alike: every target here mixes heads with world elevations, and a gas's head is
-     * INVERTED (fill − baseY, §4), so the liquid waterline math reads garbage for it.
+     * Whether this content is a lighter-than-air gas, which settles in the MIRRORED elevation
+     * frame — buoyancy is gravity upside down, so the same target/walk machinery runs with world
+     * Y negated (the frame wrappers below) and the gas pools UP and pours into the vessel ABOVE.
+     * Never mix a gas with the solve's display heads: a gas head is INVERTED (fill − baseY, §4),
+     * not an elevation, which is why the mirrored frame reads live surfaces only.
      */
     static boolean lighterThanAir(FluidStack fluid) {
         return !fluid.isEmpty() && fluid.getFluid().getFluidType().isLighterThanAir();
@@ -79,6 +81,8 @@ final class SettlingRun {
     private final boolean fillOnly;
     private final int rate;
     private final int hysteresisMb;
+    /** Settling a lighter-than-air gas: every elevation below reads through the mirrored frame. */
+    private boolean mirrored;
 
     SettlingRun(FlowNetwork network, FlowLedger ledger, Solution solution, Edge edge, boolean fillOnly) {
         this.network = network;
@@ -103,8 +107,12 @@ final class SettlingRun {
         // Checked BEFORE the gas/sealed bails, which would otherwise skip a full primed run.
         if (reactToBoundaryCollision()) return false;
 
-        // A gas neither pools at the bottom nor drains downhill; hold it in place for now.
-        if (lighterThanAir(presentFluid())) return false;
+        // A lighter-than-air gas settles in the MIRRORED frame: the wrappers below negate world
+        // Y, so the SAME target/walk machinery pools it upward and pours it into the vessel
+        // ABOVE. A held (fill-only) gas column stays frozen — its packing target is the display
+        // CEILING field, which mixes heads with elevations the mirror cannot read.
+        mirrored = lighterThanAir(settleMedium());
+        if (mirrored && fillOnly) return false;
 
         // A sealed primed column holds: with every cell FULL and both end reservoirs still
         // reaching their openings, no air can enter the run, so an idle siphon keeps its prime
@@ -127,7 +135,7 @@ final class SettlingRun {
         int[] draw = isCrestBroken() ? drawTargets(headA, headB) : retain;
         boolean moved = levelToTargets(retain);
         if (!fillOnly) moved |= fallAndSpread(retain);
-        moved |= exchangeWithReservoirs(retain, draw);
+        moved |= exchangeWithReservoirs(retain, draw, headA, headB);
         moved |= primeFromPumps(retain);
         return moved;
     }
@@ -144,7 +152,11 @@ final class SettlingRun {
      */
     boolean topUp() {
         if (cells.isEmpty()) return false;
-        if (lighterThanAir(presentFluid())) return false;
+        // A flowing GAS run tops up in the mirrored frame: its cells pack downward from the bore
+        // top toward the interface profile while the brigade flows — without this, flowing gas
+        // rode at plug-flow depth and its hanging fill visibly missed the tank's interface until
+        // the flow stopped ("the gas heights inside the pipe and the tank don't match").
+        mirrored = lighterThanAir(settleMedium());
         Double lineA = restingLine(edge.a(), edge.b());
         Double lineB = restingLine(edge.b(), edge.a());
         if (lineA == null && lineB == null) return false;
@@ -156,8 +168,55 @@ final class SettlingRun {
         return moved;
     }
 
+    // ------------------------------------------------------------ the elevation frame
+    // A gas is a liquid under inverted gravity, so its rest state is the SAME math run in a
+    // MIRRORED frame: every elevation negated, min/max meanings preserved. All settle logic
+    // reads elevations exclusively through these wrappers; with {@code mirrored} false they
+    // are the identity, so the liquid paths are bit-for-bit unchanged.
+
+    /** A reservoir's resting line in-frame: the rendered liquid surface, or the gas interface. */
+    private double surfaceOf(Reservoir reservoir) {
+        return mirrored ? -reservoir.gasSurface() : reservoir.surface();
+    }
+
+    /** The low edge of a cell's fluid window in-frame (liquid: window bottom; gas: minus its top). */
+    private double windowLow(BlockPos pos) {
+        return mirrored ? -(network.windowBottomY(pos) + network.windowHeight(pos))
+                : network.windowBottomY(pos);
+    }
+
+    /** Fraction of a cell's window past the in-frame line — the one fill↔height conversion. */
+    private double windowFillFrac(BlockPos pos, double line) {
+        return Math.clamp((line - windowLow(pos)) / network.windowHeight(pos), 0, 1);
+    }
+
+    /** A cell's low block edge in-frame (fall/spread comparisons: gas "falls" upward). */
+    private double cellLow(BlockPos pos) {
+        return mirrored ? -(network.cellBottomY(pos) + 1) : network.cellBottomY(pos);
+    }
+
+    /** A cell's centre in-frame. */
+    private double cellMid(BlockPos pos) {
+        return mirrored ? -network.cellCenterY(pos) : network.cellCenterY(pos);
+    }
+
+    /** The medium this run settles as: its content, the solved rest fluid, or an end reservoir's. */
+    private FluidStack settleMedium() {
+        FluidStack present = presentFluid();
+        if (!present.isEmpty()) return present;
+        FluidStack rest = solution.restFluids().getOrDefault(edge.index(), FluidStack.EMPTY);
+        if (!rest.isEmpty()) return rest;
+        Reservoir a = network.reservoirAt(edge.a());
+        if (a != null && a.isFiniteReservoir() && a.holdsFluid()) return a.contents();
+        Reservoir b = network.reservoirAt(edge.b());
+        if (b != null && b.isFiniteReservoir() && b.holdsFluid()) return b.contents();
+        return FluidStack.EMPTY;
+    }
+
     private boolean isCrestBroken() {
-        return solution.isCrestBroken(edge.index());
+        // The solve's crest data is a LIQUID quantity (suction/cavitation over a high point);
+        // a gas run always settles as unbroken — its "crest" would be a dip, a deferred mirror.
+        return !mirrored && solution.isCrestBroken(edge.index());
     }
 
     /**
@@ -209,6 +268,7 @@ final class SettlingRun {
      * waterline, because a dry crest can no longer self-prime.
      */
     private boolean sealedPrimedColumn() {
+        if (mirrored) return false; // barometric gas columns: a deferred mirror
         Reservoir a = network.reservoirAt(edge.a());
         Reservoir b = network.reservoirAt(edge.b());
         if (!sealsItsEnd(a, cells.getFirst()) || !sealsItsEnd(b, cells.getLast())) return false;
@@ -248,20 +308,28 @@ final class SettlingRun {
     private Double restingLine(int nodeIndex, int farNodeIndex) {
         Reservoir reservoir = network.reservoirAt(nodeIndex);
         if (reservoir != null && reservoir.isFiniteReservoir()) {
-            return reservoir.holdsFluid() ? reservoir.surface() : null;
+            if (!reservoir.holdsFluid()) return null;
+            // In the gas frame a vessel holding a LIQUID has no gas interface to contribute —
+            // its line would be phantom; the exchange walks still fill it if it accepts the gas.
+            if (mirrored && !lighterThanAir(reservoir.contents())) return null;
+            return surfaceOf(reservoir);
         }
         if (reservoir != null && reservoir.isOpenMouth()) return null; // read the far side instead
+        // Display heads/ceilings are LIQUID elevations; the gas frame cannot read them (a gas
+        // head is fill − baseY). A pump/junction end contributes no gas line.
+        if (mirrored) return null;
         Double head = solution.nodeHeads().get(nodeIndex);
         if (!fillOnly) return head;
         Double ceiling = solution.nodeCeilings().get(nodeIndex);
         return ceiling != null ? ceiling : head;
     }
 
-    /** An empty reservoir's floor still caps its side of the line: fluid drains down toward it. */
+    /** An empty reservoir's floor still caps its side of the line: fluid drains down toward it
+     *  (in the gas frame its CEILING caps upward: gas rises toward the empty vessel above). */
     private double emptyFloorCap(int nodeIndex, double line) {
         Reservoir reservoir = network.reservoirAt(nodeIndex);
         if (reservoir != null && reservoir.isFiniteReservoir() && !reservoir.holdsFluid()) {
-            return Math.min(line, reservoir.surface());
+            return Math.min(line, surfaceOf(reservoir));
         }
         return line;
     }
@@ -314,7 +382,7 @@ final class SettlingRun {
             // ABOVE the tank (and dead-zone a run whose waterline sits just above the bore floor);
             // the mB-based SETTLE_BAND hysteresis is the anti-flap deadband, not a world-Y nudge.
             target[i] = (int) Math.round(
-                    network.windowFill(cells.get(i), line) * network.cellCapacity);
+                    windowFillFrac(cells.get(i), line) * network.cellCapacity);
         }
         return target;
     }
@@ -356,17 +424,54 @@ final class SettlingRun {
      * and leaves from the first above-target one — everything between just passes it through.
      * Strictly hydraulic: no exchange past a dry gap. Excess may also pour out of an open mouth
      * sitting at or below the run. Fill-only runs never give anything back.
+     *
+     * POURS gate on each end's OWN line, never the flattened profile: pouring into a reservoir
+     * is a gravity act, so only fluid standing ABOVE that reservoir's surface may enter it. The
+     * min-flattened retain targets read a film beside the HIGHER tank as excess and poured it
+     * back UP into it — with the flow pass pulling the same film out through the lip's dregs
+     * allowance, fluid ping-ponged tank↔head-cell at 4 mB forever while the true sink starved
+     * (the "flows shortly, stops" limit cycle at the lip equilibrium).
      */
-    private boolean exchangeWithReservoirs(int[] retain, int[] draw) {
+    private boolean exchangeWithReservoirs(int[] retain, int[] draw, double headA, double headB) {
         boolean moved = drawFromReservoir(draw, false);
         moved |= drawFromReservoir(draw, true);
         if (!fillOnly) {
-            moved |= pourIntoReservoir(retain, false);
-            moved |= pourIntoReservoir(retain, true);
+            moved |= pourIntoReservoir(pourTargets(retain, pourLine(edge.a(), headA)), false);
+            moved |= pourIntoReservoir(pourTargets(retain, pourLine(edge.b(), headB)), true);
             moved |= pourOutOpenEnd(false);
             moved |= pourOutOpenEnd(true);
         }
         return moved;
+    }
+
+    /**
+     * The line a pour into this end gates on: the end's OWN surface, an EMPTY reservoir
+     * included (its floor — in the gas frame its ceiling). The flattened fallback substituted
+     * the FAR side's line at an empty end, which read fluid resting beside the empty vessel as
+     * excess it could jump INTO it across the opening — for a gas, pouring DOWN into an empty
+     * tank below the run, the exact inversion of buoyancy.
+     */
+    private double pourLine(int nodeIndex, double flattenedFallback) {
+        Reservoir reservoir = network.reservoirAt(nodeIndex);
+        if (reservoir != null && reservoir.isFiniteReservoir() && !reservoir.holdsFluid()) {
+            return surfaceOf(reservoir);
+        }
+        return flattenedFallback;
+    }
+
+    /**
+     * The pour gate for one end: on an unbroken run, the profile of that end's OWN line. A
+     * crest-broken run keeps the retain targets — they are already per-leg, and a collapsing
+     * barometric leg must pour against its retention allowance, not the bare surface.
+     */
+    private int[] pourTargets(int[] retain, double endHead) {
+        if (isCrestBroken()) return retain;
+        int[] target = new int[cells.size()];
+        for (int i = 0; i < cells.size(); i++) {
+            target[i] = (int) Math.round(
+                    windowFillFrac(cells.get(i), endHead) * network.cellCapacity);
+        }
+        return target;
     }
 
     /**
@@ -378,7 +483,7 @@ final class SettlingRun {
         Reservoir reservoir = network.reservoirAt(fromB ? edge.b() : edge.a());
         if (reservoir == null || !reservoir.isFiniteReservoir() || !reservoir.holdsFluid()) return false;
         BlockPos endCell = fromB ? cells.getLast() : cells.getFirst();
-        if (reservoir.surface() <= network.windowBottomY(endCell)) return false;
+        if (surfaceOf(reservoir) <= windowLow(endCell)) return false;
         for (int step = 0; step < cells.size(); step++) {
             int i = fromB ? cells.size() - 1 - step : step;
             PipeStore.Store cell = network.cellAt(cells.get(i));
@@ -439,6 +544,9 @@ final class SettlingRun {
      * fills with real fluid even though its steady-state solved flow is 0.
      */
     private boolean primeFromPumps(int[] target) {
+        // A dead-headed GAS line stays with the brigade: pump packing reads ceiling-field
+        // quantities the gas frame cannot, and the flow passes already move powered gas.
+        if (mirrored) return false;
         // Non-short-circuit `|`: BOTH ends must attempt priming, not just the first that moves.
         return pumpPrime(cells.getFirst(), target[0], edge.a())
                 | pumpPrime(cells.getLast(), target[target.length - 1], edge.b());
@@ -531,9 +639,9 @@ final class SettlingRun {
         return moveBetween(from, to, move);
     }
 
-    /** Let a cell's above-target fluid fall into a strictly LOWER neighbour with room. */
+    /** Let a cell's above-target fluid fall into a strictly LOWER in-frame neighbour with room. */
     private boolean fallDownhill(BlockPos fromPos, BlockPos toPos, int fromTarget) {
-        if (network.cellBottomY(fromPos) <= network.cellBottomY(toPos) + SURFACE_EPS) return false;
+        if (cellLow(fromPos) <= cellLow(toPos) + SURFACE_EPS) return false;
         PipeStore.Store from = network.cellAt(fromPos);
         PipeStore.Store to = network.cellAt(toPos);
         if (from == null || to == null) return false;
@@ -544,7 +652,7 @@ final class SettlingRun {
 
     /** Level out above-target fluid between SAME-HEIGHT neighbours (water runs flat). */
     private boolean spreadLevel(BlockPos fromPos, BlockPos toPos, int fromTarget) {
-        if (Math.abs(network.cellBottomY(fromPos) - network.cellBottomY(toPos)) > SURFACE_EPS) {
+        if (Math.abs(cellLow(fromPos) - cellLow(toPos)) > SURFACE_EPS) {
             return false;
         }
         PipeStore.Store from = network.cellAt(fromPos);
@@ -556,9 +664,9 @@ final class SettlingRun {
         return moveBetween(from, to, Math.min(Math.min(excess, diff / 2), rate));
     }
 
-    /** A headless run's plain-gravity trickle (no targets: anything runs downhill). */
+    /** A headless run's plain-gravity trickle (no targets: anything runs downhill in-frame). */
     private boolean trickleDownhill(BlockPos fromPos, BlockPos toPos) {
-        if (network.cellBottomY(fromPos) <= network.cellBottomY(toPos) + SURFACE_EPS) return false;
+        if (cellLow(fromPos) <= cellLow(toPos) + SURFACE_EPS) return false;
         PipeStore.Store from = network.cellAt(fromPos);
         PipeStore.Store to = network.cellAt(toPos);
         if (from == null || to == null) return false;
@@ -578,9 +686,9 @@ final class SettlingRun {
         int i = firstWetCellFrom(fromB);
         if (i < 0) return false;
         BlockPos pos = cells.get(i);
-        double mouthY = network.cellCenterY(network.graph.node(nodeIndex).pos());
-        if (mouthY > network.cellCenterY(pos) + SURFACE_EPS) {
-            return false; // the mouth sits above: gravity keeps the fluid in the pipe
+        double mouthY = cellMid(network.graph.node(nodeIndex).pos());
+        if (mouthY > cellMid(pos) + SURFACE_EPS) {
+            return false; // the mouth sits above in-frame: gravity keeps the fluid in the pipe
         }
         PipeStore.Store cell = network.cellAt(pos);
         int move = cell.amount() <= Reservoir.DREGS_MB ? cell.amount() : Math.min(cell.amount(), rate);
@@ -605,9 +713,9 @@ final class SettlingRun {
         if (i < 0) return false;
         BlockPos pos = cells.get(i);
         PipeStore.Store cell = network.cellAt(pos);
-        double cellSurface = network.windowBottomY(pos)
+        double cellSurface = windowLow(pos)
                 + cell.amount() / (double) network.cellCapacity * network.windowHeight(pos);
-        if (cellSurface <= reservoir.surface() + SURFACE_EPS) return false;
+        if (cellSurface <= surfaceOf(reservoir) + SURFACE_EPS) return false;
         int move = cell.amount() <= Reservoir.DREGS_MB ? cell.amount() : Math.min(cell.amount(), rate);
         int poured = reservoir.fill(cell.fluid(), move);
         if (poured <= 0) return false;
@@ -628,9 +736,9 @@ final class SettlingRun {
             PipeStore.Store cell = network.cellAt(cells.get(i));
             if (cell == null) return -1;
             if (cell.amount() > 0) {
-                return pathFloor > network.windowBottomY(cells.get(i)) + SURFACE_EPS ? -1 : i;
+                return pathFloor > windowLow(cells.get(i)) + SURFACE_EPS ? -1 : i;
             }
-            pathFloor = Math.max(pathFloor, network.windowBottomY(cells.get(i)));
+            pathFloor = Math.max(pathFloor, windowLow(cells.get(i)));
         }
         return -1;
     }

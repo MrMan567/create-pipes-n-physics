@@ -3,6 +3,7 @@ package de.devin.pipesnphysics.mixin;
 import com.simibubi.create.content.fluids.FluidTransportBehaviour;
 import com.simibubi.create.foundation.blockEntity.SmartBlockEntity;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
+import de.devin.pipesnphysics.client.render.OpenEndParticles;
 import de.devin.pipesnphysics.engine.EngineTickHandler;
 import net.minecraft.world.level.Level;
 import org.spongepowered.asm.mixin.Mixin;
@@ -26,7 +27,12 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * {@link FluidTransportBehaviour}" — exactly the set whose behaviour tick {@link GravityFlowMixin}
  * cancels, so every pipe kind is covered (encased pipes, valves, addon pipes on their own block
  * entities), not just the handful of concrete Create classes. A behaviour lookup on other smart block
- * entities' ticks is the only cost. Server-side only; virtual (ponder/schematic) block entities skip.
+ * entities' ticks is the only cost. Virtual (ponder/schematic) block entities skip.
+ *
+ * The CLIENT side of the same tick carries the open-mouth pour particles
+ * ({@link OpenEndParticles}): Create spawned those inside the cancelled behaviour tick, so they
+ * ride this uncancellable host for the same reason the heartbeat does. {@code OpenEndParticles}
+ * deliberately carries no client-only imports, so this common mixin stays dist-clean.
  *
  * Targets {@link SmartBlockEntity} directly (the class that declares {@code tick()}) — every
  * {@code FluidTransportBehaviour} host is a {@code SmartBlockEntity}. A mixin may not extend its own
@@ -38,10 +44,15 @@ public abstract class PipeHeartbeatMixin {
     private void pipesnphysics$heartbeat(CallbackInfo ci) {
         if (!PipesNPhysicsConfig.ENABLE_ENGINE.get()) return;
         SmartBlockEntity self = (SmartBlockEntity) (Object) this;
-        if (self.getBehaviour(FluidTransportBehaviour.TYPE) == null) return;
+        FluidTransportBehaviour pipe = self.getBehaviour(FluidTransportBehaviour.TYPE);
+        if (pipe == null) return;
         if (self.isVirtual()) return;
         Level level = self.getLevel();
-        if (level == null || level.isClientSide()) return;
+        if (level == null) return;
+        if (level.isClientSide()) {
+            OpenEndParticles.spawnAt(level, pipe);
+            return;
+        }
         EngineTickHandler.markDirty(level, self.getBlockPos());
     }
 }

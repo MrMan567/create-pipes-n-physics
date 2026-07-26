@@ -2,6 +2,7 @@ package de.devin.pipesnphysics.engine;
 
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.compat.SableCompat;
+import de.devin.pipesnphysics.engine.boundary.RelayDetector;
 import de.devin.pipesnphysics.engine.graph.Graph;
 import de.devin.pipesnphysics.engine.graph.GraphBuilder;
 import de.devin.pipesnphysics.engine.graph.GraphCache;
@@ -111,6 +112,7 @@ public final class EngineTickHandler {
         URGENT.clear();
         QUIET.clear();
         GraphCache.clear();
+        FlowTrace.clear();
     }
 
     /**
@@ -139,8 +141,12 @@ public final class EngineTickHandler {
             if (sweep) GraphCache.sweep(level, level.getGameTime());
         }
         // Momentum frames are keyed per sub-level (cross-dimension), so sweep once — reclaims the
-        // frames of disassembled contraptions no cell ever looks up again.
-        if (sweep) MomentumField.sweep(event.getServer().overworld().getGameTime());
+        // frames of disassembled contraptions no cell ever looks up again. Same for relay-detector
+        // samples of handlers that left the network with no break event.
+        if (sweep) {
+            MomentumField.sweep(event.getServer().overworld().getGameTime());
+            RelayDetector.sweep(event.getServer().overworld().getGameTime());
+        }
         if (PipesNPhysicsConfig.DEBUG_SUBLEVEL_SPIN.get()) {
             SublevelSpinProbe.tick(event.getServer());
         }
@@ -199,6 +205,7 @@ public final class EngineTickHandler {
         // Busy/armed networks get the fast graph-cache TTL: they are the ones that would route
         // fluid over a silently edited run, so their stale-shape window stays at the armed cadence.
         GraphCache.recordSolve(level, graph, solution, now, busy || armed);
+        FlowTrace.record(level, graph, solution, now);
 
         if (busy) {
             graph.coverage().forEach(quiet::remove);

@@ -149,6 +149,12 @@ public class FluidTankRendererMixin {
         FluidStack fluidStack = tank.getFluid();
         if (fluidStack.isEmpty()) return;
 
+        // A lighter-than-air gas is a liquid under inverted gravity: negating local up
+        // mirrors the whole pipeline — the interface solves from the ceiling down, skirts
+        // run up to the cap, and the surface faces downward — matching Create's own
+        // top-anchored gas render and the engine's mirrored settle frame.
+        if (fluidStack.getFluid().getFluidType().isLighterThanAir()) localUp.negate();
+
         int width = acc.pipesnphysics$getWidth();
         int height = acc.pipesnphysics$getHeight();
         float totalHeight = height - 2 * CAP_HEIGHT - PUDDLE_HEIGHT;
@@ -563,6 +569,10 @@ public class FluidTankRendererMixin {
         // NaN, rendering nothing. 0.5 also keeps the wave equation stable (c² < 1).
         int viscosity = fluidStack.getFluid().getFluidType().getViscosity();
         float viscRatio = Math.max(0.5f, viscosity / 1000f);   // 1.0 for water, 6.0 for lava
+        // A buoyant gas reacts to pseudo-forces (inertia, centrifugal) in the OPPOSITE
+        // sense of its heavier surroundings: a balloon leans INTO the acceleration and
+        // migrates to the spin axis. -1 flips those impulses in the mirrored gas frame.
+        float buoy = fluidStack.getFluid().getFluidType().isLighterThanAir() ? -1 : 1;
         float speed = 0.4f / viscRatio;         // wave propagation speed
         float damp = Mth.clamp(1.0f - 0.06f / viscRatio, 0.85f, 0.99f); // energy loss per step
         float c2 = speed * speed;               // squared speed for wave equation
@@ -638,8 +648,9 @@ public class FluidTankRendererMixin {
         float accelMag = (float) Math.sqrt(accel[0] * accel[0] + accel[1] * accel[1] + accel[2] * accel[2]);
         if (accelMag > 0.005f) {
             // Negative sign: fluid moves OPPOSITE to the acceleration direction
+            // (a buoyant gas moves WITH it — buoy flips the reaction)
             Vector3d localAccel = pose.transformNormalInverse(
-                    new Vector3d(-accel[0], -accel[1], -accel[2]), new Vector3d());
+                    new Vector3d(-buoy * accel[0], -buoy * accel[1], -buoy * accel[2]), new Vector3d());
             float lax = (float) localAccel.x, lay = (float) localAccel.y, laz = (float) localAccel.z;
 
             // Vertical component (along dominant axis) creates a uniform push (splash)
@@ -736,8 +747,9 @@ public class FluidTankRendererMixin {
                                 float perpZ = fz - dot * laz;
                                 float perpDist = (float) Math.sqrt(perpX * perpX + perpZ * perpZ);
 
-                                // Centrifugal force pushes outward: farther from axis = more displacement
-                                waveNext[g1 * grid.stride() + g2] += perpDist * centStr;
+                                // Centrifugal force pushes outward: farther from axis = more
+                                // displacement (a gas instead collects at the axis — buoy flips it)
+                                waveNext[g1 * grid.stride() + g2] += buoy * perpDist * centStr;
                             }
                         }
                     }

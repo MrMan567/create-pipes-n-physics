@@ -28,6 +28,7 @@ public final class Reservoir {
     private int giveRemaining;
     private int takeRemaining;
     private double drawLipCapMb = Double.MAX_VALUE;
+    private double drawLipY = Double.NEGATIVE_INFINITY;
 
     Reservoir(Level level, BoundaryColumn column, int maxFlowPerEndpoint) {
         this.level = level;
@@ -92,6 +93,28 @@ public final class Reservoir {
         return filled;
     }
 
+    /**
+     * How much of this fluid the column could still give, ignoring the per-tick budgets — a
+     * budget-free SIMULATE probe (like {@link #rejects}) for "will more ever come" questions.
+     * A self-refilling source (intake mouth, pulley, relay) always answers in full; a plain
+     * outlet mouth never supplies. A LIP-gated column answers only the volume above its draw
+     * lip — the raw handler knows nothing of the lip, so a tank resting at its aperture read
+     * as a bottomless supply and {@code columnFullyArrived} never fired: the depth gate then
+     * parked the lip-cap dribble in the head cell forever while the sink starved (the
+     * "flows shortly, stops" limit cycle at the lip equilibrium).
+     */
+    int probeSupply(FluidStack fluid, int amount) {
+        if (column.isInfiniteSource()) return amount;
+        if (column.isOpenEnd()) return 0;
+        IFluidHandler handler = column.handler(level);
+        if (handler == null) return 0;
+        int supply = BoundaryColumn.drainMatching(handler,
+                fluid.copyWithAmount(amount), FluidAction.SIMULATE).getAmount();
+        if (drawLipY == Double.NEGATIVE_INFINITY) return supply;
+        int aboveLip = (int) Math.max(0, column.capacitance() * (surface() - drawLipY));
+        return Math.min(supply, aboveLip);
+    }
+
     /** How much the sink side would still accept this tick (probe, no fluid moves). */
     int probeFill(FluidStack fluid, int amount) {
         amount = Math.min(amount, takeRemaining);
@@ -130,6 +153,7 @@ public final class Reservoir {
         double aboveLip = column.capacitance() * (surface() - lipY);
         double cap = aboveLip <= 0 ? 0 : Math.max(Math.min(aboveLip, DREGS_MB), 0.5 * aboveLip);
         drawLipCapMb = Math.min(drawLipCapMb, cap);
+        drawLipY = lipY; // remembered for probeSupply — callers pre-merge to the lowest opening
     }
 
     /**
@@ -141,6 +165,11 @@ public final class Reservoir {
      */
     double surface() {
         return column.renderedSurface();
+    }
+
+    /** The GAS interface elevation — where a lighter-than-air content ends, hanging from the top. */
+    double gasSurface() {
+        return column.gasSurface();
     }
 
     /** A real finite tank/basin (equalized, lip-gated), as opposed to an open mouth or pulley. */

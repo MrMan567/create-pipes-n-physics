@@ -19,12 +19,16 @@ public class PipesNPhysicsConfig {
     public static final ModConfigSpec.IntValue MAX_FLOW_PER_ENDPOINT;
     public static final ModConfigSpec.IntValue PIPE_VOLUME_PER_CELL;
     public static final ModConfigSpec.DoubleValue SUCTION_LIMIT;
+    public static final ModConfigSpec.DoubleValue ULTRAWARM_VISCOSITY_THINNING;
+    public static final ModConfigSpec.IntValue MOLTEN_TEMPERATURE_K;
     public static final ModConfigSpec.BooleanValue PUMP_DRAIN_ANY_LEVEL;
+    public static final ModConfigSpec.BooleanValue ENABLE_PUMP_SELF_PRIMING;
     public static final ModConfigSpec.BooleanValue ENABLE_OPEN_END_INTAKE;
     public static final ModConfigSpec.IntValue OPEN_END_INTAKE_COOLDOWN_TICKS;
     public static final ModConfigSpec.BooleanValue FORCE_OPEN_END_OUTPUT;
     public static final ModConfigSpec.BooleanValue ENABLE_VALVE_THROTTLE;
     public static final ModConfigSpec.EnumValue<ValveCharacteristic> VALVE_CHARACTERISTIC;
+    public static final ModConfigSpec.BooleanValue ENABLE_VALVE_ONE_WAY;
     public static final ModConfigSpec.BooleanValue AUTO_DETECT_RELAY_HANDLERS;
     public static final ModConfigSpec.BooleanValue ENABLE_NETWORK_CACHE;
     public static final ModConfigSpec.BooleanValue ENABLE_DYNAMIC_TANK_MASS;
@@ -49,6 +53,7 @@ public class PipesNPhysicsConfig {
     // Client
     public static final ModConfigSpec.BooleanValue SHOW_PIPE_GOGGLE_INFO;
     public static final ModConfigSpec.BooleanValue SHOW_PUMP_RANGE_ARROWS;
+    public static final ModConfigSpec.BooleanValue SHOW_VALVE_DIRECTION_ARROWS;
     public static final ModConfigSpec.BooleanValue PRESERVE_PUMP_RANGE;
     public static final ModConfigSpec.IntValue PUMP_RANGE_PRESERVE_SECONDS;
     public static final ModConfigSpec.BooleanValue ENABLE_PIPE_SWAP;
@@ -81,6 +86,14 @@ public class PipesNPhysicsConfig {
                         "actively drawing from the tank; plain gravity flow still can't leave an opening above",
                         "the waterline. The suction limit still bounds how far the pump can lift.")
                 .define("pumpDrainAnyLevel", false);
+        ENABLE_PUMP_SELF_PRIMING = server
+                .comment("Let a RUNNING pump establish flow through its own DRY suction line (a self-priming",
+                        "pump). Off (realistic): a pump above the waterline churns air until the line is",
+                        "primed once — raise the supply past the first riser cell, then it sustains down to",
+                        "the suction limit and keeps its prime across pauses. On: a pump-pulled dry crest",
+                        "may establish within the suction limit above the supply's surface, so the classic",
+                        "pump-above-a-tank rig starts on its own. Unpowered siphons never self-prime either way.")
+                .define("enablePumpSelfPriming", false);
         ENABLE_OPEN_END_INTAKE = server
                 .comment("Let a VERTICAL open pipe end draw fluid IN from the world when the network is",
                         "under suction (its head sits below the pipe mouth): a self-regenerating source",
@@ -158,15 +171,24 @@ public class PipesNPhysicsConfig {
                 .comment("How many blocks the head at a pipe's highest point may sit below that point",
                         "before the liquid column breaks (the siphon / cavitation limit).")
                 .defineInRange("suctionLimitBlocks", 8.0, 0.0, 256.0);
+        ULTRAWARM_VISCOSITY_THINNING = server
+                .comment("Molten fluids run thinner in an ultrawarm dimension: their viscosity is",
+                        "divided by this factor there, so they flow that much faster (vanilla",
+                        "parity: lava spreads 3x faster in the Nether). 1 disables the effect.")
+                .defineInRange("ultrawarmViscosityThinning", 3.0, 1.0, 100.0);
+        MOLTEN_TEMPERATURE_K = server
+                .comment("Fluids whose registered temperature reaches this many Kelvin count as",
+                        "MOLTEN for the ultrawarm thinning above (lava is 1300, water 300 — modded",
+                        "molten metals typically 1000+).")
+                .defineInRange("moltenTemperatureKelvin", 1000, 0, 100000);
         server.pop();
 
         // ---------------------------------------------------------------- Valves
         server.comment("The crank-to-open fluid valve throttle.").push("valves");
         ENABLE_VALVE_THROTTLE = server
-                .comment("Let a fluid valve throttle its flow by a 0-90 degree angle set with the scroll",
-                        "value (the box on its side faces). The shaft still opens and closes the valve;",
-                        "the angle only caps how much flows while it is open (90 = fully open). When",
-                        "false, valves stay plain on/off.")
+                .comment("Let a fluid valve throttle its flow by a 0-90 degree angle, cranked by its",
+                        "shaft or set precisely by a Valve Handle. The angle caps how much flows while",
+                        "the valve is open (90 = fully open). When false, valves stay plain on/off.")
                 .define("enableValveThrottle", true);
         VALVE_CHARACTERISTIC = server
                 .comment("The valve's opening curve — how its 0-90 degree angle maps to the share of flow",
@@ -176,6 +198,11 @@ public class PipesNPhysicsConfig {
                         "(very restrictive until near open). Only reshapes the knob's feel; the engine's",
                         "flow model stays linear.")
                 .defineEnum("valveCharacteristic", ValveCharacteristic.LINEAR);
+        ENABLE_VALVE_ONE_WAY = server
+                .comment("Let a fluid valve be set to pass fluid ONE WAY (a check valve) via a second",
+                        "scroll box on its side faces. Default is both ways; one-way blocks reverse",
+                        "flow in the solve AND at rest (idle levels never leak backward through it).")
+                .define("enableValveOneWay", true);
         server.pop();
         server.pop(); // engine
 
@@ -308,6 +335,10 @@ public class PipesNPhysicsConfig {
                         "pump with Engineer's Goggles: green where the pump can push,",
                         "blue where it can pull, red where its head cannot reach.")
                 .define("showPumpRangeArrows", true);
+        SHOW_VALVE_DIRECTION_ARROWS = client
+                .comment("Show a sliding arrow through every ONE-WAY fluid valve (its allowed",
+                        "flow direction) while wearing Engineer's Goggles or holding a wrench.")
+                .define("showValveDirectionArrows", true);
         PRESERVE_PUMP_RANGE = client
                 .comment("Keep showing the pump range indicator for a few seconds after",
                         "looking away from the pump.")

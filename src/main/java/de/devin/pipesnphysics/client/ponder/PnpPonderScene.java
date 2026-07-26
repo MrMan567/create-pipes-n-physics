@@ -1,7 +1,13 @@
 package de.devin.pipesnphysics.client.ponder;
 
+import com.simibubi.create.AllItems;
+import com.simibubi.create.content.fluids.pipes.valve.FluidValveBlockEntity;
 import com.simibubi.create.content.fluids.tank.FluidTankBlockEntity;
 import com.simibubi.create.foundation.ponder.CreateSceneBuilder;
+import de.devin.pipesnphysics.PipesNPhysics;
+import de.devin.pipesnphysics.engine.valve.ValveDirectionBehaviour;
+import de.devin.pipesnphysics.engine.valve.ValveFlowMode;
+import de.devin.pipesnphysics.engine.valve.ValveThrottle;
 import net.createmod.catnip.math.Pointing;
 import net.createmod.ponder.api.PonderPalette;
 import net.createmod.ponder.api.element.InputElementBuilder;
@@ -10,13 +16,18 @@ import net.createmod.ponder.api.scene.SceneBuilder;
 import net.createmod.ponder.api.scene.SceneBuildingUtil;
 import net.createmod.ponder.api.scene.Selection;
 import net.createmod.ponder.foundation.instruction.RotateSceneInstruction;
+import net.minecraft.ChatFormatting;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.network.chat.Component;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.material.Fluid;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import net.neoforged.neoforge.fluids.FluidStack;
 import net.neoforged.neoforge.fluids.capability.IFluidHandler.FluidAction;
+
+import java.util.List;
 
 /**
  * Shared authoring helpers for the mod's ponder scenes: base-plate setup, timing shortcuts, and
@@ -52,12 +63,15 @@ public abstract class PnpPonderScene {
         scene.world().showSection(section, from);
     }
 
-    /** Pan the camera to focus on a world position (smooth). */
+    /**
+     * Pan the camera to focus on a world position. WARNING: a no-op in the current Ponder build —
+     * nothing consumes the scene's point of interest; prefer {@link #zoomTo} for emphasis.
+     */
     public static void focusOn(SceneBuilder scene, Vec3 point) {
         scene.special().movePointOfInterest(point);
     }
 
-    /** Pan the camera to focus on a block (smooth). */
+    /** Pan the camera to focus on a block. Same caveat as {@link #focusOn(SceneBuilder, Vec3)}. */
     public static void focusOn(SceneBuilder scene, BlockPos pos) {
         scene.special().movePointOfInterest(pos);
     }
@@ -147,9 +161,100 @@ public abstract class PnpPonderScene {
         scene.idle(TEXT_DURATION);
     }
 
+    /** Reading time for a callout, scaled to its length — Create paces roughly 6 ticks per word. */
+    public static int textDuration(String text) {
+        int words = text.split("\\s+").length;
+        return Math.min(130, Math.max(50, 30 + words * 6));
+    }
+
+    /** Create-style callout: short text, meaning-colored, length-scaled duration; idles until read. */
+    public static void narrate(SceneBuilder scene, String text, Vec3 target, PonderPalette color) {
+        int duration = textDuration(text);
+        scene.overlay().showText(duration)
+                .text(text)
+                .pointAt(target)
+                .placeNearTarget()
+                .colored(color)
+                .attachKeyFrame();
+        scene.idle(duration + 10);
+    }
+
+    /** Create-style callout in the default color. */
+    public static void narrate(SceneBuilder scene, String text, Vec3 target) {
+        narrate(scene, text, target, PonderPalette.WHITE);
+    }
+
+    /** Animated outline growing from a point along a run — traces where fluid will travel. */
+    public static void chase(SceneBuilder scene, PonderPalette color, Vec3 from, Vec3 to, int duration) {
+        Object key = new Object();
+        scene.overlay().chaseBoundingBoxOutline(color, key, new AABB(from, from).inflate(0.25), 2);
+        scene.idle(2);
+        scene.overlay().chaseBoundingBoxOutline(color, key, new AABB(from, to).inflate(0.25), duration);
+    }
+
+    /** Floating goggles hint above a block — "wear goggles here to see why". */
+    public static void goggleHint(SceneBuilder scene, SceneBuildingUtil util, BlockPos pos) {
+        scene.overlay().showControls(util.vector().topOf(pos), Pointing.DOWN, 40)
+                .withItem(AllItems.GOGGLES.asStack());
+    }
+
+    /**
+     * Show the mock goggle overlay at a block — the real tooltip visuals with the real lang
+     * lines — as a standalone beat: the scene idles until it has faded back out.
+     */
+    public static void goggleTooltip(SceneBuilder scene, SceneBuildingUtil util, BlockPos pos, int duration, Component... lines) {
+        scene.addInstruction(new GoggleTooltipElement.Instruction(
+                new GoggleTooltipElement(util.vector().topOf(pos), List.of(lines)), duration));
+        scene.idle(duration + 10);
+    }
+
+    /** The goggle overlay's header line ("Pipe" / "Valve"), indented like the real tooltip. */
+    public static Component goggleHeader(String key) {
+        return goggleText(key, "", ChatFormatting.WHITE, 4);
+    }
+
+    /** One goggle-overlay body line — the mod's goggle lang key, indented like the real tooltip. */
+    public static Component goggleLine(String key, ChatFormatting color) {
+        return goggleLine(key, "", color);
+    }
+
+    /** A goggle-overlay body line with a literal value appended (e.g. a percentage). */
+    public static Component goggleLine(String key, String suffix, ChatFormatting color) {
+        return goggleText(key, suffix, color, 5);
+    }
+
+    /**
+     * Datagen-safe stand-in for LangBuilder.forGoggles, whose indent needs the client font —
+     * scenes also compile headlessly in the lang harvest, where Minecraft.getInstance() is null.
+     */
+    private static Component goggleText(String key, String suffix, ChatFormatting color, int indent) {
+        return Component.literal(" ".repeat(indent))
+                .append(Component.translatable(PipesNPhysics.ID + "." + key).append(suffix).withStyle(color));
+    }
+
+    /** Slide a section back out of the scene, fading toward the given side. */
+    public static void hide(SceneBuilder scene, Selection section, Direction towards) {
+        scene.world().hideSection(section, towards);
+    }
+
     /** Spin the kinetics at a position (e.g. drive a pump); needs the Create scene builder. */
     public static void applyKineticSpeedAt(CreateSceneBuilder scene, SceneBuildingUtil util, Selection pos, float speed) {
         scene.world().setKineticSpeed(pos, speed);
+    }
+
+    /** Set a fluid valve's throttle to an absolute opening in degrees (0 shut, 90 fully open). */
+    public static void setValveOpening(SceneBuilder scene, BlockPos pos, int degrees) {
+        scene.world().modifyBlockEntity(pos, FluidValveBlockEntity.class, valve -> {
+            ValveThrottle throttle = (ValveThrottle) valve;
+            throttle.pipesnphysics$adjustThrottle(-90);
+            throttle.pipesnphysics$adjustThrottle(degrees);
+        });
+    }
+
+    /** Set a fluid valve's flow-direction dial (both ways, or one-way along the pipe axis). */
+    public static void setValveDirection(SceneBuilder scene, BlockPos pos, ValveFlowMode mode) {
+        scene.world().modifyBlockEntity(pos, FluidValveBlockEntity.class, valve ->
+                valve.getBehaviour(ValveDirectionBehaviour.TYPE).setValue(mode.ordinal()));
     }
 
     /** Fill the fluid tank at a position with an amount of a fluid, clamped to its capacity. */

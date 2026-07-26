@@ -2,6 +2,7 @@ package de.devin.pipesnphysics.engine.boundary;
 
 import com.simibubi.create.content.fluids.FluidPropagator;
 import com.simibubi.create.content.fluids.hosePulley.HosePulleyBlockEntity;
+import com.simibubi.create.content.processing.basin.BasinBlockEntity;
 import com.simibubi.create.content.fluids.pipes.VanillaFluidTargets;
 import com.simibubi.create.content.fluids.tank.FluidTankBlockEntity;
 import com.simibubi.create.foundation.mixin.accessor.FlowingFluidAccessor;
@@ -63,6 +64,8 @@ public final class BoundaryColumn {
     private final int capacityMb;
     private final FluidStack contents;
     private final int contentMb;
+    /** Every distinct drainable fluid this column holds (representative first); drives the per-fluid passes. */
+    private List<FluidStack> heldFluids;
     private final Direction openFace;
     private final boolean infiniteSource;
     private final boolean finiteReservoir;
@@ -74,6 +77,8 @@ public final class BoundaryColumn {
     private boolean hosePulley;
     /** A Create fluid tank, whose fluid is DRAWN inset (see {@link #renderedSurface()}). */
     private boolean tankRender;
+    /** An open bowl (a Create basin): its surface reads at the column TOP (see {@link #renderedSurface()}). */
+    private boolean openBowl;
 
     private BoundaryColumn(BlockPos identity, BlockPos accessPos, double baseY,
                            int heightBlocks, int capacityMb, FluidStack contents, int contentMb,
@@ -86,6 +91,10 @@ public final class BoundaryColumn {
         this.capacityMb = capacityMb;
         this.contents = contents;
         this.contentMb = contentMb;
+        // A single-fluid column holds exactly its representative contents; a multi-fluid handler
+        // overrides this with its full list (see resolveGenericHandler / heldFluids).
+        this.heldFluids = contents.isEmpty() || contentMb <= 0
+                ? List.of() : List.of(contents.copyWithAmount(contentMb));
         this.openFace = openFace;
         this.infiniteSource = infiniteSource;
         this.finiteReservoir = finiteReservoir;
@@ -228,18 +237,27 @@ public final class BoundaryColumn {
     private static BoundaryColumn resolveGenericHandler(Level level, BlockPos pos, Direction face,
                                                         IFluidHandler cap) {
         int capacity = 0;
+        int total = 0;
         FluidStack found = FluidStack.EMPTY;
-        int amount = 0;
+        // Every DISTINCT drainable fluid, each with its total mB — a multi-fluid basin (water + milk
+        // for builder's tea) keeps each ingredient in its own segment, and ALL of them must be
+        // enumerated so each gets a solve pass and can be drained, not only the representative found.
+        List<FluidStack> held = new ArrayList<>();
         for (int i = 0; i < cap.getTanks(); i++) {
             capacity += cap.getTankCapacity(i);
             FluidStack inTank = cap.getFluidInTank(i);
             if (inTank.isEmpty()) continue;
-            if (found.isEmpty() && !cap.drain(inTank.copyWithAmount(1), FluidAction.SIMULATE).isEmpty()) {
+            // The column surface is set by ALL the fluid in the block, not just the representative:
+            // for a multi-fluid basin the water and lava together determine how high the fluid sits,
+            // so gating the head on the representative alone under-counts the level and a full basin
+            // reads as barely filled — its fluid then "can't reach" a side pipe (a phantom crest /
+            // draw-lip wall). contentMb is therefore the TOTAL held volume.
+            total += inTank.getAmount();
+            boolean drainable = !cap.drain(inTank.copyWithAmount(1), FluidAction.SIMULATE).isEmpty();
+            if (found.isEmpty() && drainable) {
                 found = inTank.copy();
             }
-            if (!found.isEmpty() && FluidStack.isSameFluidSameComponents(found, inTank)) {
-                amount += inTank.getAmount();
-            }
+            if (drainable) accumulate(held, inTank);
         }
         if (capacity <= 0) return null;
 
@@ -250,8 +268,27 @@ public final class BoundaryColumn {
         double baseY = SableCompat.getColumnBaseY(level, pos, 1, 1)
                 - CentrifugeField.headOffset(level, pos, level.getGameTime())
                 + MomentumField.headOffset(level, pos);
-        return finiteReservoir(pos, pos, baseY, 1, capacity, found, amount,
-                SableCompat.getUpProjectionY(level, pos)).accessFace(face);
+        BoundaryColumn column = finiteReservoir(pos, pos, baseY, 1, capacity, found, total,
+                SableCompat.getUpProjectionY(level, pos)).accessFace(face).heldFluids(held);
+        // A basin is an OPEN BOWL: whatever it holds is scoopable from the top, so its player-visible
+        // surface sits at the column top and a side pipe always reaches it (owner decision — basins
+        // never stall on the aperture lip the way closed tanks do). Side-specific ports (a
+        // basin-derived machine resolved per face) keep the plain surface.
+        if (face == null && level.getBlockEntity(pos) instanceof BasinBlockEntity) {
+            column.openBowl = true;
+        }
+        return column;
+    }
+
+    /** Merge a tank's stack into a distinct-fluid list, summing amounts for a fluid already present. */
+    private static void accumulate(List<FluidStack> into, FluidStack stack) {
+        for (int i = 0; i < into.size(); i++) {
+            if (FluidStack.isSameFluidSameComponents(into.get(i), stack)) {
+                into.set(i, into.get(i).copyWithAmount(into.get(i).getAmount() + stack.getAmount()));
+                return;
+            }
+        }
+        into.add(stack.copy());
     }
 
     /** A real tank/basin/machine column the solver equalizes and lip-gates. */
@@ -451,6 +488,20 @@ public final class BoundaryColumn {
         return this;
     }
 
+    private BoundaryColumn heldFluids(List<FluidStack> fluids) {
+        this.heldFluids = fluids;
+        return this;
+    }
+
+    /**
+     * Every distinct DRAINABLE fluid this column holds, representative first, each with its total
+     * mB — the fluids that get their own solve pass. A single-fluid tank/open-end/pulley reports
+     * just its {@link #contents()}; a MULTI-FLUID basin reports all of them, so the engine can
+     * drain each one (not only the representative {@code contents()}). Empty when the column holds
+     * nothing drainable.
+     */
+    public List<FluidStack> heldFluids() { return heldFluids; }
+
     /** The face a side-specific handler is resolved/transferred through, or null for side-agnostic. */
     public Direction accessFace() { return accessFace; }
 
@@ -537,11 +588,16 @@ public final class BoundaryColumn {
      * draws in only while the network sits below the mouth ("vacuum").
      */
     public double head(boolean gas) {
-        if (!gas && isOpenEnd()) return baseY + 0.5;
+        // The mouth pin holds for BOTH media, mirrored: a gas mouth pins at minus the mouth
+        // elevation, so gas vents only while the network's interface reaches DOWN below the
+        // mouth — the exact dual of liquid spilling only while its surface stands above it.
+        // (Never anchor a gas mouth at the open-end column's top: it is a 4,000,000 mB
+        // pseudo-column whose top would read as a bottomless gas sink.)
+        if (isOpenEnd()) return gas ? -(baseY + 0.5) : baseY + 0.5;
         // On a tilted sub-level the fill rises along the column's local-up, so it adds only
         // fillHeight·cos(tilt) of world height (fillScale = 1 when level). Without this a tilted
         // tank's surface is over-estimated and spills out an open end that is physically above it.
-        return NetworkSolver.surfaceHead(baseY, fillHeight(), gas);
+        return NetworkSolver.surfaceHead(baseY, baseY + heightBlocks * fillScale, fillHeight(), gas);
     }
 
     /** Whether this endpoint is a Create hose pulley (classified once at resolve time). */
@@ -568,8 +624,12 @@ public final class BoundaryColumn {
     // head for its conservation math (changing it would shift equalization volumes), but its GATES —
     // the draw lip, the lip drain cap, and the weir/cavitation potentials — read the rendered surface
     // too, because the player judges them against the fluid on screen.
-    private static final double TANK_RENDER_FLOOR = 1.0 / 4 + 1.0 / 16;   // capHeight + minPuddle
-    private static final double TANK_RENDER_LOSS = 2.0 / 4 + 1.0 / 16;    // 2·capHeight + minPuddle
+    // Public because the client's tank-lip pour test (OpenEndParticles) rebuilds the same visible
+    // surface from the tank's synced render state — one definition of the inset, two readers.
+    public static final double TANK_RENDER_FLOOR = 1.0 / 4 + 1.0 / 16;   // capHeight + minPuddle
+    public static final double TANK_RENDER_LOSS = 2.0 / 4 + 1.0 / 16;    // 2·capHeight + minPuddle
+    /** The top inset of the render range — a GAS hangs from here downward (no puddle above). */
+    public static final double TANK_RENDER_CEILING = 1.0 / 4;            // capHeight
 
     /**
      * The surface elevation where the fluid is actually DRAWN — for a Create fluid tank the inset
@@ -579,9 +639,28 @@ public final class BoundaryColumn {
      * lip drain cap, weir-crest potential) — the solve's conservation math keeps {@link #head}.
      */
     public double renderedSurface() {
+        // An open bowl holding ANY fluid reads at its top: the fluid is reachable from above, so
+        // no aperture lip or crest floor ever walls it off (empty stays empty — no phantom line).
+        if (openBowl && contentMb > 0) return baseY + heightBlocks * fillScale;
         if (!tankRender) return liquidSurface();
         double renderedFill = TANK_RENDER_FLOOR + fillFraction() * (heightBlocks - TANK_RENDER_LOSS);
         return baseY + renderedFill * fillScale;
+    }
+
+    /**
+     * The MIRROR of {@link #renderedSurface()} for a lighter-than-air content: a gas hangs from
+     * the column ceiling, so its interface is where the gas body ENDS, measured down from the
+     * top — for a Create tank the inset render range upside down (gas ceiling {@code capHeight}
+     * below the top, same compressed span; a full column's interface lands exactly on the liquid
+     * render floor), else the plain {@code top − fillHeight}. An EMPTY column's interface is its
+     * ceiling: gas entering it pools at the top. This is the surface the GAS settle frame reads
+     * (the mirrored {@code SettlingRun}); the solve keeps its inverted {@link #head}.
+     */
+    public double gasSurface() {
+        double top = baseY + heightBlocks * fillScale;
+        if (!tankRender) return top - fillHeight();
+        double renderedGap = TANK_RENDER_CEILING + fillFraction() * (heightBlocks - TANK_RENDER_LOSS);
+        return top - renderedGap * fillScale;
     }
 
     /** Volume in mB needed to raise this column's surface by one block. */

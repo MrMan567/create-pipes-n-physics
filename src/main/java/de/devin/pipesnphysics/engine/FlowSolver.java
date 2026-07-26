@@ -222,18 +222,23 @@ public final class FlowSolver {
         List<FluidStack> samples = new ArrayList<>();
         List<Double> volumes = new ArrayList<>();
         for (BoundaryColumn column : columns) {
-            if (column.isEmpty()) continue;
-            // An infinite source (pulley / open-end intake) reports a brimming stand-in
-            // capacity, not real inventory; counting it would let a single atmospheric
-            // mouth outrank every real tank and seize the largest-volume-first pass.
-            // Register its fluid so a pass still runs, but contribute zero to the tally.
-            double volume = column.isInfiniteSource() ? 0 : column.contentMb();
-            int index = indexOfSameFluid(samples, column.contents());
-            if (index < 0) {
-                samples.add(column.contents().copyWithAmount(1));
-                volumes.add(volume);
-            } else {
-                volumes.set(index, volumes.get(index) + volume);
+            // EVERY distinct fluid the column holds, not just its representative contents(): a
+            // multi-fluid basin must get a pass PER fluid so each can be drained (the drain-side
+            // dual of the participates() refill fix).
+            for (FluidStack held : column.heldFluids()) {
+                if (held.isEmpty()) continue;
+                // An infinite source (pulley / open-end intake) reports a brimming stand-in
+                // capacity, not real inventory; counting it would let a single atmospheric
+                // mouth outrank every real tank and seize the largest-volume-first pass.
+                // Register its fluid so a pass still runs, but contribute zero to the tally.
+                double volume = column.isInfiniteSource() ? 0 : held.getAmount();
+                int index = indexOfSameFluid(samples, held);
+                if (index < 0) {
+                    samples.add(held.copyWithAmount(1));
+                    volumes.add(volume);
+                } else {
+                    volumes.set(index, volumes.get(index) + volume);
+                }
             }
         }
         List<FluidStack> ordered = new ArrayList<>(samples);
@@ -289,6 +294,27 @@ public final class FlowSolver {
                 && Math.abs(kinetic.getSpeed()) > MIN_PUMP_SPEED;
     }
 
+    /**
+     * The viscosity the engine flows {@code fluid} at in {@code level}: the registered viscosity,
+     * THINNED for a molten fluid in an ultrawarm dimension — vanilla parity, generalized. Vanilla
+     * spreads lava 3× faster in the Nether (block tick delay 10 vs 30) but NeoForge's
+     * {@code FluidType} carries one flat viscosity, so the dimension rule lives here: any fluid
+     * at/above {@code MOLTEN_TEMPERATURE_K} (lava 1300, modded melts ≥1000; water 300 stays
+     * water) divides its viscosity by {@code ULTRAWARM_VISCOSITY_THINNING} (default the vanilla
+     * 3). Every display that prints viscosity (goggle, /pipegraph) reads THIS number, so what
+     * the player sees matches how the pipe flows. Floor 1: some modded fluids register 0.
+     */
+    public static double effectiveViscosity(Level level, FluidStack fluid) {
+        var type = fluid.getFluid().getFluidType();
+        double viscosity = Math.max(1, type.getViscosity(fluid));
+        double thinning = PipesNPhysicsConfig.ULTRAWARM_VISCOSITY_THINNING.get();
+        if (thinning > 1 && level.dimensionType().ultraWarm()
+                && type.getTemperature(fluid) >= PipesNPhysicsConfig.MOLTEN_TEMPERATURE_K.get()) {
+            viscosity /= thinning;
+        }
+        return Math.max(1, viscosity);
+    }
+
     // ------------------------------------------------------------------ edge statics
 
     /**
@@ -329,7 +355,7 @@ public final class FlowSolver {
                 crestWet = cell != null && cell.amount() > 0;
             }
             statics.put(edge.index(), new EdgeStatics(
-                    runThrottle(level, edge), crestHeight, crestFloor, crestPos, crestWet));
+                    runThrottle(level, graph, edge), crestHeight, crestFloor, crestPos, crestWet));
         }
         return statics;
     }
@@ -338,9 +364,11 @@ public final class FlowSolver {
      * The tightest valve throttle along a run, as a 0..1 conductance factor (1 when no
      * valve restricts it). A valve the shaft has shut is already rejected by
      * {@code FluidPass.runAcceptsFluid}, so only opened valves reach here; the most-closed
-     * one sets the rate.
+     * one sets the rate. A ONE-WAY valve is a graph NODE (its run splits there), so its
+     * throttle no longer sits on either edge's cell list — fold it into both incident
+     * edges; in series the tightest cap still governs.
      */
-    private static double runThrottle(Level level, Edge edge) {
+    private static double runThrottle(Level level, Graph graph, Edge edge) {
         if (!PipesNPhysicsConfig.ENABLE_VALVE_THROTTLE.get()) return 1;
         double factor = 1;
         for (BlockPos cell : edge.pipes()) {
@@ -348,7 +376,17 @@ public final class FlowSolver {
                 factor = Math.min(factor, valve.pipesnphysics$valveThrottle());
             }
         }
+        factor = Math.min(factor, gateThrottle(level, graph.node(edge.a())));
+        factor = Math.min(factor, gateThrottle(level, graph.node(edge.b())));
         return factor;
+    }
+
+    /** An end node's throttle — only a one-way gate carries one (a CLOSED gate must stay a
+     *  held-column wall, never a 0-throttle VALVE block). */
+    private static double gateThrottle(Level level, Node node) {
+        if (!node.isOneWayGate()) return 1;
+        return level.getBlockEntity(node.pos()) instanceof ValveThrottle valve
+                ? valve.pipesnphysics$valveThrottle() : 1;
     }
 
     // ------------------------------------------------------------------ output

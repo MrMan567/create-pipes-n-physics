@@ -3,7 +3,6 @@ package de.devin.pipesnphysics.client;
 import com.mojang.blaze3d.vertex.ByteBufferBuilder;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
-import com.mojang.math.Axis;
 import com.simibubi.create.content.equipment.goggles.GogglesItem;
 import com.simibubi.create.content.fluids.pump.PumpBlock;
 import de.devin.pipesnphysics.PipesNPhysics;
@@ -12,8 +11,6 @@ import de.devin.pipesnphysics.engine.net.PumpRangePayload;
 import net.createmod.catnip.animation.AnimationTickHolder;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.MultiBufferSource;
-import net.minecraft.client.renderer.block.model.BakedQuad;
-import net.minecraft.client.renderer.texture.OverlayTexture;
 import net.minecraft.client.resources.model.BakedModel;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -38,7 +35,6 @@ import java.util.List;
 public final class PumpRangeRenderer {
     private static final float PER_SEGMENT_SPEED = 1.5f;
     private static final float FADE_FRACTION = 0.2f;
-    private static final int FULL_BRIGHTNESS = 0xF000F0;
 
     private static final float[] PUSH_COLOR = { 0.25f, 1.0f, 0.35f };
     private static final float[] PULL_COLOR = { 0.35f, 0.65f, 1.0f };
@@ -78,8 +74,8 @@ public final class PumpRangeRenderer {
 
     private static void renderArrows(PoseStack poseStack, Minecraft mc,
                                      List<PumpRangePayload.RangePath> paths, float fade) {
-        BakedModel model = mc.getModelManager().getModel(ClientEvents.ARROW_MODEL);
-        if (model == null || model == mc.getModelManager().getMissingModel()) return;
+        BakedModel model = ArrowRender.model(mc);
+        if (model == null) return;
 
         Vec3 camera = mc.gameRenderer.getMainCamera().getPosition();
         float time = (AnimationTickHolder.getTicks() + AnimationTickHolder.getPartialTicks()) / 20f;
@@ -131,27 +127,6 @@ public final class PumpRangeRenderer {
                 segTo.getY() - segFrom.getY(),
                 segTo.getZ() - segFrom.getZ());
 
-        poseStack.pushPose();
-        poseStack.translate(x - camera.x - 0.5, y - camera.y - 0.5, z - camera.z - 0.5);
-        poseStack.translate(0.5, 0.5, 0.5);
-        applyDirectionRotation(poseStack, dir);
-        poseStack.translate(-0.5, -0.5, -0.5);
-
-        for (BakedQuad quad : model.getQuads(null, null, mc.level.random)) {
-            consumer.putBulkData(poseStack.last(), quad, r, g, b, alpha,
-                    FULL_BRIGHTNESS, OverlayTexture.NO_OVERLAY);
-        }
-        poseStack.popPose();
-    }
-
-    private static void applyDirectionRotation(PoseStack poseStack, Direction dir) {
-        switch (dir) {
-            case NORTH -> poseStack.mulPose(Axis.YP.rotationDegrees(180));
-            case WEST -> poseStack.mulPose(Axis.YP.rotationDegrees(-90));
-            case EAST -> poseStack.mulPose(Axis.YP.rotationDegrees(90));
-            case UP -> poseStack.mulPose(Axis.XP.rotationDegrees(-90));
-            case DOWN -> poseStack.mulPose(Axis.XP.rotationDegrees(90));
-            default -> {}
-        }
+        ArrowRender.emit(poseStack, mc, consumer, model, camera, x, y, z, dir, r, g, b, alpha);
     }
 }

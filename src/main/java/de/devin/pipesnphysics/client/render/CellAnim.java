@@ -20,7 +20,11 @@ import net.neoforged.neoforge.fluids.FluidStack;
  * advancing front clipped along the flow axis (FILL_FRONT, anchored at the inbound side), a FULL
  * cell that starts draining as a receding one (DRAIN_FRONT, anchored outbound — the gap opens
  * where the fluid left from, so a draining gas no longer collapses to a top band), and standing
- * fluid keeps its waterline. Both fronts evolve continuously in either direction; an episode ends
+ * fluid keeps its waterline. An episode only ever STARTS on a change that arrives WITH a live
+ * flow stamp — the held direction bridges an in-progress episode across bursty stamp gaps, but
+ * a stampless change is the settle redistributing a stopped flow and draws as a waterline move
+ * (plug-replaying those made every stop "flicker and visually recharge"). Both fronts evolve
+ * continuously in either direction; an episode ends
  * when the SYNCED content fills the cell, the flow genuinely stops, or the synced amount stops
  * changing for {@link #STALL_TICKS} — the plug moved past and the cell now carries a steady
  * partial depth (depth-gated flow), which draws as a shallow scrolling stream, not a frozen
@@ -45,6 +49,7 @@ final class CellAnim {
     private FluidStack fluid = FluidStack.EMPTY;
     private Style style = Style.WATERLINE;
     private Direction dir;
+    private boolean stampLive;
     private float dirLostTick = -1f;
     private int amount = -1;
     private float syncTick;
@@ -106,6 +111,7 @@ final class CellAnim {
     /** Ease the scroll toward the stamped rate, integrate the phase, hold a flickering direction. */
     private void trackFlow(int flowData, float dt, float now) {
         Direction stamped = PipeStore.flowDirection(flowData);
+        stampLive = stamped != null;
         if (stamped != null) {
             dir = stamped;
             dirLostTick = -1f;
@@ -154,10 +160,16 @@ final class CellAnim {
         boolean wasFull = !firstSight && amount >= capacity;
         fadeStart = -1f;
         fluid = content;
+        // A front EPISODE only ever STARTS on a live-stamped change: the direction HOLD bridges
+        // an episode already in progress across a bursty solve's stamp gaps, but a content change
+        // arriving WITHOUT a stamp is the settle redistributing a stopped flow — drawing it as a
+        // plug against the stale direction replayed the charge animation on every stop (cells
+        // "flicker around and visually recharge" until the run settles). Those changes are
+        // waterline moves.
         if (dir == null) style = Style.WATERLINE;
-        else if (firstSight) style = synced < capacity ? Style.FILL_FRONT : Style.WATERLINE;
-        else if (wasEmpty) style = Style.FILL_FRONT;
-        else if (wasFull && synced < amount) style = Style.DRAIN_FRONT;
+        else if (firstSight) style = stampLive && synced < capacity ? Style.FILL_FRONT : Style.WATERLINE;
+        else if (wasEmpty) style = stampLive ? Style.FILL_FRONT : Style.WATERLINE;
+        else if (wasFull && synced < amount) style = stampLive ? Style.DRAIN_FRONT : Style.WATERLINE;
         if (synced >= capacity) style = Style.WATERLINE;
         if (amount != synced) {
             amount = synced;

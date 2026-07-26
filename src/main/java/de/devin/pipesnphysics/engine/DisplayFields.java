@@ -227,7 +227,7 @@ final class DisplayFields {
     /** The head a fresh supply would have if its surface sat exactly at this node. */
     private double anchorHead(NodeSpec spec, Node node) {
         if (spec.capacitance() > 0) return spec.head();
-        return NetworkSolver.surfaceHead(node.worldY(), 0, gas);
+        return NetworkSolver.surfaceHead(node.worldY(), node.worldY(), 0, gas);
     }
 
     /** Publish per graph node, keeping the strongest ceiling (and its anchor) across fluid passes. */

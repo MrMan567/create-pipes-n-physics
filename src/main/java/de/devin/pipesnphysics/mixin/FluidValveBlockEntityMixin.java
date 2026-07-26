@@ -13,17 +13,21 @@ import de.devin.pipesnphysics.client.PipeStatusText;
 import de.devin.pipesnphysics.engine.EngineTickHandler;
 import de.devin.pipesnphysics.engine.net.PipeStatusClient;
 import de.devin.pipesnphysics.engine.net.PipeStatusPayload;
+import de.devin.pipesnphysics.engine.valve.ValveDirectionBehaviour;
 import de.devin.pipesnphysics.engine.valve.ValveThrottle;
 import net.createmod.catnip.animation.LerpedFloat;
 import net.createmod.catnip.lang.LangBuilder;
 import net.createmod.catnip.lang.LangNumberFormat;
 import net.minecraft.ChatFormatting;
+import net.minecraft.core.Direction;
 import net.minecraft.core.Direction.Axis;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.chat.Component;
 import net.minecraft.util.Mth;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.state.BlockState;
+import org.jetbrains.annotations.Nullable;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
@@ -59,6 +63,8 @@ public abstract class FluidValveBlockEntityMixin extends KineticBlockEntity impl
     private static final int HANDLE_CRANK_COOLDOWN_TICKS = 12;
     @Unique
     private ScrollValueBehaviour pipesnphysics$throttle;
+    @Unique
+    private ValveDirectionBehaviour pipesnphysics$direction;
     /** Fractional-degree carry, so a slow shaft still cranks the angle one whole degree at a time. */
     @Unique
     private double pipesnphysics$shaftCarry;
@@ -72,24 +78,46 @@ public abstract class FluidValveBlockEntityMixin extends KineticBlockEntity impl
 
     @Inject(method = "addBehaviours", at = @At("TAIL"))
     private void pipesnphysics$addThrottle(List<BlockEntityBehaviour> behaviours, CallbackInfo ci) {
+        // The throttle behaviour is the angle's STORAGE (persisted/synced by Create, read by the
+        // solver and the goggle) but exposes NO value box — the angle is set by spinning the
+        // shaft or by a Valve Handle's intent (owner decision 2026-07-25: the two stacked boxes
+        // crowded the valve; precise dialing lives on the handle). The never-active slot keeps
+        // it invisible and unclickable while everything else about it works unchanged.
         ScrollValueBehaviour throttle = new ScrollValueBehaviour(
                 Component.translatable("pipesnphysics.gui.valve.throttle"),
                 (SmartBlockEntity) (Object) this,
-                new CenteredSideValueBoxTransform((state, side) -> {
-                    if (!(state.getBlock() instanceof FluidValveBlock)) return false;
-                    Axis shaft = state.getValue(FluidValveBlock.FACING).getAxis();
-                    return side.getAxis() != shaft && side.getAxis() != FluidValveBlock.getPipeAxis(state);
-                }))
+                new CenteredSideValueBoxTransform((state, side) -> false))
                 .between(0, FULL_OPEN_DEGREES)
                 .withFormatter(angle -> angle + "°")
                 .withCallback(angle -> {
                     pipesnphysics$wakeNetwork();
                     pipesnphysics$aimPointer();
                 })
-                .onlyActiveWhen(() -> PipesNPhysicsConfig.ENABLE_VALVE_THROTTLE.get());
+                .onlyActiveWhen(PipesNPhysicsConfig.ENABLE_VALVE_THROTTLE);
         throttle.value = FULL_OPEN_DEGREES;
         pipesnphysics$throttle = throttle;
         behaviours.add(throttle);
+
+        // The flow-direction dial is the valve's ONLY value box, dead-centre on the two free
+        // faces: both ways (default) or a check valve toward either end of the pipe axis. A
+        // change is a TOPOLOGY edit (the valve becomes/stops being a gate node), so the callback
+        // wake also evicts the cached graph.
+        ValveDirectionBehaviour direction = new ValveDirectionBehaviour(
+                Component.translatable("pipesnphysics.gui.valve.flow_direction"),
+                (SmartBlockEntity) (Object) this,
+                new CenteredSideValueBoxTransform(FluidValveBlockEntityMixin::pipesnphysics$isFreeFace));
+        direction.withCallback(value -> pipesnphysics$wakeNetwork())
+                .onlyActiveWhen(PipesNPhysicsConfig.ENABLE_VALVE_ONE_WAY);
+        pipesnphysics$direction = direction;
+        behaviours.add(direction);
+    }
+
+    /** The valve's two faces square to both the shaft and the pipe — where the value boxes live. */
+    @Unique
+    private static boolean pipesnphysics$isFreeFace(BlockState state, Direction side) {
+        if (!(state.getBlock() instanceof FluidValveBlock)) return false;
+        Axis shaft = state.getValue(FluidValveBlock.FACING).getAxis();
+        return side.getAxis() != shaft && side.getAxis() != FluidValveBlock.getPipeAxis(state);
     }
 
     /**
@@ -111,6 +139,13 @@ public abstract class FluidValveBlockEntityMixin extends KineticBlockEntity impl
         if (pipesnphysics$throttle == null || !PipesNPhysicsConfig.ENABLE_VALVE_THROTTLE.get()) return 1f;
         double open = pipesnphysics$throttle.getValue() / (double) FULL_OPEN_DEGREES;
         return (float) PipesNPhysicsConfig.VALVE_CHARACTERISTIC.get().factor(open);
+    }
+
+    @Override
+    @Nullable
+    public Direction pipesnphysics$oneWayFlow() {
+        if (pipesnphysics$direction == null || !PipesNPhysicsConfig.ENABLE_VALVE_ONE_WAY.get()) return null;
+        return pipesnphysics$direction.oneWayFlow();
     }
 
     @Override
@@ -217,6 +252,17 @@ public abstract class FluidValveBlockEntityMixin extends KineticBlockEntity impl
                     .add(GoggleText.text("  ").style(ChatFormatting.DARK_GRAY));
             GoggleText.appendBars(opening, Math.round(10f * share), 10);
             opening.forGoggles(tooltip, 1);
+        }
+
+        // The dial on the block is just an ICON, so the goggle always spells the mode out:
+        // "Direction: Both ways" / "Direction: One-way → East".
+        if (PipesNPhysicsConfig.ENABLE_VALVE_ONE_WAY.get() && pipesnphysics$direction != null) {
+            GoggleText.lang("gui.goggles.valve_direction")
+                    .style(ChatFormatting.GRAY)
+                    .add(ValveDirectionBehaviour
+                            .boxText(getBlockState(), pipesnphysics$direction.getValue())
+                            .withStyle(ChatFormatting.WHITE))
+                    .forGoggles(tooltip, 1);
         }
 
         pipesnphysics$addStateLine(tooltip, world, angle);

@@ -54,14 +54,23 @@ public final class NetworkSolver {
      * vessels settle at equal surface lines. Lighter-than-air fluids stack UPWARD — head
      * FALLS with elevation, so a gas pools in the HIGHEST vessel, the exact mirror image.
      *
+     * The gas head anchors at the column TOP ({@code fillHeight − topY} = minus the gas
+     * INTERFACE elevation), the true mirror of the liquid surface {@code baseY + fillHeight}:
+     * equal heads mean equal interfaces, so equal-top vessels equalize to equal fill. The old
+     * base anchor ({@code fillHeight − baseY}) only agreed for equal-HEIGHT vessels — a taller
+     * tank read a full block of phantom priority from its deeper base, so a 3-tall and 4-tall
+     * pair topping out level churned gas toward the wrong side forever instead of equalizing
+     * ("the gas behaves a bit weird and does not really equalize" — the solve fought the
+     * settle's interface math, `recent ←20 ·49 ←20…`).
+     *
      * The buoyant mirror is deliberately density-INDEPENDENT: any lighter-than-air fluid
      * inverts as hard as gravity pulls a liquid down, rather than scaling with how light
      * it is. (Scaling the lift by relative density floored buoyancy at ~1% of gravity for
      * ordinary gases, so they equalized by volume like a liquid instead of rising — the
      * regression this restores.)
      */
-    public static double surfaceHead(double baseY, double fillHeight, boolean lighterThanAir) {
-        return lighterThanAir ? fillHeight - baseY : baseY + fillHeight;
+    public static double surfaceHead(double baseY, double topY, double fillHeight, boolean lighterThanAir) {
+        return lighterThanAir ? fillHeight - topY : baseY + fillHeight;
     }
 
     /**
@@ -116,9 +125,23 @@ public final class NetworkSolver {
      * @param crestWet     whether the crest cell actually HOLDS fluid. Suction can hold an
      *                     existing column, never create one: a DRY crest whose floor sits above
      *                     the reachable potential gates the branch instead of letting it self-prime.
+     * @param selfPriming  a RUNNING pump pulls across this branch AND the pack opted into
+     *                     self-priming pumps ({@code enablePumpSelfPriming}): the dry-crest gate
+     *                     grants the SUCTION allowance for establishment — the pump may evacuate
+     *                     its own dry suction line up to the suction limit above the supply, like
+     *                     a real self-priming pump. Default off: a dry pump above the waterline
+     *                     churns air until primed once (owner-confirmed realism).
      */
     public record BranchSpec(int a, int b, double conductance, double emf, int allowedSign,
-                             double crestHeight, double crestFloor, double crestPos, boolean crestWet) {
+                             double crestHeight, double crestFloor, double crestPos,
+                             boolean crestWet, boolean selfPriming) {
+        /** Strict convenience (selfPriming = false) — every rig without the opt-in. */
+        public BranchSpec(int a, int b, double conductance, double emf, int allowedSign,
+                          double crestHeight, double crestFloor, double crestPos, boolean crestWet) {
+            this(a, b, conductance, emf, allowedSign, crestHeight, crestFloor, crestPos, crestWet,
+                    false);
+        }
+
         /** No-weir-band convenience (crestFloor = crestHeight) — what the solver tests model. */
         public BranchSpec(int a, int b, double conductance, double emf, int allowedSign,
                           double crestHeight, double crestPos, boolean crestWet) {
@@ -392,7 +415,10 @@ public final class NetworkSolver {
         if (!br.crestWet()) {
             double supplyHead = flow >= 0 ? headA + Math.max(0, br.emf())
                     : headB + Math.max(0, -br.emf());
-            if (supplyHead < br.crestFloor()) return 0;
+            // A self-priming pump may establish through its own dry suction line, bounded by the
+            // same limit that afterwards sustains the column (opt-in; see BranchSpec.selfPriming).
+            double primeAllowance = br.selfPriming() ? suctionLimit : 0;
+            if (supplyHead + primeAllowance < br.crestFloor()) return 0;
         }
         double taperBand = Math.max(0.5, suctionLimit * CREST_TAPER_FRACTION);
         return Math.clamp((suctionLimit - deficit) / taperBand, 0, 1);

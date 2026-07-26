@@ -49,5 +49,6 @@ public final class ClientCleanupHandler {
         PipeStatusClient.clear();
         GraphOverlay.clear();
         PipeFluidRenderer.clear();
+        ValveArrowClient.clear();
     }
 }

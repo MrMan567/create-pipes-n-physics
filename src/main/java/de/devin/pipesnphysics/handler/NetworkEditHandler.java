@@ -105,6 +105,8 @@ public final class NetworkEditHandler {
      * Push content back into the network around pos — adjacent pipe cells first, then adjacent
      * tanks/machines — returning what fit nowhere. A pump also carries the pipe behaviour but
      * stores nothing in the flow model (fluid pushed into it would strand), so it is skipped.
+     * A handler deposit is reported to the {@link RelayDetector} like every other engine fill,
+     * or the spill would read as a spontaneous gain and strike the receiver toward relay demotion.
      */
     public static int spillIntoNeighbors(ServerLevel level, BlockPos pos, FluidStack content) {
         int remaining = content.getAmount();
@@ -120,9 +122,14 @@ public final class NetworkEditHandler {
         }
         for (Direction dir : Direction.values()) {
             if (remaining <= 0) return 0;
-            IFluidHandler handler = FluidCaps.at(level, pos.relative(dir), dir.getOpposite());
+            BlockPos neighborPos = pos.relative(dir);
+            IFluidHandler handler = FluidCaps.at(level, neighborPos, dir.getOpposite());
             if (handler != null) {
-                remaining -= handler.fill(content.copyWithAmount(remaining), FluidAction.EXECUTE);
+                int filled = handler.fill(content.copyWithAmount(remaining), FluidAction.EXECUTE);
+                if (filled > 0) {
+                    remaining -= filled;
+                    RelayDetector.recordApplied(neighborPos, filled);
+                }
             }
         }
         return remaining;

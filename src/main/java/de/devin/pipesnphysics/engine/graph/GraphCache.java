@@ -10,6 +10,7 @@ import net.minecraft.world.level.Level;
 
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -55,6 +56,8 @@ public final class GraphCache {
 
     private static final Map<ResourceKey<Level>, Map<BlockPos, Entry>> CELLS = new HashMap<>();
     private static final Map<ResourceKey<Level>, Map<Long, Set<Entry>>> CHUNKS = new HashMap<>();
+    /** Each stored graph's own entry by IDENTITY — see {@link #entryOf}. */
+    private static final Map<Graph, Entry> BY_GRAPH = new IdentityHashMap<>();
 
     private static final class Entry {
         final Graph graph;
@@ -116,6 +119,7 @@ public final class GraphCache {
         }
         Map<Long, Set<Entry>> chunkIndex = CHUNKS.computeIfAbsent(level.dimension(), k -> new HashMap<>());
         for (Long chunk : chunks) chunkIndex.computeIfAbsent(chunk, k -> new HashSet<>()).add(entry);
+        BY_GRAPH.put(graph, entry);
     }
 
     /**
@@ -123,7 +127,7 @@ public final class GraphCache {
      * fresh) and whether the network is busy or armed, which picks the fast TTL.
      */
     public static void recordSolve(Level level, Graph graph, Solution solution, long now, boolean fast) {
-        Entry entry = entryOf(level, graph);
+        Entry entry = entryOf(graph);
         if (entry == null) return;
         entry.solution = solution;
         entry.solvedAt = now;
@@ -132,7 +136,7 @@ public final class GraphCache {
 
     /** The entry's last solution if it belongs to this exact graph and is at most maxAge ticks old. */
     public static Solution recentSolution(Level level, Graph graph, long now, int maxAge) {
-        Entry entry = entryOf(level, graph);
+        Entry entry = entryOf(graph);
         return entry != null && entry.solution != null && now - entry.solvedAt <= maxAge
                 ? entry.solution : null;
     }
@@ -173,7 +177,7 @@ public final class GraphCache {
      * the sleep branch just as often — eviction there would discard its entry mid-TTL.)
      */
     public static long expiry(Level level, Graph graph) {
-        Entry entry = entryOf(level, graph);
+        Entry entry = entryOf(graph);
         return entry == null ? Long.MAX_VALUE : entry.builtAt + entry.ttl();
     }
 
@@ -199,6 +203,7 @@ public final class GraphCache {
     public static void clear() {
         CELLS.clear();
         CHUNKS.clear();
+        BY_GRAPH.clear();
     }
 
     /**
@@ -218,16 +223,19 @@ public final class GraphCache {
     }
 
     /**
-     * The entry that owns this exact {@link Graph} instance, or null — a coverage cell re-claimed
-     * by a newer network resolves to the newer entry, which must not answer for the old graph.
+     * The entry that owns this exact {@link Graph} instance, or null once evicted. Resolved by
+     * graph IDENTITY, never through a coverage cell: a cell key can legitimately belong to a
+     * SIBLING network (the shareable cells {@link #store} claims putIfAbsent — an open-end gap
+     * two mouths face, a per-face handler), and coverage iterates in hash order, so a cell-based
+     * lookup intermittently missed the graph's own entry — its solves went unrecorded (a busy
+     * network kept the IDLE TTL) and its expiry never clamped the sleep.
      */
-    private static Entry entryOf(Level level, Graph graph) {
-        if (graph.isEmpty()) return null;
-        Entry entry = entryAt(level, graph.coverage().iterator().next());
-        return entry != null && entry.graph == graph ? entry : null;
+    private static Entry entryOf(Graph graph) {
+        return BY_GRAPH.get(graph);
     }
 
     private static void evict(ResourceKey<Level> dimension, Entry entry) {
+        BY_GRAPH.remove(entry.graph, entry);
         Map<BlockPos, Entry> cells = CELLS.get(dimension);
         if (cells != null) {
             for (BlockPos cell : entry.graph.coverage()) cells.remove(cell, entry);

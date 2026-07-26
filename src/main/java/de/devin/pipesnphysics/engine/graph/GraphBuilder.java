@@ -63,6 +63,16 @@ public final class GraphBuilder {
     }
 
     /**
+     * The single allowed flow direction of an OPEN one-way valve at this cell, or null (a plain
+     * cell, a both-ways valve, the feature off). Like a shut valve it is forced to a node so the
+     * run splits there — but a CONDUCTING one: the solver walls only the reverse direction.
+     */
+    private static Direction oneWayFlow(Level level, BlockPos pos) {
+        return level.getBlockEntity(pos) instanceof ValveThrottle valve
+                ? valve.pipesnphysics$oneWayFlow() : null;
+    }
+
+    /**
      * Build a graph containing the network reachable from startPos.
      *
      * If startPos is not a pipe, pump, or handler, BFS extends one block outward
@@ -86,8 +96,12 @@ public final class GraphBuilder {
             // A fully-shut valve is forced to a node so the run SPLITS there (a wall): the
             // supply side holds its head up to the valve, the far side settles. The graph
             // stays connected (the gate bridges two edges) — only the solver treats it as
-            // non-conducting — so coverage/dedupe/wake are unaffected.
-            if (conns != 2 || isClosedGate(level, pipe)) nodePositions.add(pipe);
+            // non-conducting — so coverage/dedupe/wake are unaffected. An OPEN one-way valve
+            // is forced to a node too — a conducting one whose reverse direction the solve
+            // AND the settle wall (the settle's only cross-node path is the node slot).
+            if (conns != 2 || isClosedGate(level, pipe) || oneWayFlow(level, pipe) != null) {
+                nodePositions.add(pipe);
+            }
         }
         // If no junctions/handlers/pumps exist, treat the start as the single node.
         if (nodePositions.isEmpty()) nodePositions.add(discovery.pipes.iterator().next());
@@ -100,6 +114,7 @@ public final class GraphBuilder {
             Direction facing = null;
             Direction openFace = null;
             Direction accessFace = null;
+            Direction gateFlow = null;
             if (discovery.pumps.contains(pos)) {
                 kind = Node.Kind.PUMP;
                 BlockState bs = level.getBlockState(pos);
@@ -113,12 +128,14 @@ public final class GraphBuilder {
                 kind = Node.Kind.OPEN_END;
                 openFace = discovery.openEnds.get(pos);
             } else if (isClosedGate(level, pos)) {
-                kind = Node.Kind.CLOSED_GATE;
+                kind = Node.Kind.CLOSED_GATE; // a shut one-way valve is just shut — the wall wins
             } else {
                 kind = Node.Kind.JUNCTION;
+                gateFlow = oneWayFlow(level, pos); // non-null only for an open one-way valve
             }
             int idx = nodes.size();
-            nodes.add(new Node(idx, pos, kind, SableCompat.getWorldY(level, pos), facing, openFace, accessFace));
+            nodes.add(new Node(idx, pos, kind, SableCompat.getWorldY(level, pos), facing, openFace,
+                    accessFace, gateFlow));
             indexOf.put(pos, idx);
         }
 

@@ -79,12 +79,14 @@ final class FluidPass {
      * settles against (NaN when the endpoint has no column). {@code driveNode} is the graph node
      * index of the single pump driving this branch, -1 when none, -2 when two pumps push into the
      * same edge (load attribution ambiguous). {@code throttle} is the valve governor's 0..1 flow
-     * share for the run.
+     * share for the run. {@code gateSign} is the flow sign a one-way valve node at either end
+     * demands (0 when none) — a branch the solver then backflow-blocks was stopped by that check
+     * valve, and the display says so.
      */
     record BranchMeta(int edgeIndex, BoundaryColumn columnA, BoundaryColumn columnB,
                       double lipA, double lipB,
                       int driveNode, double driveHead, double driveInternalConductance,
-                      double throttle) {}
+                      double throttle, int gateSign) {}
 
     FluidPass(Level level, Graph graph, FlowSolver.Columns columns,
               Map<Integer, FlowSolver.PumpState> pumps,
@@ -101,7 +103,7 @@ final class FluidPass {
 
         FluidType type = sample.getFluid().getFluidType();
         this.gas = type.isLighterThanAir();
-        double viscosityScale = 1000.0 / Math.max(1, type.getViscosity());
+        double viscosityScale = 1000.0 / FlowSolver.effectiveViscosity(level, sample);
         this.conductancePerTile = PipesNPhysicsConfig.PIPE_CONDUCTANCE.get() * viscosityScale;
         this.solverIndex = new int[graph.nodes().size()];
         Arrays.fill(solverIndex, -1);
@@ -239,7 +241,7 @@ final class FluidPass {
         double head = column.head(gas);
         if (!column.isFiniteReservoir()) return new NodeSpec(column.capacitance(), head);
         double span = column.heightBlocks() * column.fillScale();
-        double ceiling = NetworkSolver.surfaceHead(column.baseY(), span, gas);
+        double ceiling = NetworkSolver.surfaceHead(column.baseY(), column.baseY() + span, span, gas);
         // The crest-gating potential seeds from the RENDERED surface (a Create tank draws its
         // fluid inset, ABOVE the liquid surface at low fills), so the weir gate agrees with the
         // fluid the player sees — like the draw lip. The solved head stays the liquid surface.
@@ -275,6 +277,7 @@ final class FluidPass {
         double conductance = conductancePerTile / (edge.length() + 1);
         double emf = 0;
         int allowedSign = 0;
+        int gateSign = 0;
         int driveNode = -1;
         double driveHead = 0;
         double driveInternalConductance = 0;
@@ -285,6 +288,26 @@ final class FluidPass {
 
         for (int side = 0; side < 2; side++) {
             int nodeIndex = side == 0 ? edge.a() : edge.b();
+            int outSign = side == 0 ? +1 : -1;
+
+            // An OPEN one-way valve node (a check valve): this branch may only carry flow ALONG
+            // the valve's direction — out of the node on its arrow side, into it on the other.
+            // The same sign mechanism as a pump's flank check valves, with no EMF and no
+            // conductance cap. Two check valves facing each other wall the run outright.
+            Node endNode = graph.node(nodeIndex);
+            if (endNode.isOneWayGate()) {
+                BlockPos toward = PipeGeometry.adjacentCell(graph, edge, nodeIndex);
+                int wanted = toward.equals(endNode.pos().relative(endNode.gateFlow()))
+                        ? outSign : -outSign;
+                gateSign = combineSign(gateSign, wanted);
+                allowedSign = combineSign(allowedSign, wanted);
+                if (allowedSign == Integer.MIN_VALUE) {
+                    results.blockedEdges.add(edge.index());
+                    results.edgeReasons.putIfAbsent(edge.index(), Solution.Reason.CHECK_VALVE);
+                    return;
+                }
+            }
+
             FlowSolver.PumpState pump = pumps.get(nodeIndex);
             if (pump == null) continue;
             if (!pump.open()) {
@@ -295,7 +318,6 @@ final class FluidPass {
 
             Node pumpNode = graph.node(nodeIndex);
             BlockPos toward = PipeGeometry.adjacentCell(graph, edge, nodeIndex);
-            int outSign = side == 0 ? +1 : -1;
 
             if (toward.equals(pumpNode.pos().relative(pump.pushSide()))) {
                 emf += outSign * pump.head();
@@ -315,6 +337,10 @@ final class FluidPass {
             }
             if (allowedSign == Integer.MIN_VALUE) {
                 results.blockedEdges.add(edge.index());
+                // A pump pressing a check valve the wrong way is the valve's story, not the pump's.
+                if (gateSign != 0) {
+                    results.edgeReasons.putIfAbsent(edge.index(), Solution.Reason.CHECK_VALVE);
+                }
                 return;
             }
         }
@@ -360,7 +386,14 @@ final class FluidPass {
         // from flipping tick-to-tick and reclaiming the fluid just pushed out.
         if (columnA != null && columnA.isInfiniteSource()) allowedSign = combineSign(allowedSign, +1);
         if (columnB != null && columnB.isInfiniteSource()) allowedSign = combineSign(allowedSign, -1);
-        if (allowedSign == Integer.MIN_VALUE) return;
+        if (allowedSign == Integer.MIN_VALUE) {
+            // Ordinarily an unflagged "nothing to move" — but when a CHECK VALVE is one party
+            // (its sign against an empty end's receive-only wall: filling THROUGH the valve
+            // backward is exactly what it exists to stop, and a two-way valve here would flow),
+            // the dry side deserves the valve's story instead of reading as merely dry.
+            flagCheckValveConflict(edge, gateSign);
+            return;
+        }
 
         if (!gas) {
             // A pump actively drawing from a tank can lift its fluid out of a connection above the
@@ -391,8 +424,11 @@ final class FluidPass {
                 }
             }
             // A lip conflict (e.g. a pump trying to draw from below a tank's
-            // waterline) is "no supply", not a fault.
-            if (allowedSign == Integer.MIN_VALUE) return;
+            // waterline) is "no supply", not a fault — unless a check valve is one party.
+            if (allowedSign == Integer.MIN_VALUE) {
+                flagCheckValveConflict(edge, gateSign);
+                return;
+            }
 
             crestHeight = statics.crestHeight();
             crestFloor = statics.crestFloor();
@@ -417,13 +453,25 @@ final class FluidPass {
         // a real pump). Instead the throttle is a THROUGHPUT GOVERNOR applied by {@code governedSolve}:
         // it caps the run's flow to {@code throttle × fully-open flow}, so 50% always means half,
         // wherever the valve sits. The angle is carried on the meta for that loop.
+        // The pack may opt pumps into SELF-PRIMING: a running pump pulling across this edge gets
+        // the suction allowance for establishing through its own dry riser (default off — a dry
+        // pump above the waterline churns air until primed once; owner-confirmed realism).
+        boolean selfPriming = (pumpPullsA || pumpPullsB)
+                && PipesNPhysicsConfig.ENABLE_PUMP_SELF_PRIMING.get();
         branches.add(new BranchSpec(solverA, solverB, conductance, emf, allowedSign,
-                crestHeight, crestFloor, crestPos, crestWet));
+                crestHeight, crestFloor, crestPos, crestWet, selfPriming));
         meta.add(new BranchMeta(edge.index(), columnA, columnB, lipA, lipB,
-                driveNode, driveHead, driveInternalConductance, throttle));
+                driveNode, driveHead, driveInternalConductance, throttle, gateSign));
         // Whether this is a held FEED candidate (a pump driving out toward a shut gate) is decided
         // post-solve in recordBranchResults, where the hydraulic islands are known — the pump only
         // HOLDS a column if it actually has a supply behind it (a source in its island).
+    }
+
+    /** Mark an unassembled branch BLOCKED by its one-way valve, when one contributed a sign. */
+    private void flagCheckValveConflict(Edge edge, int gateSign) {
+        if (gateSign == 0) return;
+        results.blockedEdges.add(edge.index());
+        results.edgeReasons.putIfAbsent(edge.index(), Solution.Reason.CHECK_VALVE);
     }
 
     /**
@@ -578,7 +626,7 @@ final class FluidPass {
             scaled.add(scale[b] == 1 ? spec
                     : new BranchSpec(spec.a(), spec.b(), spec.conductance() * scale[b], spec.emf(),
                             spec.allowedSign(), spec.crestHeight(), spec.crestFloor(),
-                            spec.crestPos(), spec.crestWet()));
+                            spec.crestPos(), spec.crestWet(), spec.selfPriming()));
         }
         return scaled;
     }
@@ -633,6 +681,15 @@ final class FluidPass {
             }
             if (result.backflowBlocked()[b] && branches.get(b).emf() != 0) {
                 results.noHeadEdges.add(edgeIndex);
+            }
+            // A check valve HOLDING pressure back: a zero-EMF branch a one-way valve signed was
+            // deactivated because the head gradient opposed that sign — the run is stopped by the
+            // valve, not "settled". (A pump branch in the same shape is NO_HEAD above; a gate that
+            // contradicted a pump outright never assembled and was flagged at assembly.)
+            if (result.backflowBlocked()[b] && branches.get(b).emf() == 0
+                    && meta.get(b).gateSign() != 0) {
+                results.blockedEdges.add(edgeIndex);
+                results.edgeReasons.putIfAbsent(edgeIndex, Solution.Reason.CHECK_VALVE);
             }
             // A DEAD CONDUIT: the run's own one-way sign (a lip, a pump's check valve) contradicts a
             // full endpoint's give-only clamp, so it carries no flow either way. When that pre-existing

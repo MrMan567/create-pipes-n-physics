@@ -43,8 +43,10 @@ public final class RelayDetector {
     private static final int NOISE_MB = 10;
     /** Distinct ticks of unexplained gain before a position is demoted to a relay. */
     private static final int STRIKES_TO_DEMOTE = 5;
+    /** Ticks without an observation before a position's samples and strikes are dropped. */
+    private static final int STALE_TICKS = 1200;
 
-    private record Sample(Fluid fluid, int amountMb) {}
+    private record Sample(Fluid fluid, int amountMb, long seenAt) {}
 
     /** Last observed contents per handler position, and the net fluid WE moved into it since. */
     private static final Map<BlockPos, Sample> lastSample = new HashMap<>();
@@ -90,8 +92,21 @@ public final class RelayDetector {
                 strikes.computeIfPresent(pos, (k, v) -> v > 1 ? v - 1 : null);
             }
         }
-        lastSample.put(pos.immutable(), new Sample(fluid, amount));
+        lastSample.put(pos.immutable(), new Sample(fluid, amount, level.getGameTime()));
         appliedSince.put(pos.immutable(), 0);
+    }
+
+    /**
+     * Drop samples and strikes for positions nothing has observed in {@link #STALE_TICKS} —
+     * handlers that left the network without their block breaking (a severed pipe, a disassembled
+     * contraption) would otherwise accumulate forever. A dropped position simply re-learns in a
+     * few observations if it returns; the learned relay set is deliberately sticky and stays.
+     * Called on the tick handler's slow sweep cadence.
+     */
+    public static void sweep(long now) {
+        lastSample.entrySet().removeIf(entry -> now - entry.getValue().seenAt() >= STALE_TICKS);
+        appliedSince.keySet().removeIf(pos -> !lastSample.containsKey(pos));
+        strikes.keySet().removeIf(pos -> !lastSample.containsKey(pos));
     }
 
     /** Record fluid the engine actually moved into (+) or out of (-) a tracked handler this tick. */

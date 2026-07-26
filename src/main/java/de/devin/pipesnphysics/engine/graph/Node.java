@@ -28,16 +28,32 @@ import net.minecraft.core.Direction;
  * side-agnostic {@code null} capability): the network resolves and transfers the handler through that
  * exact face, so a block with a different tank per side serves each side its own fluid. It is null for
  * an ordinary side-agnostic handler (resolved through {@code null}) and for every non-handler node.
+ *
+ * {@code gateFlow} marks a JUNCTION that is really an OPEN one-way valve (a check valve): the single
+ * world direction fluid may flow through it. Like a shut valve it is forced to a node so the run
+ * splits there; unlike one it CONDUCTS — the solver walls the reverse direction on its incident
+ * branches (the same sign mechanism as a pump's flank check valves) and the settle's slot exchange
+ * honors it. Null everywhere else, including ordinary junctions.
  */
 public record Node(int index, BlockPos pos, Kind kind, double worldY,
-                   Direction pumpFacing, Direction openFace, Direction accessFace) {
+                   Direction pumpFacing, Direction openFace, Direction accessFace,
+                   Direction gateFlow) {
     public enum Kind { HANDLER, PUMP, JUNCTION, OPEN_END, CLOSED_GATE }
+
+    /** The common shape: every node except a one-way valve junction. */
+    public Node(int index, BlockPos pos, Kind kind, double worldY,
+                Direction pumpFacing, Direction openFace, Direction accessFace) {
+        this(index, pos, kind, worldY, pumpFacing, openFace, accessFace, null);
+    }
 
     public boolean isHandler() { return kind == Kind.HANDLER; }
     public boolean isPump() { return kind == Kind.PUMP; }
     public boolean isJunction() { return kind == Kind.JUNCTION; }
     public boolean isOpenEnd() { return kind == Kind.OPEN_END; }
     public boolean isClosedGate() { return kind == Kind.CLOSED_GATE; }
+
+    /** Whether this junction is an open one-way valve — a check valve the flow must honor. */
+    public boolean isOneWayGate() { return gateFlow != null; }
 
     /** The cell a PUMP pushes into (its FACING side), or null while the facing is unresolved. */
     public BlockPos pushCell() {

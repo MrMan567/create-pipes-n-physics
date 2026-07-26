@@ -58,6 +58,10 @@ public record PipeStatusPayload(
     public static final byte DETAIL_HELD = 7;
     /** A dry no-flow run whose powered pump has nothing on its push side — nowhere to deliver. */
     public static final byte DETAIL_PUMP_NO_OUTPUT = 8;
+    /** A CREST-gated LEVEL run whose supply fluid stands below the pipe's aperture — no climb involved. */
+    public static final byte DETAIL_BELOW_OPENING = 9;
+    /** A run stopped by a ONE-WAY valve: the pressure wants to flow against its direction. */
+    public static final byte DETAIL_CHECK_VALVE = 10;
 
     public static final Type<PipeStatusPayload> TYPE =
             new Type<>(PipesNPhysics.asResource("pipe_status"));

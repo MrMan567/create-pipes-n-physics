@@ -12,6 +12,7 @@ import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.compat.SableCompat;
 import de.devin.pipesnphysics.engine.EdgeFlow;
 import de.devin.pipesnphysics.engine.FlowSolver;
+import de.devin.pipesnphysics.engine.FlowTrace;
 import de.devin.pipesnphysics.engine.FluidEngine;
 import de.devin.pipesnphysics.engine.Solution;
 import de.devin.pipesnphysics.engine.boundary.BoundaryColumn;
@@ -24,6 +25,7 @@ import de.devin.pipesnphysics.engine.graph.GraphCache;
 import de.devin.pipesnphysics.engine.graph.Node;
 import de.devin.pipesnphysics.engine.graph.PipeGeometry;
 import de.devin.pipesnphysics.engine.net.GraphOverlayPayload;
+import de.devin.pipesnphysics.engine.net.PipeStatusPayload;
 import de.devin.pipesnphysics.engine.probe.PipeProbe;
 import de.devin.pipesnphysics.engine.store.PipeStore;
 import de.devin.pipesnphysics.engine.store.PipeWindow;
@@ -333,7 +335,7 @@ public final class PipeGraphCommand {
         report.line(locateTarget(g, target));
         printNodes(report, level, g, s, target);
         sendFluidStats(report, level, g);
-        report.line("§e--- Edges ---");
+        report.line("§e--- Edges --- §8(recent = actual mB/t per solve, newest→oldest; → a→b, ← b→a, · no solved direction, … skipped ticks)");
         printEdges(report, level, g, s, target);
         printTransfers(report, s);
     }
@@ -367,13 +369,14 @@ public final class PipeGraphCommand {
             Double head = s.nodeHeads().get(n.index());
             Double ceiling = s.nodeCeilings().get(n.index());
             String block = blockName(level, n);
-            report.line(String.format("  §f%s §7%s §b%s §7y=§f%.1f%s%s%s%s%s",
+            report.line(String.format("  §f%s §7%s §b%s §7y=§f%.1f%s%s%s%s%s%s",
                     n.pos().toShortString(), n.kind(), block,
                     n.worldY(),
                     head != null ? String.format(" §7head=§f%.2f", head) : "",
                     ceiling != null ? String.format(" §7ceil=§b%.2f", ceiling) : " §8ceil=∅",
                     n.pumpFacing() != null ? " §7face=§f" + n.pumpFacing() : "",
                     n.isPump() ? String.format(" §7rpm=§f%.0f", pumpSpeed(level, n)) : "",
+                    n.isOneWayGate() ? " §done-way §f" + n.gateFlow() : "",
                     n.pos().equals(target) ? " §6← flagged" : ""));
             BoundaryColumn column = columnOf(level, n);
             if (column != null && !column.contents().isEmpty() && column.contentMb() > 0) {
@@ -430,18 +433,60 @@ public final class PipeGraphCommand {
                 dir = h != null ? String.format("§dheld §7(stored §f%.2f§7)", h) : "§dheld§7";
             }
             Solution.Reason reason = s.edgeReasons().get(e.index());
+            // The goggle's story hierarchy, mirrored so this dump never contradicts it: (1) a
+            // path wall (VALVE/CREST) with nothing to stop is really a starved/dead-ended pump
+            // (PipeProbe.starvedDryEdges); (2) a no-rise CREST with real fluid is "the supply
+            // can't reach the opening" (PipeProbe.supplyBelowOpening); (3) else the wall itself.
+            Byte starvedCause = reason == Solution.Reason.VALVE || reason == Solution.Reason.CREST
+                    || reason == Solution.Reason.CHECK_VALVE
+                    ? PipeProbe.starvedDryEdges(level, g, s).get(e.index()) : null;
+            String reasonTag = reason == null ? ""
+                    : starvedCause != null
+                            ? " §8[" + reason + " — nothing to "
+                                    + (reason == Solution.Reason.VALVE ? "filter"
+                                            : reason == Solution.Reason.CHECK_VALVE ? "pass" : "lift") + "; "
+                                    + (starvedCause == PipeStatusPayload.DETAIL_PUMP_NO_OUTPUT
+                                            ? "pump has no output" : "pump can't pull its supply")
+                                    + "]"
+                    : reason == Solution.Reason.CREST && PipeProbe.supplyBelowOpening(level, g, e)
+                            ? " §8[CREST — supply below opening]"
+                            : " §8[" + reason + "]";
             Node a = g.node(e.a()), b = g.node(e.b());
             report.line(String.format("  §e%s §f%s §7↔ §f%s §7len=%d §7%s §7solved=%d actual=%d mB/t%s%s",
                     GraphOverlayPayload.edgeLetter(e.index()),
                     a.pos().toShortString(), b.pos().toShortString(),
                     e.length(), dir, flow.mbPerTick(), rate,
-                    reason != null ? " §8[" + reason + "]" : "",
+                    reasonTag,
                     e.pipes().contains(target) ? " §6← flagged" : ""));
             String holds = holdsLine(level, e);
             if (holds != null) report.line("      " + holds);
             String lips = lipLine(level, g, e);
             if (lips != null) report.line("      " + lips);
+            String recent = recentLine(level, g, e);
+            if (recent != null) report.line("      " + recent);
         }
+    }
+
+    /**
+     * The edge's last few solves' ACTUAL movement as one strip, newest first — an oscillation
+     * (a limit cycle ping-ponging a few mB) reads directly off a single dump instead of needing
+     * dumps taken ticks apart. Ticks the network slept between samples show as an ellipsis.
+     */
+    private static String recentLine(ServerLevel level, Graph g, Edge e) {
+        List<FlowTrace.Sample> samples = FlowTrace.recent(level, g, e);
+        if (samples.size() < 2) return null;
+        StringBuilder line = new StringBuilder("§7recent §f");
+        long prev = Long.MIN_VALUE;
+        for (FlowTrace.Sample s : samples) {
+            if (prev != Long.MIN_VALUE && prev - s.tick() > 1) line.append("§8…§f ");
+            prev = s.tick();
+            line.append(s.mb() == 0 ? "0" : switch (s.dir()) {
+                case A_TO_B -> "→" + s.mb();
+                case B_TO_A -> "←" + s.mb();
+                case NONE -> "·" + s.mb();
+            }).append(' ');
+        }
+        return line.toString().stripTrailing();
     }
 
     /**
@@ -838,10 +883,15 @@ public final class PipeGraphCommand {
         report.line("§e--- Fluids ---");
         for (FluidStack fluid : totals) {
             FluidType type = fluid.getFluid().getFluidType();
-            report.line(String.format("  §b%s§7: §f%d mB  §7density §f%d §7visc §f%d §7temp §f%dK%s",
+            // The EFFECTIVE viscosity the solve uses in THIS dimension; a thinned molten fluid
+            // says so, or the number silently disagrees with the registered one.
+            int viscosity = (int) Math.round(FlowSolver.effectiveViscosity(level, fluid));
+            String thinned = viscosity < type.getViscosity()
+                    ? String.format("  §6(thinned from %d — ultrawarm)", type.getViscosity()) : "";
+            report.line(String.format("  §b%s§7: §f%d mB  §7density §f%d §7visc §f%d §7temp §f%dK%s%s",
                     fluid.getHoverName().getString(), fluid.getAmount(),
-                    type.getDensity(), type.getViscosity(), type.getTemperature(),
-                    type.isLighterThanAir() ? "  §e(lighter than air ↑)" : ""));
+                    type.getDensity(), viscosity, type.getTemperature(),
+                    type.isLighterThanAir() ? "  §e(lighter than air ↑)" : "", thinned));
         }
     }
 

@@ -12,8 +12,10 @@ import de.devin.pipesnphysics.engine.graph.GraphBuilder;
 import de.devin.pipesnphysics.engine.graph.GraphCache;
 import de.devin.pipesnphysics.engine.graph.Node;
 import de.devin.pipesnphysics.engine.graph.PipeGeometry;
+import de.devin.pipesnphysics.engine.boundary.BoundaryColumn;
 import de.devin.pipesnphysics.engine.net.PipeStatusPayload;
 import de.devin.pipesnphysics.engine.store.PipeStore;
+import de.devin.pipesnphysics.engine.store.PipeWindow;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
@@ -44,6 +46,8 @@ public final class PipeProbe {
      * dedicated solve exactly as before.
      */
     private static final int SOLUTION_MAX_AGE_TICKS = 4;
+    /** Elevation slack below which a run counts as LEVEL with its opening (see supplyBelowOpening). */
+    private static final double RISE_EPS = 0.05;
 
     private PipeProbe() {}
 
@@ -106,6 +110,17 @@ public final class PipeProbe {
 
         byte status = status(solution, edge.index(), actualFlow);
         byte detail = edgeDetail(level, graph, solution, edge, status, fluid);
+        // THE NO-FLOW STORY IS A HIERARCHY: (1) is there any FLUID — a path wall (valve/filter,
+        // crest) on a dry run with no supplying end has nothing to stop, so the supply story wins
+        // (pump starved / dry — "shows valve shut, but in reality the source is dry"); (2) can it
+        // REACH — below-opening and no-head already outrank the walls they refine; (3) only then
+        // the wall itself. Machine-state facts (an unpowered pump) are never walls and keep their
+        // message even on a dry line.
+        if (fluid.isEmpty() && isPathWall(detail)
+                && !wallHasSomethingToStop(level, graph, solution, edge)) {
+            status = PipeStatusPayload.STATUS_NO_FLOW;
+            detail = edgeDetail(level, graph, solution, edge, status, fluid);
+        }
         // The air-break margin ("how much more lift before the column snaps over the crest") is an
         // EARLY warning about LIFT — meaningful only while fluid is moving or a pump is being asked
         // to raise it. On a settled NO_FLOW run nothing is lifting, so it is noise (like the reach
@@ -115,7 +130,8 @@ public final class PipeProbe {
         // suppressed once the solver has broken the column (a CREST edge): there is no margin left,
         // and this recomputed value can read a small positive number that contradicts the "air break
         // over the crest" reason the same run shows — the client prints the concrete fix instead.
-        boolean crestBroken = detail == PipeStatusPayload.DETAIL_CREST;
+        boolean crestBroken = detail == PipeStatusPayload.DETAIL_CREST
+                || detail == PipeStatusPayload.DETAIL_BELOW_OPENING;
         boolean hasSuction = hasPressure && !crestBroken && !isGas(fluid)
                 && status != PipeStatusPayload.STATUS_NO_FLOW
                 && runWorstPressure < -0.05f;
@@ -222,6 +238,9 @@ public final class PipeProbe {
     private static byte edgeDetail(ServerLevel level, Graph graph, Solution solution,
                                    Edge edge, byte status, FluidStack fluid) {
         byte detail = detail(solution, edge.index(), status);
+        if (detail == PipeStatusPayload.DETAIL_CREST && supplyBelowOpening(level, graph, edge)) {
+            detail = PipeStatusPayload.DETAIL_BELOW_OPENING;
+        }
         if (status == PipeStatusPayload.STATUS_NO_FLOW && fluid.isEmpty()) {
             Byte starvedCause = starvedDryEdges(level, graph, solution).get(edge.index());
             if (starvedCause != null) detail = starvedCause;
@@ -232,6 +251,33 @@ public final class PipeProbe {
             detail = PipeStatusPayload.DETAIL_HELD;
         }
         return detail;
+    }
+
+    /**
+     * Whether a CREST-gated edge's real wall is the supply's fluid standing below the pipe's
+     * APERTURE on a run that never rises above it — a same-level draw whose fluid simply cannot
+     * reach the opening. "Air break over the crest" reads as a climb problem and sent players
+     * hunting a crest on a dead-flat run (a basin a third full beside a same-level pump); the
+     * goggle and /pipegraph word this case as "supply below opening" instead. A run that DOES
+     * rise past the opening keeps the crest wording — filling to the lip alone may not fix it.
+     */
+    public static boolean supplyBelowOpening(ServerLevel level, Graph graph, Edge edge) {
+        for (int end : new int[] {edge.a(), edge.b()}) {
+            Node node = graph.node(end);
+            if (!node.isHandler()) continue;
+            BoundaryColumn column = BoundaryColumn.resolve(level, node);
+            if (column == null || !column.isFiniteReservoir() || column.isEmpty()) continue;
+            BlockPos opening = PipeGeometry.adjacentCell(graph, edge, end);
+            if (opening == null) continue;
+            double lip = PipeWindow.lipY(level, opening);
+            if (column.renderedSurface() > lip) continue; // reaches its opening — not this wall
+            boolean risen = false;
+            for (BlockPos cell : edge.pipes()) {
+                risen |= PipeWindow.lipY(level, cell) > lip + RISE_EPS;
+            }
+            if (!risen) return true;
+        }
+        return false;
     }
 
     /**
@@ -293,6 +339,7 @@ public final class PipeProbe {
             case CREST -> PipeStatusPayload.DETAIL_CREST;
             case SINK_FULL -> PipeStatusPayload.DETAIL_SINK_FULL;
             case SOURCE_DRY -> PipeStatusPayload.DETAIL_SOURCE_DRY;
+            case CHECK_VALVE -> PipeStatusPayload.DETAIL_CHECK_VALVE;
         };
     }
 
@@ -314,7 +361,7 @@ public final class PipeProbe {
      * supply it does have can't be drawn ({@code DETAIL_PUMP_STARVED}). Folding the two into one
      * "check the source" message sent the player to a perfectly full tank.
      */
-    private static Map<Integer, Byte> starvedDryEdges(ServerLevel level, Graph graph, Solution solution) {
+    public static Map<Integer, Byte> starvedDryEdges(ServerLevel level, Graph graph, Solution solution) {
         Map<Integer, Byte> dry = new HashMap<>();
         for (Node pump : graph.pumps()) {
             float speed = level.getBlockEntity(pump.pos()) instanceof KineticBlockEntity kinetic
@@ -323,10 +370,18 @@ public final class PipeProbe {
             boolean movesNothing = true;
             for (Edge edge : graph.edgesOf(pump.index())) {
                 int idx = edge.index();
+                // A path wall (valve/filter, crest) with nothing to stop — a dry branch whose
+                // reservoir ends are empty — is not this pump's stop: nothing is there to filter
+                // or lift, so it must not mask the real story (a starved supply).
+                Solution.Reason reason = solution.edgeReasons().get(idx);
+                boolean mootWall = solution.blockedEdges().contains(idx)
+                        && (reason == Solution.Reason.VALVE || reason == Solution.Reason.CREST
+                                || reason == Solution.Reason.CHECK_VALVE)
+                        && !wallHasSomethingToStop(level, graph, solution, edge);
                 if (solution.edgeFlows().get(idx).mbPerTick() > 0
                         || solution.stalledEdges().contains(idx)
                         || solution.noHeadEdges().contains(idx)
-                        || solution.blockedEdges().contains(idx)) {
+                        || (solution.blockedEdges().contains(idx) && !mootWall)) {
                     movesNothing = false;
                     break;
                 }
@@ -340,6 +395,56 @@ public final class PipeProbe {
             floodDryRegion(graph, solution, pump.index(), cause, dry);
         }
         return dry;
+    }
+
+    /**
+     * QUESTION ONE of the story hierarchy — is there any fluid this wall could be stopping?
+     * A wall flag (a valve/filter rejection, a crest gate) is a per-pass "this fluid was refused
+     * passage HERE"; with the edge dry (no stored content, no rest claim) and no reservoir end
+     * holding anything, the flag belongs to a fluid that is entirely absent (a separation rig's
+     * OTHER line records it through its filter), and the wall is MOOT — the supply story wins.
+     * A pump end contributes nothing (it stores nothing itself); a junction or open end is
+     * unknowable and stays conservative — the wall is presumed binding.
+     */
+    private static boolean wallHasSomethingToStop(ServerLevel level, Graph graph,
+                                                  Solution solution, Edge edge) {
+        if (!solution.restFluids().getOrDefault(edge.index(), FluidStack.EMPTY).isEmpty()) {
+            return true;
+        }
+        for (BlockPos pos : edge.pipes()) {
+            PipeStore.Store cell = PipeStore.at(level, pos);
+            if (cell != null && cell.amount() > 0) return true;
+        }
+        for (int end : new int[] {edge.a(), edge.b()}) {
+            Node node = graph.node(end);
+            if (node.isPump()) continue;
+            if (!node.isHandler()) return true;
+            BoundaryColumn column = BoundaryColumn.resolve(level, node);
+            if (column == null || !column.isFiniteReservoir() || !column.isEmpty()) return true;
+        }
+        return false;
+    }
+
+    /** The details that are PATH WALLS — flags a pass records where its fluid was refused. */
+    private static boolean isPathWall(byte detail) {
+        return detail == PipeStatusPayload.DETAIL_VALVE
+                || detail == PipeStatusPayload.DETAIL_CREST
+                || detail == PipeStatusPayload.DETAIL_BELOW_OPENING
+                || detail == PipeStatusPayload.DETAIL_CHECK_VALVE;
+    }
+
+    /** Whether any wall-flagged edge at this node really stops something (the node-probe twin). */
+    private static boolean anyAdjacentWallBinding(ServerLevel level, Graph graph,
+                                                  Solution solution, Node node) {
+        for (Edge edge : graph.edgesOf(node.index())) {
+            Solution.Reason reason = solution.edgeReasons().get(edge.index());
+            if ((reason == Solution.Reason.VALVE || reason == Solution.Reason.CREST
+                    || reason == Solution.Reason.CHECK_VALVE)
+                    && wallHasSomethingToStop(level, graph, solution, edge)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -398,6 +503,13 @@ public final class PipeProbe {
 
         byte status = flows.status();
         byte detail = nodeDetail(level, graph, solution, node, status, fluid);
+        // The node twin of the edge-cell story hierarchy (see probeEdgeCell): a moot path wall
+        // on a dry node falls through to the supply story.
+        if (fluid.isEmpty() && isPathWall(detail)
+                && !anyAdjacentWallBinding(level, graph, solution, node)) {
+            status = PipeStatusPayload.STATUS_NO_FLOW;
+            detail = nodeDetail(level, graph, solution, node, status, fluid);
+        }
         // The air-break margin is a LIFT diagnostic — noise on a settled run (see the edge probe).
         boolean hasSuction = hasPressure && !isGas(fluid)
                 && status != PipeStatusPayload.STATUS_NO_FLOW && pressure < -0.05f;
@@ -473,6 +585,9 @@ public final class PipeProbe {
         byte detail = PipeStatusPayload.DETAIL_NONE;
         for (Edge edge : graph.edgesOf(node.index())) {
             detail = detail(solution, edge.index(), status);
+            if (detail == PipeStatusPayload.DETAIL_CREST && supplyBelowOpening(level, graph, edge)) {
+                detail = PipeStatusPayload.DETAIL_BELOW_OPENING;
+            }
             if (detail != PipeStatusPayload.DETAIL_NONE) break;
         }
         if (status == PipeStatusPayload.STATUS_NO_FLOW && fluid.isEmpty()) {

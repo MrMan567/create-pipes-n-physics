@@ -1,77 +1,104 @@
 package de.devin.pipesnphysics.client.ponder.scenes;
 
+import com.simibubi.create.AllBlocks;
+import com.simibubi.create.AllFluids;
+import com.simibubi.create.AllItems;
+import com.simibubi.create.content.fluids.pipes.FluidPipeBlock;
+import com.simibubi.create.content.fluids.pipes.GlassFluidPipeBlock;
+import com.simibubi.create.content.fluids.pump.PumpBlock;
 import com.simibubi.create.foundation.ponder.CreateSceneBuilder;
 import de.devin.pipesnphysics.client.ponder.PnpPonderScene;
+import net.createmod.catnip.math.Pointing;
 import net.createmod.ponder.api.PonderPalette;
 import net.createmod.ponder.api.scene.SceneBuilder;
 import net.createmod.ponder.api.scene.SceneBuildingUtil;
-import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.world.level.ClipContext;
-import net.minecraft.world.level.material.Fluid;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.Rotation;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.material.Fluids;
+import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.Vec3;
 
 public class PipeScenes extends PnpPonderScene {
 
-    private PipeScenes() {}
 
-    public static void basics(SceneBuilder scene, SceneBuildingUtil util) {
+    public static void overview(SceneBuilder scene, SceneBuildingUtil util) {
+        scene.title("pipe_overview", "Pipes overview");
         var helper = new CreateSceneBuilder(scene);
         setupScene(6, scene);
-
-        reveal(scene, util.select().layersFrom(1), Direction.DOWN);
-        waitDefaultDelay(scene);
-
-        narrateAbove(scene, util, "A Mechanical Pump moves fluid through the network", util.grid().at(2, 1, 2));
-        waitDefaultDelay(scene);
-
-        var pumpPos = util.select().position(2,1,2);
-
-        applyKineticSpeedAt(helper, util, pumpPos, 32.f);
-
-        narrateAbove(scene, util, "To move fluids you need to speed up your pipes", util.grid().at(2, 1, 2));
-
-        waitDefaultDelay(scene);
-
-        fillTankAt(helper, new BlockPos(5,1,4), Fluids.WATER, 8000);
-
-        narrateAbove(scene, util, "A pump rotating at fast speeds can push more fluid but will drain more SU.", util.grid().at(2, 1, 2));
-
-        waitDefaultDelay(scene);
-    }
-
-
-    public static void gravity(SceneBuilder scene, SceneBuildingUtil util) {
-        var helper = new CreateSceneBuilder(scene);
-        setupScene(6, scene);
-
-        waitDefaultDelay(scene);
-
         freezeEngine(scene);
 
-        var highTank = util.select().fromTo(new BlockPos(0,1,4), new BlockPos(0,4,4));
+        BlockState pipeStateX = AllBlocks.GLASS_FLUID_PIPE.getDefaultState()
+            .setValue(GlassFluidPipeBlock.AXIS, Direction.Axis.X);
+        BlockState pipeStateZ = AllBlocks.GLASS_FLUID_PIPE.getDefaultState()
+            .setValue(GlassFluidPipeBlock.AXIS, Direction.Axis.Z);
+        BlockState branchStub = AllBlocks.FLUID_PIPE.getDefaultState()
+            .setValue(FluidPipeBlock.SOUTH, false)
+            .setValue(FluidPipeBlock.NORTH, false)
+            .setValue(FluidPipeBlock.EAST, false)
+            .setValue(FluidPipeBlock.WEST, false);
 
-        reveal(scene, highTank, Direction.DOWN);
-        waitDefaultDelay(scene);
+        var tankA = util.select().fromTo(0, 1, 3, 0, 2, 3);
+        var tankB = util.select().fromTo(5, 1, 2, 5, 2, 2);
+        var run = util.select().fromTo(4, 1, 2, 4, 1, 1)
+            .add(util.select().fromTo(3, 1, 1, 2, 1, 1))
+            .add(util.select().fromTo(2, 1, 2, 2, 1, 3))
+            .add(util.select().position(1, 1, 3));
+        var pumpPos = util.grid().at(2, 1, 2);
+        var driveCog = util.select().position(1, 1, 2);
 
-        narrateAbove(scene, util, "Fluids will flow down to the lowest point they can reach", util.grid().at(0, 3, 4));
+        reveal(scene, tankB, Direction.DOWN);
+        scene.idle(5);
+        reveal(scene, tankA, Direction.DOWN);
+        scene.idle(5);
+        reveal(scene, run, Direction.DOWN);
+        scene.idle(10);
+        narrate(scene, "Pipes carry fluid between tanks and machines", util.vector().topOf(3, 1, 1));
 
-        fillTankAt(scene, new BlockPos(0,3,4), Fluids.WATER, 8000);
-        waitDefaultDelay(scene);
+        showClickWithItemAt(scene, util, util.grid().at(3, 1, 1), AllItems.WRENCH.asStack());
+        scene.idle(7);
+        scene.world().replaceBlocks(util.select().position(3, 1, 1), pipeStateX, true);
+        scene.idle(15);
+        showClickWithItemAt(scene, util, util.grid().at(2, 1, 2), AllItems.WRENCH.asStack());
+        scene.idle(7);
+        scene.world().replaceBlocks(util.select().position(2, 1, 2), pipeStateZ, true);
+        scene.idle(10);
+        narrate(scene, "A Wrench turns a straight pipe into a windowed one, showing the fluid inside", util.vector().centerOf(2, 1, 2));
 
-        var lowTank1 = util.select().fromTo(new BlockPos(0,1,1), new BlockPos(0,3,3));
-        var lowTank2 = util.select().fromTo(new BlockPos(5,1,4), new BlockPos(1,3,4));
+        scene.world().setBlock(util.grid().at(3, 1, 2), branchStub, true);
+        Vec3 center = util.vector().centerOf(3, 1, 2);
+        AABB bb = new AABB(center, center).inflate(1 / 6f);
+        AABB bb1 = bb.move(-0.5, 0, 0);
+        AABB bb2 = bb.move(0, 0, -0.5);
+        scene.idle(10);
+        scene.overlay().chaseBoundingBoxOutline(PonderPalette.RED, bb1, bb, 1);
+        scene.overlay().chaseBoundingBoxOutline(PonderPalette.RED, bb2, bb, 1);
+        scene.idle(1);
+        scene.overlay().chaseBoundingBoxOutline(PonderPalette.RED, bb1, bb1, 50);
+        scene.overlay().chaseBoundingBoxOutline(PonderPalette.RED, bb2, bb2, 50);
+        scene.idle(10);
+        narrate(scene, "Windowed pipes only run straight through, they cannot branch sideways", util.vector().centerOf(2, 1, 2), PonderPalette.RED);
 
-        reveal(scene, lowTank1, Direction.DOWN);
-        reveal(scene, lowTank2, Direction.DOWN);
+        scene.world().setBlock(util.grid().at(3, 1, 2), Blocks.AIR.defaultBlockState(), false);
+        scene.world().restoreBlocks(util.select().position(3, 1, 1));
+        scene.idle(10);
 
-        waitDefaultDelay(scene);
+        fillTankAt(scene, util.grid().at(5, 1, 2), Fluids.WATER, 12000);
+        scene.world().setBlock(pumpPos, AllBlocks.MECHANICAL_PUMP.getDefaultState()
+            .setValue(PumpBlock.FACING, Direction.SOUTH), true);
+        reveal(scene, driveCog, Direction.EAST);
+        scene.idle(10);
+        applyKineticSpeedAt(helper, util, driveCog, -16);
+        applyKineticSpeedAt(helper, util, util.select().position(pumpPos), 16);
+        helper.effects().rotationDirectionIndicator(util.grid().at(1, 1, 2));
         unfreezeEngine(scene);
-
-
-        narrateAbove(scene, util, "When fluids are at the lowest position they will rest, until they are pushed by a pump.", util.grid().at(0, 3, 4));
-
-
+        scene.idle(10);
+        narrate(scene, "A powered pump then drives the fluid through the run", util.vector().topOf(pumpPos));
+        narrate(scene, "It takes time to travel, filling one pipe after another", util.vector().centerOf(3, 1, 1));
+        narrate(scene, "Unlike in vanilla Create, each pipe really holds fluid, up to 250 mB", util.vector().centerOf(2, 1, 1));
+        waitSeconds(scene, 3);
     }
 
 }
