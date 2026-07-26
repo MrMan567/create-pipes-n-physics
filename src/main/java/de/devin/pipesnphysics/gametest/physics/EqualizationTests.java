@@ -167,9 +167,10 @@ public class EqualizationTests {
      * Nether), so lava pipes in the Nether flow that much faster. Water (below the molten
      * temperature) is untouched, and the overworld reads the registered value. Unit-style: the
      * rule is a pure function of level + fluid, so it is asserted against the server's REAL
-     * Nether level rather than a rig no GameTest could build there.
+     * Nether level rather than a rig no GameTest could build there (the template rig is
+     * unused scenery).
      */
-    @GameTest(template = "common/empty_canvas", templateNamespace = PipesNPhysics.ID, timeoutTicks = 40)
+    @GameTest(template = "common/top_row_run", templateNamespace = PipesNPhysics.ID, timeoutTicks = 40)
     public static void moltenFluidThinsInUltrawarmDimensions(GameTestHelper helper) {
         var overworld = helper.getLevel();
         var nether = overworld.getServer().getLevel(Level.NETHER);
@@ -197,5 +198,69 @@ public class EqualizationTests {
             return;
         }
         helper.succeed();
+    }
+
+    /**
+     * A run packed FULL by an earlier fast phase must TRACK the falling waterline WHILE two
+     * tanks equalize through it — not ride 250 mB until the flow dies and only then settle
+     * ("the pipes stay full of fluid until it has settled"). The flowing shed drains each
+     * cell toward the grade line hung between the tanks' RENDERED surfaces, floored at the
+     * plug's flow depth, so mid-equalization the top-row run reads partial while fluid still
+     * moves. Both surfaces sit inside the run's bore, so the line wets the conduit end to
+     * end (the shed's flooded gate); conservation must hold throughout and the tanks must
+     * not yet be equalized at the sample tick (else the idle settle would mask the shed).
+     */
+    @GameTest(template = "common/top_row_run", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
+    public static void flowingRunShedsTowardTheFallingWaterline(GameTestHelper helper) {
+        // top_row_run: two 2-tall tanks at x0/x4 joined by the top-row 3-cell run
+        BlockPos source = new BlockPos(0, 1, 0);
+        BlockPos sink = new BlockPos(4, 1, 0);
+        List<BlockPos> run = List.of(
+                new BlockPos(1, 2, 0), new BlockPos(2, 2, 0), new BlockPos(3, 2, 0));
+
+        int sourceStart = 13800, sinkStart = 12200; // both rendered surfaces inside the bore
+        int packed = PipeStore.capacityMb();
+        helper.runAfterDelay(5, () -> {
+            fill(helper, source, sourceStart);
+            fill(helper, sink, sinkStart);
+            for (BlockPos rel : run) {
+                PipeStore.Store cell = PipeStore.at(helper.getLevel(), helper.absolutePos(rel));
+                cell.insert(new FluidStack(Fluids.WATER, packed), packed);
+            }
+            helper.runAfterDelay(75, () -> {
+                int sourceMb = amount(helper, source);
+                int sinkMb = amount(helper, sink);
+                int pipeMb = 0;
+                for (BlockPos rel : run) {
+                    pipeMb += cellMb(helper.getLevel(), helper.absolutePos(rel));
+                }
+                if (sourceMb + sinkMb + pipeMb != sourceStart + sinkStart + 3 * packed) {
+                    helper.fail("fluid not conserved: " + sourceMb + " + " + sinkMb + " + " + pipeMb);
+                    return;
+                }
+                if (sourceMb - sinkMb < 150) {
+                    helper.fail("tanks already equalized at the sample tick (diff "
+                            + (sourceMb - sinkMb) + ") — the idle settle would mask the shed");
+                    return;
+                }
+                if (sinkMb <= sinkStart) {
+                    helper.fail("no flow reached the sink");
+                    return;
+                }
+                for (BlockPos rel : run) {
+                    int mb = cellMb(helper.getLevel(), helper.absolutePos(rel));
+                    if (mb >= 200) {
+                        helper.fail("mid-equalization cell " + rel + " still holds " + mb
+                                + " mB — the packed run is not tracking the falling waterline");
+                        return;
+                    }
+                    if (mb < 15) {
+                        helper.fail("cell " + rel + " shed below the flow-depth floor: " + mb + " mB");
+                        return;
+                    }
+                }
+                helper.succeed();
+            });
+        });
     }
 }

@@ -1,17 +1,15 @@
 package de.devin.pipesnphysics.display;
 
-import net.createmod.catnip.lang.LangNumberFormat;
-import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.MutableComponent;
 import net.neoforged.neoforge.fluids.FluidStack;
 import net.neoforged.neoforge.fluids.capability.IFluidHandler;
 
 import java.util.List;
 
+import static de.devin.pipesnphysics.display.DisplayLine.amountOfCapacity;
 import static de.devin.pipesnphysics.display.DisplayLine.dash;
 import static de.devin.pipesnphysics.display.DisplayLine.mbAmount;
 import static de.devin.pipesnphysics.display.DisplayLine.percent;
-import static de.devin.pipesnphysics.display.DisplayLine.tr;
 
 /**
  * One selectable readout a display link can pull off a fluid vessel. Each metric turns
@@ -19,7 +17,7 @@ import static de.devin.pipesnphysics.display.DisplayLine.tr;
  * scroll option in the link GUI indexes into {@link #METRICS}.
  */
 public enum TankDisplayMetric {
-    SUMMARY("summary", TankDisplayMetric::summary),
+    SUMMARY("summary", r -> amountOfCapacity(r.amount(), r.capacity())),
     AMOUNT("amount", r -> mbAmount(r.amount())),
     CAPACITY("capacity", r -> mbAmount(r.capacity())),
     FILL("fill", r -> percent(r.fillPercent())),
@@ -73,12 +71,5 @@ public enum TankDisplayMetric {
         public double fillPercent() {
             return capacity > 0 ? 100.0 * amount / capacity : 0;
         }
-    }
-
-    private static MutableComponent summary(Readout r) {
-        return Component.literal(LangNumberFormat.format(r.amount()))
-                .append(" / ").append(Component.literal(LangNumberFormat.format(r.capacity())))
-                .append(tr("display_source.unit.mb_amount"))
-                .append(" (").append(percent(r.fillPercent())).append(")");
     }
 }

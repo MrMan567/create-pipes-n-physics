@@ -175,6 +175,48 @@ public class OpenEndTests {
     }
 
     /**
+     * NOTHING may leak into Create's own transport around a pump: with the engine enabled, no
+     * Create-side {@code Flow} may ever form on the pump's connections, and every mB the tank
+     * gives must be in the mouth's accumulation buffer — the sum conserved exactly. This is the
+     * mechanism guard behind {@code pumpSpillsLowSourceOncePastBlockThreshold}: the pump
+     * behaviour's SUBCLASS tick re-pressurizes its connections after the (cancelled) super call,
+     * and when a peer addon's HEAD-hijack of the base tick won the injector race (CROWNS's
+     * reimplementation — the same race the heartbeat was moved for), Create managed the pump's
+     * flows against that pressure and its {@code FluidNetwork} ran a PARALLEL ~|speed|/2 mB/t
+     * transfer into Create's own endpoint buffers — fluid vanishing from the engine's books, the
+     * spill buffer stalling 89 mB short of its block threshold. {@code PumpTransferTickMixin}
+     * cancels the subclass tick itself (no peer targets it), which removes the pressure source
+     * and makes any reimplemented pipe transport inert.
+     */
+    @GameTest(template = "openend/open_end", templateNamespace = PipesNPhysics.ID, timeoutTicks = 100)
+    public static void pumpSpillLeaksNothingToCreateTransport(GameTestHelper helper) {
+        BlockPos tank = new BlockPos(2, 1, 0);
+        BlockPos space = new BlockPos(0, 1, 0);
+        BlockPos pump = new BlockPos(1, 1, 0);
+        fill(helper, tank, 600);
+        // Sampled well past Create's flow spin-up (~17 ticks) and before the tank runs dry.
+        helper.runAfterDelay(30, () -> {
+            var transport = BlockEntityBehaviour.get(
+                    helper.getLevel(), helper.absolutePos(pump), FluidTransportBehaviour.TYPE);
+            if (transport != null && (transport.getFlow(Direction.EAST) != null
+                    || transport.getFlow(Direction.WEST) != null)) {
+                helper.fail("Create-side Flow formed on the pump — its transport tick is not "
+                        + "suppressed (a peer addon won the base-tick race?)");
+                return;
+            }
+            IFluidHandler mouth = OpenEndPipes.existing(helper.getLevel(), helper.absolutePos(space));
+            int buffered = mouth == null ? 0 : mouth.getFluidInTank(0).getAmount();
+            int held = amount(helper, tank);
+            if (held + buffered != 600) {
+                helper.fail("fluid vanished in transit: tank " + held + " + mouth buffer "
+                        + buffered + " != 600 — a parallel Create transfer is draining the tank");
+                return;
+            }
+            helper.succeed();
+        });
+    }
+
+    /**
      * Conservation: a spill must never MINT a block. With only 500 mB of network fluid — less than
      * one source's 1000 mB — the open end's buffer can hold it but must NOT place a source block, or
      * fluid is created from nothing (the user's "placed a block but only took ~500 mB" duplication).

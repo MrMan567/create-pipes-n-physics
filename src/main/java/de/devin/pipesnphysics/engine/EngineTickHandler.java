@@ -1,5 +1,6 @@
 package de.devin.pipesnphysics.engine;
 
+import com.simibubi.create.foundation.blockEntity.SmartBlockEntity;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.compat.SableCompat;
 import de.devin.pipesnphysics.engine.boundary.RelayDetector;
@@ -70,6 +71,24 @@ public final class EngineTickHandler {
     private static final Map<ResourceKey<Level>, Map<BlockPos, Long>> QUIET = new HashMap<>();
 
     private EngineTickHandler() {}
+
+    /**
+     * The ONE decision for suppressing Create's own fluid transport at a block entity — shared
+     * by every cancel site (the base behaviour tick AND the pump behaviour's subclass tick), so
+     * they can never disagree. True when the engine owns transport here: engine enabled and the
+     * block is real — or virtual on a PONDER client, where the engine runs live and Create's
+     * animation would fight it. Server-side virtual blocks and the flag-off case keep Create's
+     * behavior untouched.
+     */
+    public static boolean suppressesCreateTransport(SmartBlockEntity blockEntity) {
+        if (!PipesNPhysicsConfig.ENABLE_ENGINE.get()) return false;
+        Level level = blockEntity.getLevel();
+        if (level == null) return false;
+        if (blockEntity.isVirtual()) {
+            return level.isClientSide() && PipesNPhysicsConfig.ENABLE_PONDER_ENGINE.get();
+        }
+        return true;
+    }
 
     /** Routine per-tick mark; honored unless the network is sleeping. */
     public static void markDirty(Level level, BlockPos pos) {

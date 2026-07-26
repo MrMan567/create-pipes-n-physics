@@ -2,9 +2,7 @@ package de.devin.pipesnphysics.mixin;
 
 import com.simibubi.create.content.fluids.FluidTransportBehaviour;
 import com.simibubi.create.foundation.blockEntity.behaviour.BlockEntityBehaviour;
-import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.engine.EngineTickHandler;
-import net.minecraft.world.level.Level;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -25,15 +23,19 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * {@code tick()} with an {@code @At("HEAD") cancellable} injector — CROWNS does exactly this
  * ({@code FluidTransportBehaviourMixin} reimplements the tick to mix real-gas state, cancelling at
  * HEAD with default priority 1000). Two HEAD-cancellable injectors race: whichever executes first
- * cancels, and the other's callback is skipped by the injected cancellation return. Winning here
- * keeps CROWNS's reimplemented transport from running, which is tidiest — but it is NOT load-bearing,
- * because that reimplementation is inert under our engine anyway (its {@code manageFlows} needs
- * Create pump pressure, which {@link PumpBlockEntityMixin} cancels). The one thing that MUST fire
- * every tick — {@link EngineTickHandler#markDirty}, the engine's heartbeat — no longer rides this
- * cancel: it lives on the pipe block entity's own tick ({@link PipeHeartbeatMixin}), which no
- * behaviour-level cancel can preempt. So if CROWNS wins this race the engine still wakes and moves
- * fluid. CROWNS's per-endpoint gas-state mixing still runs through {@code FluidTank.fill}, which our
- * IFluidHandler transfers hit.
+ * cancels, and the other's callback is skipped by the injected cancellation return — and the race
+ * has been OBSERVED going either way across launches, so nothing may depend on winning it. The two
+ * things that must survive a loss are both hosted race-proof elsewhere:
+ * {@link EngineTickHandler#markDirty}, the engine's heartbeat, lives on the pipe block entity's own
+ * tick ({@link PipeHeartbeatMixin}); and the PUMP's transport suppression lives on the pump
+ * behaviour's SUBCLASS tick ({@link PumpTransferTickMixin}) — the pump override re-pressurizes its
+ * connections AFTER {@code super.tick()}, so this base-level cancel never stops it, and a peer
+ * winning the race then ran Create's flow management against real pump pressure: a PARALLEL
+ * Create-side transfer the engine never saw, silently draining sources into Create's own endpoint
+ * buffers (the pump-spill flake). With the pump tick cancelled at its own method, a peer's
+ * reimplemented pipe transport is genuinely inert — no pressure source remains, so no flow can
+ * start. CROWNS's per-endpoint gas-state mixing still runs through {@code FluidTank.fill}, which
+ * our IFluidHandler transfers hit.
  */
 @Mixin(value = FluidTransportBehaviour.class, remap = false, priority = 1500)
 public abstract class GravityFlowMixin extends BlockEntityBehaviour {
@@ -41,27 +43,13 @@ public abstract class GravityFlowMixin extends BlockEntityBehaviour {
 
     @Inject(method = "tick", at = @At("HEAD"), cancellable = true)
     private void pipesnphysics$cancelCreateTransport(CallbackInfo ci) {
-        if (!PipesNPhysicsConfig.ENABLE_ENGINE.get()) return;
-        Level level = blockEntity.getLevel();
-        if (blockEntity.isVirtual()) {
-            // Our engine now runs live in Ponder (a client-side virtual level), so cancel Create's
-            // transport there and let PonderEngineDriver own the fluid. Schematic ghosts are also
-            // client-virtual but never tick transport, so this only bites ponder; server-side virtual
-            // and the flag-off case keep Create's animation (the old behavior). Checked without
-            // referencing PonderLevel, so this COMMON mixin needs no client-only class.
-            if (level != null && level.isClientSide() && PipesNPhysicsConfig.ENABLE_PONDER_ENGINE.get()) {
-                ci.cancel();
-            }
-            return;
-        }
-        if (level == null) return;
-        // The heartbeat (markDirty) lives on the block-entity tick now (PipeHeartbeatMixin), so it
-        // survives even when a peer addon wins this HEAD-cancel race and skips this callback.
-
-        // Create's Flow objects are no longer written or drawn under the engine (the pipe render
-        // mixins hide them; PipeFluidRenderer draws the cells' stored content), so their fill
-        // cosmetics (tickFlowProgress) are not ticked either — a stale persisted flow from an
-        // older world stays frozen and hidden.
-        ci.cancel();
+        // The suppression decision is shared with the pump's subclass-tick cancel
+        // (PumpTransferTickMixin) so the two sites can never disagree: engine on + real block, or
+        // ponder's client-side virtual level where the engine runs live (PonderEngineDriver owns
+        // the fluid; server-side virtual and flag-off keep Create's animation). Create's Flow
+        // objects are then no longer written, ticked, or drawn — the pipe render mixins hide them
+        // and PipeFluidRenderer draws the cells' stored content — so a stale persisted flow from
+        // an older world stays frozen and hidden.
+        if (EngineTickHandler.suppressesCreateTransport(blockEntity)) ci.cancel();
     }
 }

@@ -17,7 +17,6 @@ import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.api.FluidHandlerApi;
 import de.devin.pipesnphysics.api.FluidHandlerRole;
 import de.devin.pipesnphysics.client.PipeStatusText;
-import com.simibubi.create.content.redstone.displayLink.DisplayLinkBlock;
 import com.simibubi.create.content.redstone.displayLink.DisplayLinkBlockEntity;
 import com.simibubi.create.content.redstone.displayLink.DisplayLinkContext;
 import com.simibubi.create.content.redstone.displayLink.target.DisplayTargetStats;
@@ -315,6 +314,20 @@ public class GoggleProbeTests {
             }
             if (payload.fluid().isEmpty()) {
                 helper.fail("settled full pipe probed EMPTY — goggle would call a balanced pipe 'dry'");
+                return;
+            }
+            // The display SUMMARY of a non-flowing pipe carries its held volume — a board
+            // watching a settling run shows the fluid it still holds, not a bare "Idle".
+            if (payload.holdsMb() <= 0) { helper.fail("settled full pipe reports holds=0"); return; }
+            PipeDisplayMetric.Readout readout = new PipeDisplayMetric.Readout(payload, 0, 0);
+            String summary = PipeDisplayMetric.SUMMARY.format(readout).getString();
+            if (!summary.contains(LangNumberFormat.format(payload.holdsMb()))) {
+                helper.fail("idle pipe summary hides the held volume: '" + summary + "'");
+                return;
+            }
+            String fillLine = PipeDisplayMetric.FILL.format(readout).getString();
+            if (!fillLine.startsWith(LangNumberFormat.format(payload.holdsMb()))) {
+                helper.fail("pipe fill metric did not reflect the stored volume: '" + fillLine + "'");
             }
         });
     }
@@ -372,16 +385,11 @@ public class GoggleProbeTests {
      * to the selected readout through the real {@code provideText} path. The link GUI and
      * board rendering are Create's — verify those visually in-game.
      */
-    @GameTest(template = "common/empty_canvas", templateNamespace = PipesNPhysics.ID, timeoutTicks = 100)
+    @GameTest(template = "display/tank_with_link", templateNamespace = PipesNPhysics.ID, timeoutTicks = 100)
     public static void tankDisplaySourceReadsTheMultiblockTotal(GameTestHelper helper) {
-        var tank = AllBlocks.FLUID_TANK.get();
-        BlockPos lower = new BlockPos(1, 1, 0);
-        BlockPos upper = new BlockPos(1, 2, 0);
-        BlockPos link = new BlockPos(1, 3, 0);
-        helper.setBlock(lower, tank.defaultBlockState());
-        helper.setBlock(upper, tank.defaultBlockState());
-        helper.setBlock(link, AllBlocks.DISPLAY_LINK.get().defaultBlockState()
-                .setValue(DisplayLinkBlock.FACING, Direction.UP)); // faces up = glued to the tank below
+        // tank_with_link: a 2-tall tank with a display link glued on top (faces up = reads below)
+        BlockPos lower = new BlockPos(0, 1, 0);
+        BlockPos link = new BlockPos(0, 3, 0);
         helper.runAfterDelay(20, () -> { // let the two cells merge into one vessel
             fill(helper, lower, 4000);
             if (!(helper.getBlockEntity(link) instanceof DisplayLinkBlockEntity linkBe)) {
@@ -476,21 +484,13 @@ public class GoggleProbeTests {
      * resolves through a freshly built graph, exactly how the command reads it. An equalizing
      * run must show multiple samples with real movement, capped at {@code SAMPLES}.
      */
-    @GameTest(template = "common/empty_canvas", templateNamespace = PipesNPhysics.ID, timeoutTicks = 120)
+    @GameTest(template = "common/top_row_run", templateNamespace = PipesNPhysics.ID, timeoutTicks = 120)
     public static void flowTraceRecordsPerEdgeHistoryAcrossRebuilds(GameTestHelper helper) {
-        var tank = AllBlocks.FLUID_TANK.get();
-        var pipe = AllBlocks.FLUID_PIPE.get();
+        // top_row_run: two 2-tall tanks at x0/x4 joined by the top-row 3-cell run
         BlockPos tankA = new BlockPos(0, 1, 0);
-        BlockPos tankB = new BlockPos(4, 1, 0);
         List<BlockPos> run = List.of(
                 new BlockPos(1, 2, 0), new BlockPos(2, 2, 0), new BlockPos(3, 2, 0));
-        helper.setBlock(tankA, tank.defaultBlockState());
-        helper.setBlock(tankA.above(), tank.defaultBlockState());
-        helper.setBlock(tankB, tank.defaultBlockState());
-        helper.setBlock(tankB.above(), tank.defaultBlockState());
-        for (BlockPos rel : run) {
-            helper.setBlock(rel, pipeState(pipe, Direction.EAST, Direction.WEST));
-        }
+        BlockPos tankB = new BlockPos(4, 1, 0);
         helper.runAfterDelay(5, () -> {
             fill(helper, tankA, 14000); // well above the lip equilibrium: a sustained flow
             fill(helper, tankB, 4000);

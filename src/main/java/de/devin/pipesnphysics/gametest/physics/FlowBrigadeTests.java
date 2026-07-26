@@ -846,23 +846,18 @@ public class FlowBrigadeTests {
      * into the bottom tank (the empty-reservoir pour gate: gas never pours DOWN into an empty
      * vessel). Skips when no lighter-than-air fluid is registered.
      */
-    @GameTest(template = "common/empty_canvas", templateNamespace = PipesNPhysics.ID, timeoutTicks = 160)
+    @GameTest(template = "gas/stranded_riser", templateNamespace = PipesNPhysics.ID, timeoutTicks = 160)
     public static void strandedGasRisesIntoTheTankAbove(GameTestHelper helper) {
         Fluid gas = lighterThanAirFluid();
         if (gas == null) {
             helper.succeed();
             return;
         }
-        var tank = AllBlocks.FLUID_TANK.get();
-        var pipe = AllBlocks.FLUID_PIPE.get();
+        // stranded_riser: bottom tank, two vertical pipe cells, top tank — one column at x0
         BlockPos bottomTank = new BlockPos(0, 1, 0);
         BlockPos lowCell = new BlockPos(0, 2, 0);
         BlockPos highCell = new BlockPos(0, 3, 0);
         BlockPos topTank = new BlockPos(0, 4, 0);
-        helper.setBlock(bottomTank, tank.defaultBlockState());
-        helper.setBlock(topTank, tank.defaultBlockState());
-        helper.setBlock(lowCell, pipeState(pipe, Direction.UP, Direction.DOWN));
-        helper.setBlock(highCell, pipeState(pipe, Direction.UP, Direction.DOWN));
 
         helper.runAfterDelay(10, () -> {
             handler(helper, topTank).fill(new FluidStack(gas, 1000), IFluidHandler.FluidAction.EXECUTE);
@@ -904,23 +899,18 @@ public class FlowBrigadeTests {
      * strip showed as {@code ←20 ·49 ←20 …} ("the gas does not really equalize" report).
      * Skips when no lighter-than-air fluid is registered.
      */
-    @GameTest(template = "common/empty_canvas", templateNamespace = PipesNPhysics.ID, timeoutTicks = 400)
+    @GameTest(template = "gas/equal_top_tanks", templateNamespace = PipesNPhysics.ID, timeoutTicks = 400)
     public static void gasEqualizesBetweenEqualTopTanks(GameTestHelper helper) {
         Fluid gas = lighterThanAirFluid();
         if (gas == null) {
             helper.succeed();
             return;
         }
-        var tank = AllBlocks.FLUID_TANK.get();
-        var pipe = AllBlocks.FLUID_PIPE.get();
-        BlockPos shortTank = new BlockPos(0, 4, 0);  // 3-tall: y 2..4
-        BlockPos tallTank = new BlockPos(3, 4, 0);   // 4-tall: y 1..4 — same ceiling
-        for (int y = 2; y <= 4; y++) helper.setBlock(new BlockPos(0, y, 0), tank.defaultBlockState());
-        for (int y = 1; y <= 4; y++) helper.setBlock(new BlockPos(3, y, 0), tank.defaultBlockState());
+        // equal_top_tanks: 3-tall tank at x0 (y 2..4) and 4-tall at x3 (y 1..4), same
+        // ceiling, joined by the top-row 2-cell run
+        BlockPos shortTank = new BlockPos(0, 4, 0);
+        BlockPos tallTank = new BlockPos(3, 4, 0);
         List<BlockPos> run = List.of(new BlockPos(1, 4, 0), new BlockPos(2, 4, 0));
-        for (BlockPos rel : run) {
-            helper.setBlock(rel, pipeState(pipe, Direction.EAST, Direction.WEST));
-        }
 
         helper.runAfterDelay(10, () -> {
             handler(helper, shortTank).fill(new FluidStack(gas, 3900), IFluidHandler.FluidAction.EXECUTE);
@@ -960,25 +950,17 @@ public class FlowBrigadeTests {
      * imbalance; sampled MID-FLOW, the run's cells must already hang near the interface profile
      * (~200 mB), far above the plug depth (~64) the bail left them at. Skips without a gas.
      */
-    @GameTest(template = "common/empty_canvas", templateNamespace = PipesNPhysics.ID, timeoutTicks = 160)
+    @GameTest(template = "gas/tall_tank_pair", templateNamespace = PipesNPhysics.ID, timeoutTicks = 160)
     public static void flowingGasRunPacksTowardTheInterface(GameTestHelper helper) {
         Fluid gas = lighterThanAirFluid();
         if (gas == null) {
             helper.succeed();
             return;
         }
-        var tank = AllBlocks.FLUID_TANK.get();
-        var pipe = AllBlocks.FLUID_PIPE.get();
+        // tall_tank_pair: two 4-tall tanks at x0/x3 joined by the top-row 2-cell run
         BlockPos tankA = new BlockPos(0, 1, 0);
         BlockPos tankB = new BlockPos(3, 1, 0);
         List<BlockPos> run = List.of(new BlockPos(1, 4, 0), new BlockPos(2, 4, 0));
-        for (int y = 1; y <= 4; y++) {
-            helper.setBlock(new BlockPos(0, y, 0), tank.defaultBlockState());
-            helper.setBlock(new BlockPos(3, y, 0), tank.defaultBlockState());
-        }
-        for (BlockPos rel : run) {
-            helper.setBlock(rel, pipeState(pipe, Direction.EAST, Direction.WEST));
-        }
 
         helper.runAfterDelay(10, () -> {
             handler(helper, tankA).fill(new FluidStack(gas, 8000), IFluidHandler.FluidAction.EXECUTE);

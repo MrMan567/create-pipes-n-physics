@@ -607,21 +607,13 @@ public class GravitySiphonTests {
      * supply probe → wire-remnant delivery), and the settled source never regains fluid
      * (per-end pour gates — pouring into a tank is a gravity act, gated on ITS OWN line).
      */
-    @GameTest(template = "common/empty_canvas", templateNamespace = PipesNPhysics.ID, timeoutTicks = 240)
+    @GameTest(template = "common/top_row_run", templateNamespace = PipesNPhysics.ID, timeoutTicks = 240)
     public static void lipEquilibriumMarginReachesTheSinkAndQuiets(GameTestHelper helper) {
-        var tank = AllBlocks.FLUID_TANK.get();
-        var pipe = AllBlocks.FLUID_PIPE.get();
+        // top_row_run: two 2-tall tanks at x0/x4 joined by the top-row 3-cell run
         BlockPos tankA = new BlockPos(0, 1, 0);
         BlockPos tankB = new BlockPos(4, 1, 0);
         List<BlockPos> run = List.of(
                 new BlockPos(1, 2, 0), new BlockPos(2, 2, 0), new BlockPos(3, 2, 0));
-        helper.setBlock(tankA, tank.defaultBlockState());
-        helper.setBlock(tankA.above(), tank.defaultBlockState());
-        helper.setBlock(tankB, tank.defaultBlockState());
-        helper.setBlock(tankB.above(), tank.defaultBlockState());
-        for (BlockPos rel : run) {
-            helper.setBlock(rel, pipeState(pipe, Direction.EAST, Direction.WEST));
-        }
 
         // 2-tall tank: lip equilibrium = fill where rendered surface (base+0.3125+f·1.4375) meets
         // the top-row aperture bottom (base+1.375) → f=73.91% = 11826 mB. Start 14 mB above it.
@@ -678,21 +670,13 @@ public class GravitySiphonTests {
      * gate now uses each end's OWN line (pouring in is a gravity act). The film instead spreads
      * along the run and pours into the LOW sink, minus the anti-slosh dregs.
      */
-    @GameTest(template = "common/empty_canvas", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
+    @GameTest(template = "common/top_row_run", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
     public static void idleFilmBesideAHigherTankNeverPoursBackUphill(GameTestHelper helper) {
-        var tank = AllBlocks.FLUID_TANK.get();
-        var pipe = AllBlocks.FLUID_PIPE.get();
+        // top_row_run: two 2-tall tanks at x0/x4 joined by the top-row 3-cell run
         BlockPos tankA = new BlockPos(0, 1, 0);
         BlockPos tankB = new BlockPos(4, 1, 0);
         List<BlockPos> run = List.of(
                 new BlockPos(1, 2, 0), new BlockPos(2, 2, 0), new BlockPos(3, 2, 0));
-        helper.setBlock(tankA, tank.defaultBlockState());
-        helper.setBlock(tankA.above(), tank.defaultBlockState());
-        helper.setBlock(tankB, tank.defaultBlockState());
-        helper.setBlock(tankB.above(), tank.defaultBlockState());
-        for (BlockPos rel : run) {
-            helper.setBlock(rel, pipeState(pipe, Direction.EAST, Direction.WEST));
-        }
 
         // A rests exactly AT its lip equilibrium (11826 → surface a hair under the aperture), so
         // no flow pass ever assembles; B far below the bore. The 30 mB film beside A stands under

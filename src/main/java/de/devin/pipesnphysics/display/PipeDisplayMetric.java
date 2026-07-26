@@ -1,5 +1,6 @@
 package de.devin.pipesnphysics.display;
 
+import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.engine.net.PipeStatusPayload;
 import net.createmod.catnip.lang.LangNumberFormat;
 import net.minecraft.core.Direction;
@@ -8,9 +9,11 @@ import net.minecraft.network.chat.MutableComponent;
 
 import java.util.List;
 
+import static de.devin.pipesnphysics.display.DisplayLine.amountOfCapacity;
 import static de.devin.pipesnphysics.display.DisplayLine.blocks;
 import static de.devin.pipesnphysics.display.DisplayLine.blocksUp;
 import static de.devin.pipesnphysics.display.DisplayLine.dash;
+import static de.devin.pipesnphysics.display.DisplayLine.mbAmount;
 import static de.devin.pipesnphysics.display.DisplayLine.mbRate;
 import static de.devin.pipesnphysics.display.DisplayLine.percent;
 import static de.devin.pipesnphysics.display.DisplayLine.tr;
@@ -29,6 +32,7 @@ public enum PipeDisplayMetric {
     LIFT_LEFT("lift", r -> r.data().hasHeadroom() ? blocksUp(r.data().headroomBlocks()) : dash()),
     STATUS("status", r -> status(r.data())),
     SUMMARY("summary", PipeDisplayMetric::pipeSummary),
+    FILL("fill", PipeDisplayMetric::pipeFill),
 
     CAPACITY("capacity", r -> mbRate(r.cap())),
     THROUGHPUT("throughput", r -> percent(r.throughput())),
@@ -36,9 +40,9 @@ public enum PipeDisplayMetric {
     LIMITER("limiter", PipeDisplayMetric::limiter),
     PUMP_SUMMARY("summary", PipeDisplayMetric::pumpSummary);
 
-    /** The pipe source's options, in scroll order. */
+    /** The pipe source's options, in scroll order (append-only — links store the index). */
     public static final List<PipeDisplayMetric> PIPE_METRICS =
-            List.of(FLOW, FLUID, DIRECTION, PRESSURE, LIFT_LEFT, STATUS, SUMMARY);
+            List.of(FLOW, FLUID, DIRECTION, PRESSURE, LIFT_LEFT, STATUS, SUMMARY, FILL);
     /** The pump source's options, in scroll order. */
     public static final List<PipeDisplayMetric> PUMP_METRICS =
             List.of(FLOW, CAPACITY, THROUGHPUT, CAN_LIFT, LIMITER, FLUID, STATUS, PUMP_SUMMARY);
@@ -77,11 +81,23 @@ public enum PipeDisplayMetric {
 
     private static MutableComponent pipeSummary(Readout r) {
         PipeStatusPayload d = r.data();
-        if (d.status() != PipeStatusPayload.STATUS_FLOWING || d.mbPerTick() <= 0) return status(d);
+        if (d.status() != PipeStatusPayload.STATUS_FLOWING || d.mbPerTick() <= 0) {
+            // A non-flowing pipe still HOLDS fluid (a settling run drains toward its
+            // profile over many ticks) — show the held volume beside the state.
+            MutableComponent line = status(d);
+            if (d.holdsMb() > 0) line.append(" · ").append(mbAmount(d.holdsMb()));
+            return line;
+        }
         MutableComponent line = mbRate(d.mbPerTick());
         if (d.flowDirection() != null) line.append(" ").append(tr("direction." + d.flowDirection().getName()));
         if (!d.fluid().isEmpty()) line.append(" (").append(d.fluid().getHoverName()).append(")");
         return line;
+    }
+
+    /** The cell's stored volume against the per-cell capacity; wire mode stores nothing. */
+    private static MutableComponent pipeFill(Readout r) {
+        int capacity = PipesNPhysicsConfig.PIPE_VOLUME_PER_CELL.get();
+        return capacity > 0 ? amountOfCapacity(r.data().holdsMb(), capacity) : dash();
     }
 
     private static MutableComponent pumpSummary(Readout r) {

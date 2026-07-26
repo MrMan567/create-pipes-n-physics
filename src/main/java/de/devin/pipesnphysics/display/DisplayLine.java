@@ -18,6 +18,14 @@ final class DisplayLine {
         return Component.literal(LangNumberFormat.format(v)).append(tr("display_source.unit.mb_amount"));
     }
 
+    /** A stored volume against its capacity, "N / M mB (P%)". */
+    static MutableComponent amountOfCapacity(double amount, double capacity) {
+        return Component.literal(LangNumberFormat.format(amount))
+                .append(" / ").append(Component.literal(LangNumberFormat.format(capacity)))
+                .append(tr("display_source.unit.mb_amount"))
+                .append(" (").append(percent(capacity > 0 ? 100.0 * amount / capacity : 0)).append(")");
+    }
+
     static MutableComponent blocks(double v) {
         return Component.literal(LangNumberFormat.format(v)).append(tr("display_source.unit.blocks"));
     }

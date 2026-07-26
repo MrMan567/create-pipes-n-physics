@@ -525,25 +525,17 @@ public class RenderingTests {
      * between them must settle at ~half-hanging — never dry (the old full freeze) and never
      * full. Tolerance matches the liquid twin (the draw band). Skips without a gas fluid.
      */
-    @GameTest(template = "common/empty_canvas", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
+    @GameTest(template = "gas/low_tank_pair", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
     public static void settledGasPipeMatchesTankInterface(GameTestHelper helper) {
         Fluid gas = lighterThanAirFluid();
         if (gas == null) {
             helper.succeed();
             return;
         }
-        var tank = AllBlocks.FLUID_TANK.get();
-        var pipe = AllBlocks.FLUID_PIPE.get();
+        // low_tank_pair: two 2-tall tanks at x0/x3 joined by the top-row 2-cell run
         BlockPos tankA = new BlockPos(0, 1, 0);
         BlockPos tankB = new BlockPos(3, 1, 0);
         List<BlockPos> run = List.of(new BlockPos(1, 2, 0), new BlockPos(2, 2, 0));
-        for (int y = 1; y <= 2; y++) {
-            helper.setBlock(new BlockPos(0, y, 0), tank.defaultBlockState());
-            helper.setBlock(new BlockPos(3, y, 0), tank.defaultBlockState());
-        }
-        for (BlockPos rel : run) {
-            helper.setBlock(rel, pipeState(pipe, Direction.EAST, Direction.WEST));
-        }
 
         // 2-tall tank (16000): interface = top − (0.25 + f·1.4375); 2783 mB puts it at rel 2.5 —
         // the exact centre of the top-row bore (2.3125..2.6875) → expected hanging fill ≈ 50%.

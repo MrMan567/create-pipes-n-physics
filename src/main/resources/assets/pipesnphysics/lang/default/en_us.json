@@ -86,6 +86,7 @@
   "pipesnphysics.display_source.pipe_metric.lift": "Lift left",
   "pipesnphysics.display_source.pipe_metric.status": "Status",
   "pipesnphysics.display_source.pipe_metric.summary": "Summary",
+  "pipesnphysics.display_source.pipe_metric.fill": "Fill level",
 
   "pipesnphysics.display_source.pump_metric.title": "Metric",
   "pipesnphysics.display_source.pump_metric.flow": "Output rate",

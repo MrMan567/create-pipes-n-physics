@@ -34,9 +34,17 @@ public final class SettlePass {
                 // A flowing run still PRESSURIZES: its submerged cells top up from the end
                 // reservoirs toward the waterline alongside the flow (fill-only, no
                 // redistribution — see SettlingRun.topUp), source-side-first. Stamps stay.
-                if (new SettlingRun(network, ledger, solution, edge, false).topUp()) {
-                    ledger.markSettling();
+                // Read the brigade's movement BEFORE topUp adds settle moves to the ledger:
+                // only a run that REALLY carried fluid also sheds toward the grade line — a
+                // stalled or dead-headed line keeps its packed column.
+                boolean carried = ledger.edgeMovedMb()[edge.index()] > 0;
+                SettlingRun run = new SettlingRun(network, ledger, solution, edge, false);
+                boolean moved = run.topUp();
+                if (carried) {
+                    moved |= run.shed(FlowNetwork.flowDepthMb(
+                            solvedRate(edge.index()), network.cellCapacity));
                 }
+                if (moved) ledger.markSettling();
                 continue;
             }
             if (new SettlingRun(network, ledger, solution, edge, solution.isBackedUp(edge.index())).settle()) {
@@ -47,6 +55,15 @@ public final class SettlePass {
         for (Node node : network.graph.nodes()) {
             if (node.isJunction() || node.isClosedGate()) settleSlot(node, flowedEdges);
         }
+    }
+
+    /** The strongest solved rate over this edge across the tick's fluid passes. */
+    private int solvedRate(int edgeIndex) {
+        double strongest = 0;
+        for (Solution.FlowPass pass : solution.passes()) {
+            strongest = Math.max(strongest, Math.abs(pass.edgeFlow()[edgeIndex]));
+        }
+        return (int) Math.round(strongest);
     }
 
     /**

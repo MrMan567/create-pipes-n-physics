@@ -168,6 +168,69 @@ final class SettlingRun {
         return moved;
     }
 
+    /**
+     * The drain dual of {@link #topUp} for a run that REALLY carried fluid this tick: cells
+     * standing above the solved hydraulic grade line — the display heads interpolated along the
+     * run, the same line the goggle's gauge pressure reads — shed their excess into the end
+     * reservoirs, so a run packed full by an earlier fast phase tracks the falling line while two
+     * tanks equalize instead of staying full until the flow dies ("the pipes stay full of fluid
+     * until it has settled"). Strictly bounded: no cell drops below the flow depth the brigade's
+     * plug needs, pours ride {@link #pourIntoReservoir}'s walk gated on each end's OWN surface
+     * (nothing climbs, open mouths get nothing), the shed runs ONLY while the line wets every
+     * cell's window end to end — a cell the line cannot reach means SUCTION is carrying fluid
+     * there (a working siphon's leg or crest), and draining any of that column would break the
+     * prime, so such a run is left entirely alone — and pump-adjacent edges never shed (their
+     * column is pump-driven, not gravity-shaped). A gas run keeps the plain top-up (a gas head
+     * is not an elevation — deferred mirror).
+     */
+    boolean shed(int depthFloorMb) {
+        if (cells.isEmpty()) return false;
+        mirrored = lighterThanAir(settleMedium());
+        if (mirrored) return false;
+        // A pump-adjacent run is pressure/suction-driven, not a gravity conduit: a discharge
+        // line legitimately packs full-bore and shedding a suction line back into its source
+        // would fight the pump's own pull. The grade line is a GRAVITY construct — pumped
+        // edges keep their column.
+        if (network.graph.node(edge.a()).isPump() || network.graph.node(edge.b()).isPump()) {
+            return false;
+        }
+        // The grade line hangs between the ends' RESTING lines — a finite reservoir's RENDERED
+        // surface (the settle's datum: the pipe must track the fluid the player sees, not the
+        // liquid head riding up to a quarter block above a Create tank's visible fill), a solved
+        // head only at a junction/pump end. A mouth or empty end contributes none: no line, no
+        // shedding.
+        Double lineA = restingLine(edge.a(), edge.b());
+        Double lineB = restingLine(edge.b(), edge.a());
+        if (lineA == null || lineB == null) return false;
+        int[] toA = floodedTargets(lineA, lineB, depthFloorMb, edge.a());
+        int[] toB = floodedTargets(lineA, lineB, depthFloorMb, edge.b());
+        if (toA == null || toB == null) return false;
+        boolean moved = pourIntoReservoir(toA, false);
+        moved |= pourIntoReservoir(toB, true);
+        return moved;
+    }
+
+    /**
+     * Shed targets for pours into one end: the grade line interpolated at each cell — raised to
+     * the receiving reservoir's own surface, so the pour stays a downhill act — mapped onto the
+     * cell's window and floored at the flow depth. Null (no shedding at all) as soon as the LINE
+     * misses one cell's window: the conduit is not flooded end to end, and what stands in the
+     * unreached cells is suction-held column.
+     */
+    private int[] floodedTargets(double headA, double headB, int depthFloorMb, int endIndex) {
+        Reservoir end = network.reservoirAt(endIndex);
+        double endSurface = end != null && end.isFiniteReservoir()
+                ? surfaceOf(end) : Double.NEGATIVE_INFINITY;
+        int[] target = new int[cells.size()];
+        for (int i = 0; i < cells.size(); i++) {
+            double line = headA + (headB - headA) * ((i + 1.0) / (cells.size() + 1));
+            if (windowFillFrac(cells.get(i), line) <= 0) return null;
+            double frac = windowFillFrac(cells.get(i), Math.max(line, endSurface));
+            target[i] = Math.max((int) Math.round(frac * network.cellCapacity), depthFloorMb);
+        }
+        return target;
+    }
+
     // ------------------------------------------------------------ the elevation frame
     // A gas is a liquid under inverted gravity, so its rest state is the SAME math run in a
     // MIRRORED frame: every elevation negated, min/max meanings preserved. All settle logic
