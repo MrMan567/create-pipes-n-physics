@@ -364,9 +364,8 @@ public final class BoundaryColumn {
     public static BoundaryColumn forOpenEnd(Level level, Node openEndNode, boolean networkSpilled) {
         BlockPos space = openEndNode.pos();
         double bottom = SableCompat.getWorldY(level, space) - 0.5;
-        FluidStack intake = drawsInThrough(openEndNode.openFace())
-                ? intakeFluid(level, space, networkSpilled)
-                : FluidStack.EMPTY;
+        FluidStack intake = intakeFluid(level, space, networkSpilled,
+                drawsInThrough(openEndNode.openFace()));
         boolean canIntake = !intake.isEmpty();
         // Capacity (and so capacitance) is the atmospheric stand-in — a stiff boundary at
         // the mouth — but contentMb carries the HONEST per-tick yield ({@code intake}'s
@@ -378,7 +377,10 @@ public final class BoundaryColumn {
                 canIntake ? intake.getAmount() : 0, openEndNode.openFace(), canIntake, false, 1.0);
     }
 
-    /** Only a VERTICAL mouth may draw fluid IN — a horizontal one is a pure spill outlet (see {@link #forOpenEnd}). */
+    /**
+     * Only a VERTICAL mouth may draw a fluid BLOCK in — a horizontal one is a pure spill outlet
+     * (see {@link #forOpenEnd}). Non-spillable targets are exempt: see {@link #drinkableSource}.
+     */
     private static boolean drawsInThrough(Direction openFace) {
         return openFace != null && openFace.getAxis().isVertical();
     }
@@ -395,20 +397,21 @@ public final class BoundaryColumn {
      * across contraptions too: the drain (OpenEndedPipeMixin) consumes a finite source and leaves a
      * lake, so it can no longer mint fluid.
      */
-    private static FluidStack intakeFluid(Level level, BlockPos space, boolean networkSpilled) {
+    private static FluidStack intakeFluid(Level level, BlockPos space, boolean networkSpilled,
+                                          boolean verticalMouth) {
         if (!PipesNPhysicsConfig.ENABLE_OPEN_END_INTAKE.get()) return FluidStack.EMPTY;
         FluidStack residual = OpenEndPipes.bufferedIntake(level, space);
         if (!residual.isEmpty()) return residual;
-        FluidStack local = drinkableSource(level, space, networkSpilled);
+        FluidStack local = drinkableSource(level, space, networkSpilled, verticalMouth);
         if (!local.isEmpty()) return local;
         BlockPos out = worldOutputPos(level, space);
         if (!out.equals(space)) {
-            FluidStack world = drinkableSource(level, out, networkSpilled);
+            FluidStack world = drinkableSource(level, out, networkSpilled, verticalMouth);
             if (!world.isEmpty()) return world;
         }
         if (PipesNPhysicsConfig.ENABLE_CROSS_LEVEL_PIPING.get()) {
             FluidStack other = SableCompat.atOverlappingContraptions(level, space, (l, p) -> {
-                FluidStack found = drinkableSource(l, p, networkSpilled);
+                FluidStack found = drinkableSource(l, p, networkSpilled, verticalMouth);
                 return found.isEmpty() ? null : found; // null keeps Sable's traversal searching
             });
             if (other != null) return other;
@@ -417,15 +420,26 @@ public final class BoundaryColumn {
     }
 
     /**
-     * The fluid drinkable from the block at {@code pos}, or EMPTY: a cauldron/honey block; a
-     * self-regenerating lake (Create's own {@code getNewLiquid}-on-drained-to-14 discriminator); or a
-     * finite/hand-placed source — the last one UNLESS the network recently spilled (its own spit) or the
-     * block is {@link #contested} between two mouths (a broken run's gap, which drinking teleports across).
+     * The fluid drinkable from the block at {@code pos}, or EMPTY: a VANILLA FLUID TARGET (a
+     * beehive/bee nest brimming with honey, a full water/lava cauldron — Create's own
+     * {@code VanillaFluidTargets}); a self-regenerating lake (Create's own
+     * {@code getNewLiquid}-on-drained-to-14 discriminator); or a finite/hand-placed source — the
+     * last one UNLESS the network recently spilled (its own spit) or the block is {@link #contested}
+     * between two mouths (a broken run's gap, which drinking teleports across).
+     *
+     * A vanilla fluid target may be drunk through ANY face; only a FLUID BLOCK needs the vertical
+     * mouth. The vertical rule exists solely to stop a sideways mouth reclaiming its own spill (it
+     * sits at the elevation of whatever it spills), and Create's {@code provideFluidToSpace} bails
+     * on {@code !state.canBeReplaced()} — so a hive or a cauldron can never RECEIVE our spill and
+     * has nothing to reclaim. Keeping them vertical-only just made them awkward to plumb: a hive
+     * usually wants a side tap, its underside being where the campfire goes.
      */
-    private static FluidStack drinkableSource(Level level, BlockPos pos, boolean networkSpilled) {
+    private static FluidStack drinkableSource(Level level, BlockPos pos, boolean networkSpilled,
+                                              boolean verticalMouth) {
         BlockState state = level.getBlockState(pos);
         FluidStack drainable = VanillaFluidTargets.drainBlock(level, pos, state, true);
         if (!drainable.isEmpty()) return drainable;
+        if (!verticalMouth) return FluidStack.EMPTY;
         FluidState fluidState = state.getFluidState();
         if (!fluidState.isSource()) return FluidStack.EMPTY;
         if (survivesDrain(level, pos, fluidState)) {

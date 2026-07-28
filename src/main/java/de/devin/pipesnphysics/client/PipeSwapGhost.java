@@ -45,9 +45,22 @@ import net.neoforged.neoforge.client.event.RenderLevelStageEvent;
  */
 @EventBusSubscriber(modid = PipesNPhysics.ID, value = Dist.CLIENT)
 public final class PipeSwapGhost {
-    private static final SuperRenderTypeBuffer GHOST_BUFFER = new DefaultSuperRenderTypeBuffer();
+    private static SuperRenderTypeBuffer ghostBuffer;
 
     private PipeSwapGhost() {}
+
+    /**
+     * The ghost's buffer, built on the first frame that draws one — NEVER in a static initializer. FML
+     * force-initializes every {@link EventBusSubscriber} class during mod CONSTRUCTION, and catnip's buffer
+     * class-loads {@code Sheets}, which class-loads {@code RenderType}. NeoForge rejects that outright
+     * ("Sheets loaded too early, modded registry-based materials may not work correctly") and it freezes the
+     * chunk render-type ids before mods that add their own have registered them — which crashed their client
+     * setup rather than ours. Render thread only, so no locking.
+     */
+    private static SuperRenderTypeBuffer ghostBuffer() {
+        if (ghostBuffer == null) ghostBuffer = new DefaultSuperRenderTypeBuffer();
+        return ghostBuffer;
+    }
 
     @SubscribeEvent
     public static void onRenderLevel(RenderLevelStageEvent event) {
@@ -101,7 +114,8 @@ public final class PipeSwapGhost {
         BakedModel model = mc.getBlockRenderer().getBlockModel(state);
         Vec3 camera = mc.gameRenderer.getMainCamera().getPosition();
         float alpha = (float) GhostBlocks.getBreathingAlpha() * 0.75f;
-        VertexConsumer raw = GHOST_BUFFER.getEarlyBuffer(RenderType.translucent());
+        SuperRenderTypeBuffer buffer = ghostBuffer();
+        VertexConsumer raw = buffer.getEarlyBuffer(RenderType.translucent());
         VertexConsumer vb = new ColoringVertexConsumer(raw, 1, 1, 1, alpha);
 
         ms.pushPose();
@@ -117,7 +131,7 @@ public final class PipeSwapGhost {
         renderKineticExtras(ms, state, raw, alpha);
         ms.popPose();
 
-        GHOST_BUFFER.draw();
+        buffer.draw();
     }
 
     /**

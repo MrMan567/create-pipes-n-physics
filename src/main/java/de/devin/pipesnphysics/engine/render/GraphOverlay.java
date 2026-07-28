@@ -50,23 +50,35 @@ public final class GraphOverlay {
     /** Half-side of the edge rod's square cross-section; 1/32 block ≈ a 1px-wide extruded square. */
     private static final float ROD_HALF = 1f / 32f;
 
+    private static RenderType rodRenderType;
+
     /**
      * The edge-rod render type: translucent POSITION_COLOR quads with NO depth test, so the thin
      * rod stays visible even threaded through an opaque pipe body. It does not write depth (COLOR_
      * WRITE) so the overlay never pollutes the world depth buffer.
+     *
+     * <p>Built on first draw, never in a static initializer: FML force-initializes every
+     * {@link EventBusSubscriber} class during mod CONSTRUCTION, and touching {@code RenderType} that early
+     * freezes the chunk render-type ids before mods that add their own have registered them. Render thread
+     * only, so no locking.
      */
-    private static final RenderType ROD_RENDER_TYPE = RenderType.create(
-            "pnp_graph_rod",
-            DefaultVertexFormat.POSITION_COLOR,
-            VertexFormat.Mode.QUADS,
-            1536,
-            RenderType.CompositeState.builder()
-                    .setShaderState(RenderStateShard.POSITION_COLOR_SHADER)
-                    .setTransparencyState(RenderStateShard.TRANSLUCENT_TRANSPARENCY)
-                    .setDepthTestState(RenderStateShard.NO_DEPTH_TEST)
-                    .setCullState(RenderStateShard.NO_CULL)
-                    .setWriteMaskState(RenderStateShard.COLOR_WRITE)
-                    .createCompositeState(false));
+    private static RenderType rodRenderType() {
+        if (rodRenderType == null) {
+            rodRenderType = RenderType.create(
+                    "pnp_graph_rod",
+                    DefaultVertexFormat.POSITION_COLOR,
+                    VertexFormat.Mode.QUADS,
+                    1536,
+                    RenderType.CompositeState.builder()
+                            .setShaderState(RenderStateShard.POSITION_COLOR_SHADER)
+                            .setTransparencyState(RenderStateShard.TRANSLUCENT_TRANSPARENCY)
+                            .setDepthTestState(RenderStateShard.NO_DEPTH_TEST)
+                            .setCullState(RenderStateShard.NO_CULL)
+                            .setWriteMaskState(RenderStateShard.COLOR_WRITE)
+                            .createCompositeState(false));
+        }
+        return rodRenderType;
+    }
 
     private static final List<ActiveOverlay> ACTIVE = new ArrayList<>();
 
@@ -134,11 +146,12 @@ public final class GraphOverlay {
 
         // Edges are thin extruded squares drawn through the pipe — the no-depth quad batch so they
         // stay visible inside opaque pipes.
-        VertexConsumer rods = buffers.getBuffer(ROD_RENDER_TYPE);
+        RenderType rodType = rodRenderType();
+        VertexConsumer rods = buffers.getBuffer(rodType);
         for (ActiveOverlay overlay : ACTIVE) {
             drawEdges(pose, rods, overlay.payload, lifeFraction(overlay, now));
         }
-        buffers.endBatch(ROD_RENDER_TYPE);
+        buffers.endBatch(rodType);
 
         pose.popPose();
 

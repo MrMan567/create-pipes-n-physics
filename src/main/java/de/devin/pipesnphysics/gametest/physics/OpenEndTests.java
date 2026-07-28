@@ -1,6 +1,7 @@
 package de.devin.pipesnphysics.gametest.physics;
 
 import com.simibubi.create.AllBlocks;
+import com.simibubi.create.AllFluids;
 import com.simibubi.create.content.fluids.FluidPropagator;
 import com.simibubi.create.content.fluids.FluidTransportBehaviour;
 import com.simibubi.create.content.fluids.PipeConnection;
@@ -56,6 +57,7 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.PipeBlock;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.level.material.Fluid;
 import net.minecraft.world.level.material.Fluids;
 import net.minecraft.server.level.ServerLevel;
@@ -490,6 +492,73 @@ public class OpenEndTests {
                 helper.fail("intake never resumed after the spill cooldown elapsed");
             } else {
                 helper.succeed();
+            }
+        });
+    }
+
+    /**
+     * A BEEHIVE brimming with honey is a fluid source: an open pipe mouth opening up into a full
+     * hive draws its 250 mB of Create honey in and leaves the hive at honey level 0. This rides
+     * Create's own {@code VanillaFluidTargets} — the same path that makes a cauldron an OPEN_END
+     * rather than a HANDLER — so it needs no beehive-specific code; the test pins that our intake
+     * gates (vacuum, one-way, consume-safe) let it through.
+     */
+    @GameTest(template = "openend/suck_from_cauldron", templateNamespace = PipesNPhysics.ID, timeoutTicks = 400)
+    public static void openEndDrainsAFullBeehive(GameTestHelper helper) {
+        BlockPos hive = new BlockPos(0, 3, 0); // the open mouth slot: a riser pipe opens up into it
+        helper.runAfterDelay(3, () -> helper.setBlock(hive, Blocks.BEEHIVE.defaultBlockState()
+                .setValue(BlockStateProperties.LEVEL_HONEY, 5)));
+
+        helper.succeedWhen(() -> {
+            int honey = honeyLevel(helper, hive);
+            if (honey != 0) {
+                helper.fail("beehive still at honey level " + honey + " — the open end did not"
+                        + " draw its honey in");
+            }
+        });
+    }
+
+    /** The hive's honey level, or -1 before the test has placed it (succeedWhen polls from tick 0). */
+    private static int honeyLevel(GameTestHelper helper, BlockPos hive) {
+        BlockState state = helper.getBlockState(hive);
+        return state.hasProperty(BlockStateProperties.LEVEL_HONEY)
+                ? state.getValue(BlockStateProperties.LEVEL_HONEY) : -1;
+    }
+
+    /**
+     * The vertical-mouth rule is about SPILL RECLAIM, so it must not apply to a block that can
+     * never receive a spill. A beehive tapped from the SIDE must still give up its honey: Create's
+     * {@code provideFluidToSpace} bails on {@code !state.canBeReplaced()}, so a mouth facing a hive
+     * (or a cauldron) has nothing to spill and nothing to suck back — the oscillation the rule
+     * guards against is structurally impossible there. Same rig and same flat mouth as {@link
+     * #horizontalMouthDoesNotSuckInWater}, which must keep REFUSING a water source: fluid blocks
+     * still need the vertical mouth, vanilla fluid targets do not.
+     *
+     * Mutation check: gate {@code drinkableSource}'s vanilla-target branch behind the vertical
+     * mouth again and the hive here stays full at level 5.
+     */
+    @GameTest(template = "physics/horizontal_mouth", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
+    public static void sideMouthTapsABeehiveThoughItRefusesWater(GameTestHelper helper) {
+        BlockPos tank = new BlockPos(1, 1, 1);
+        BlockPos hive = new BlockPos(3, 2, 1); // the block the flat EAST-facing mouth looks at
+
+        helper.runAfterDelay(8, () -> {
+            drain(helper, tank); // empty tank => head far below the mouth => a hard vacuum
+            helper.setBlock(hive, Blocks.BEEHIVE.defaultBlockState()
+                    .setValue(BlockStateProperties.LEVEL_HONEY, 5));
+        });
+
+        helper.succeedWhen(() -> {
+            int honey = honeyLevel(helper, hive);
+            if (honey != 0) {
+                helper.fail("a side-tapped beehive kept its honey (level " + honey + ") — a hive"
+                        + " cannot be spilled into, so the vertical-mouth rule must not gate it");
+                return;
+            }
+            FluidStack held = handler(helper, tank).getFluidInTank(0);
+            if (!AllFluids.HONEY.is(held.getFluid()) || held.getAmount() <= 0) {
+                helper.fail("the hive drained but no honey reached the tank, holds " + held.getAmount()
+                        + " of " + held.getFluid() + dump(helper, tank));
             }
         });
     }
