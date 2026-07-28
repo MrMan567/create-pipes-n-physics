@@ -18,6 +18,7 @@ import de.devin.pipesnphysics.engine.Solution;
 import de.devin.pipesnphysics.engine.boundary.BoundaryColumn;
 import de.devin.pipesnphysics.engine.boundary.FluidCaps;
 import de.devin.pipesnphysics.engine.boundary.HandlerRoles;
+import de.devin.pipesnphysics.engine.boundary.OpenEndPipes;
 import de.devin.pipesnphysics.engine.boundary.RelayDetector;
 import de.devin.pipesnphysics.engine.graph.Edge;
 import de.devin.pipesnphysics.engine.graph.Graph;
@@ -678,6 +679,9 @@ public final class PipeGraphCommand {
     private static String pulleyDiagnostic(ServerLevel level, Node n) {
         if (!n.isHandler() || !(level.getBlockEntity(n.pos()) instanceof HosePulleyBlockEntity)) {
             return null;
+        }
+        if (OpenEndPipes.isPulleyOutput(level, n.pos())) {
+            return "pulley: pinned OUTPUT (has deposited) — a one-way sink; break and re-place to drain again";
         }
         IFluidHandler cap = BoundaryColumn.findHandler(level, n.pos());
         if (cap == null) return "pulley: no fluid capability";

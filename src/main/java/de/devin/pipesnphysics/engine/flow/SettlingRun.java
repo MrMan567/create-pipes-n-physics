@@ -28,8 +28,9 @@ import java.util.List;
  * first below-target cell past it draws in, the first above-target one pours out; the DRAW
  * side's hysteresis band keeps the tank-surface↔target feedback from ping-ponging (pours are
  * self-stabilizing and act on any excess), and dregs leave in one go.
- * {@link #primeFromPumps} lets a running pump pack its dead-headed line from its supply side
- * (its solved steady-state flow is 0, so nothing else would fill it). {@link #gravityPool} is
+ * {@link #primeFromPumps} lets a running pump pack its dead-headed line from its supply side and,
+ * once that line is at the waterline, deliver on through it into the sink (its solved steady-state
+ * flow is 0, so nothing else would move either). {@link #gravityPool} is
  * the fallback with no solve data at all (every reservoir gone or empty): plain gravity trickles
  * contents downhill and out of an open mouth at/below, so fluid pools in the dips instead of
  * hanging frozen in a riser.
@@ -604,7 +605,9 @@ final class SettlingRun {
      * pump's other side (a directly-adjacent reservoir, or the pump-adjacent cell of its supply
      * run, which its own settle keeps refilling) into this run's end cell, up to the cell's
      * target. This is how a dead-headed line — a pump against a shut valve or an over-high sink —
-     * fills with real fluid even though its steady-state solved flow is 0.
+     * fills with real fluid even though its steady-state solved flow is 0. A line already AT its
+     * target is packed as far as it goes, and the pump then {@link #deliverThroughPump delivers
+     * through} it into the sink instead.
      */
     private boolean primeFromPumps(int[] target) {
         // A dead-headed GAS line stays with the brigade: pump packing reads ceiling-field
@@ -623,7 +626,10 @@ final class SettlingRun {
         PipeStore.Store cell = network.cellAt(endCell);
         if (cell == null) return false;
         int want = Math.min(targetMb - cell.amount(), rate);
-        if (want <= 0) return false;
+        // Packed to the waterline already: the pump can put nothing more IN the pipe, so it
+        // delivers on through into the sink instead. Priming first and delivering second is the
+        // physical order — a pump fills its outlet line before it pushes anything out of it.
+        if (want <= 0) return deliverThroughPump(pump, cell);
 
         for (Edge supply : network.graph.edgesOf(nodeIndex)) {
             if (supply.index() == edge.index()) continue;
@@ -662,6 +668,61 @@ final class SettlingRun {
                 ledger.moved(edge, got);
                 return true;
             }
+        }
+        return false;
+    }
+
+    /**
+     * The other half of {@link #pumpPrime}: with its outlet run already at the resting waterline
+     * the pump delivers THROUGH that column into the sink at the far end, still drawing from its
+     * own suction side, one {@link FlowSolver#pumpFlowCapMb} step per tick.
+     *
+     * Without this a running pump strands the primed suction column the retention rules
+     * deliberately keep, every time the solve assembles no branch for want of a participating
+     * source — the drained item drain, a tank broken off, a contraption undocked. Nothing else
+     * can finish the job: the settle only ever packs the outlet PIPE to its waterline, and
+     * pouring on into the tank is a gravity act a pipe already AT that waterline never satisfies,
+     * so delivery into a reservoir otherwise happens exclusively in the solve-driven brigade.
+     *
+     * The outlet run itself is left untouched — at profile it is a conducting column, so what the
+     * pump lifts off the suction side is what the sink receives (the wire remnant of
+     * {@code FlowingRun.deliverThroughWire}, which this mirrors two-phase refund and all). Drawing
+     * from the suction side rather than the run's own sink-end cell is what keeps it from
+     * circling: that cell would just be topped back up out of the same tank next tick.
+     */
+    private boolean deliverThroughPump(Node pump, PipeStore.Store outlet) {
+        Reservoir sink = network.reservoirAt(edge.other(pump.index()));
+        if (sink == null || outlet.amount() <= 0) return false;
+        FluidStack fluid = outlet.fluid();
+        int want = sink.probeFill(fluid, FlowSolver.pumpFlowCapMb(network.level, pump));
+        if (want <= 0) return false;
+
+        for (Edge supply : network.graph.edgesOf(pump.index())) {
+            if (supply.index() == edge.index()) continue;
+            Reservoir source = supply.pipes().isEmpty()
+                    ? network.reservoirAt(supply.other(pump.index())) : null;
+            PipeStore.Store feed = source != null ? null
+                    : network.cellAt(PipeGeometry.adjacentCell(network.graph, supply, pump.index()));
+            int got;
+            if (source != null) {
+                got = source.drain(fluid, want);
+            } else if (feed != null && FluidStack.isSameFluidSameComponents(feed.fluid(), fluid)) {
+                got = feed.extract(Math.min(want, feed.amount())).getAmount();
+            } else {
+                continue;
+            }
+            if (got <= 0) continue;
+            int delivered = sink.fill(fluid, got);
+            // Two-phase: a sink accepting less than it simulated gets the remainder put straight
+            // back where it was lifted from, which by construction still has the room for it.
+            if (delivered < got) {
+                int leftover = got - delivered;
+                if (source != null) source.refund(fluid, leftover);
+                else feed.insert(fluid, leftover);
+            }
+            if (delivered <= 0) continue;
+            ledger.moved(edge, delivered);
+            return true;
         }
         return false;
     }

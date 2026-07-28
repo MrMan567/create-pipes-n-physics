@@ -733,4 +733,63 @@ public class PumpTests {
             });
         });
     }
+
+    /**
+     * A running pump must empty a PRIMED suction line into a sink with room even when the solve
+     * assembles no branch at all — the general "my source went away" case: an item drain that ran
+     * dry, a tank broken off, a contraption undocked. The rig pins it by construction: the suction
+     * run dead-ends in a capped pipe, so there is no source endpoint to participate and every edge
+     * solves to zero and settles.
+     *
+     * Nothing but {@code SettlingRun.deliverThroughPump} can finish this. The settle packs the
+     * OUTLET pipe to the sink's waterline and stops there — pouring on into the tank is a gravity
+     * act a pipe already AT that waterline never satisfies — so the primed column the retention
+     * rules deliberately keep would sit behind a spinning pump forever ("a pump that can't pump
+     * from a pipe"). Mutation check: drop the {@code deliverThroughPump} call and the suction cell
+     * still reads its full 250 mB here.
+     */
+    @GameTest(template = "physics/pump_dead_suction", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
+    public static void pumpDeliversAPrimedSuctionLineWithNoSourceLeft(GameTestHelper helper) {
+        BlockPos deadEnd = new BlockPos(0, 1, 1);
+        BlockPos suction = new BlockPos(1, 1, 1);
+        BlockPos outlet = new BlockPos(3, 1, 1);
+        BlockPos sink = new BlockPos(4, 1, 1);
+        int primed = PipeStore.capacityMb();
+
+        helper.runAfterDelay(5, () -> {
+            // The sink starts wet so it contributes a real resting line (an empty reservoir defers,
+            // and the run would gravity-pool instead of ever reaching the pump priming step).
+            fill(helper, sink, 1000);
+            PipeStore.Store cell = PipeStore.at(helper.getLevel(), helper.absolutePos(suction));
+            if (cell == null) {
+                helper.fail("no pipe store at " + suction.toShortString());
+                return;
+            }
+            cell.insert(new FluidStack(Fluids.WATER, primed), primed);
+            cell.flush();
+        });
+
+        helper.runAfterDelay(120, () -> {
+            int held = pipeAmount(helper, suction);
+            int tank = amount(helper, sink);
+            int total = tank + held + pipeAmount(helper, outlet) + pipeAmount(helper, deadEnd);
+            if (total != 1000 + primed) {
+                helper.fail("fluid not conserved: tank " + tank + " + suction " + held
+                        + " + pipes = " + total + " of " + (1000 + primed) + dump(helper, suction));
+                return;
+            }
+            if (held > 0) {
+                helper.fail("the pump left " + held + " mB standing in its primed suction line — a"
+                        + " running pump with a sink that has room must draw its own line down"
+                        + dump(helper, suction));
+                return;
+            }
+            if (tank <= 1000) {
+                helper.fail("the sink never received the primed column, still " + tank + " mB"
+                        + dump(helper, sink));
+                return;
+            }
+            helper.succeed();
+        });
+    }
 }

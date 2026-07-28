@@ -190,7 +190,16 @@ public final class FlowSolver {
                     resolved = BoundaryColumn.resolve(level, node);
                     // Feed the relay detector this handler's live contents so it can spot a block that
                     // spontaneously gains fluid (a relay) versus one we merely fill (see RelayDetector).
-                    if (resolved != null) {
+                    // FINITE RESERVOIRS ONLY: the detector's whole premise is that a capacitor's stored
+                    // amount moves only by OUR transfers, so it needs a REAL reading. A bottomless
+                    // column (hose pulley, relay endpoint) reports a synthetic constant — 4,000,000 mB
+                    // brimming or 0 empty — that never moves however much we draw, so every drain we
+                    // apply read back as an unexplained GAIN of exactly that amount and demoted the
+                    // block after STRIKES_TO_DEMOTE ticks of ordinary work. For a hose pulley that cost
+                    // it its isHosePulley identity (and with it the output latch) for the whole session,
+                    // curable only by breaking the block — the "works again after disconnect and
+                    // reconnect" report. A synthetic column can never be evidence either way.
+                    if (resolved != null && resolved.isFiniteReservoir()) {
                         RelayDetector.observe(level, resolved.accessPos(),
                                 resolved.contents().getFluid(), resolved.contentMb());
                     }
@@ -292,6 +301,19 @@ public final class FlowSolver {
         if (pump.pumpFacing() == null) return false;
         return level.getBlockEntity(pump.pos()) instanceof KineticBlockEntity kinetic
                 && Math.abs(kinetic.getSpeed()) > MIN_PUMP_SPEED;
+    }
+
+    /**
+     * How much this pump can move per tick: {@code |RPM| · flowPerRpm} — the same throughput the
+     * solver imposes as its internal conductance and the goggle prints as the "Output: … / cap"
+     * denominator. Zero for a pump that is not spun up. The executor bounds a pump-driven settle
+     * step with it, so a step the solve never sized still moves at the pump's real rating.
+     */
+    public static int pumpFlowCapMb(Level level, Node pump) {
+        if (!isPumpRunning(level, pump)) return 0;
+        float speed = level.getBlockEntity(pump.pos()) instanceof KineticBlockEntity kinetic
+                ? kinetic.getSpeed() : 0;
+        return (int) Math.floor(Math.abs(speed) * PipesNPhysicsConfig.PUMP_FLOW_PER_RPM.get());
     }
 
     /**
