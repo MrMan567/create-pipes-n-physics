@@ -792,4 +792,115 @@ public class PumpTests {
             helper.succeed();
         });
     }
+
+    /**
+     * The same delivery, with the pump wedged FLUSH against its sink: its outlet edge holds no
+     * cells at all. A zero-cell edge is a wire, and the settle used to bail on one before anything
+     * could run — so {@code pumpPrime} never reached {@code deliverThroughPump} (it needs an outlet
+     * cell to pack) and the pump sat spinning with a full suction line behind it and a tank with
+     * room in front, moving nothing, forever. The reported rig, shipped as its template: a 5-tall
+     * tank, the pump against its side, two suction cells, and an EMPTY source tank over the far end
+     * so the solve assembles no branch.
+     *
+     * Mutation check: restore the {@code cells.isEmpty()} bail at the top of {@code settle()} and
+     * both suction cells still read their stored 237 mB.
+     */
+    @GameTest(template = "physics/pumps_pipe_empty", templateNamespace = PipesNPhysics.ID, timeoutTicks = 300)
+    public static void pumpFlushAgainstItsSinkStillDrainsItsSuctionLine(GameTestHelper helper) {
+        BlockPos sink = new BlockPos(0, 1, 0);
+        BlockPos pump = new BlockPos(1, 4, 0);
+        BlockPos near = new BlockPos(2, 4, 0);
+        BlockPos far = new BlockPos(3, 4, 0);
+        BlockPos source = new BlockPos(3, 5, 0);
+        int[] start = new int[2];
+
+        // Read the rig once the multiblock tank has formed and the motor has spun the pump up.
+        helper.runAfterDelay(5, () -> {
+            start[0] = amount(helper, sink);
+            start[1] = pipeAmount(helper, near) + pipeAmount(helper, far);
+            Direction facing = helper.getBlockState(pump).getValue(PumpBlock.FACING);
+            if (facing != Direction.WEST) {
+                helper.fail("the pump must push toward the sink it sits against, facing " + facing);
+            } else if (start[1] <= 0) {
+                helper.fail("the template's suction line came up empty" + dump(helper, near));
+            }
+        });
+
+        // Mid-delivery: the pump must carry the cosmetic flow stamp of what it is pushing across
+        // the wire. It owns no cell, so nothing else on this network can carry one — and the
+        // client FX layer reads stamps, so without it a pump against a tank pours no particles.
+        helper.runAfterDelay(20, () -> {
+            PipeStore.Store store = PipeStore.at(helper.getLevel(), helper.absolutePos(pump));
+            Direction stamped = store == null ? null : PipeStore.flowDirection(store.flowData());
+            if (stamped != Direction.WEST) {
+                helper.fail("a pump delivering across a wire must stamp its own flow, got "
+                        + stamped + dump(helper, near));
+            }
+        });
+
+        helper.runAfterDelay(200, () -> {
+            int tank = amount(helper, sink);
+            int left = pipeAmount(helper, near) + pipeAmount(helper, far);
+            int held = start[0];
+            if (tank + left + amount(helper, source) != held + start[1]) {
+                helper.fail("fluid not conserved: tank " + tank + " + pipes " + left + " of "
+                        + (held + start[1]) + dump(helper, near));
+                return;
+            }
+            if (tank <= held) {
+                helper.fail("the pump delivered nothing into the tank it sits against, still "
+                        + tank + " mB — a zero-cell outlet is a wire, not a wall"
+                        + dump(helper, near));
+                return;
+            }
+            if (left > 0) {
+                helper.fail("the pump left " + left + " mB standing in its suction line"
+                        + dump(helper, near));
+            }
+            helper.succeed();
+        });
+    }
+
+    /**
+     * The dual wall: a pump must NOT lift out of a tank its fluid does not reach. The solve gates
+     * this ({@code FluidPass.canDrawFrom} against the pump's draw lip — the opening cell's block
+     * floor), but the settle's pump paths drained the supply handler STRAIGHT, and no lip cap is
+     * installed on a tick that solved no flow — so the pump packed its outlet run and delivered on
+     * out of a tank whose visible surface stood more than a block BELOW its own opening ("why does
+     * this pump pipe? the surface of the fluid does not reach the pump yet"). The rig is the
+     * reported one reversed: a 5-tall tank only a fifth full (surface ~1.2 blocks up) with the pump
+     * three blocks above it, pushing away into a sink that has room — so the ONLY thing that may
+     * stop it is the draw lip.
+     *
+     * Mutation check: drop the {@code pumpMayDraw} guards and the source tank bleeds away here.
+     */
+    @GameTest(template = "physics/pump_above_waterline", templateNamespace = PipesNPhysics.ID, timeoutTicks = 300)
+    public static void pumpDoesNotLiftFromBelowItsDrawLip(GameTestHelper helper) {
+        BlockPos source = new BlockPos(0, 1, 0);
+        BlockPos pump = new BlockPos(1, 4, 0);
+        BlockPos sink = new BlockPos(3, 5, 0);
+        int[] start = new int[1];
+
+        helper.runAfterDelay(5, () -> {
+            start[0] = amount(helper, source);
+            Direction facing = helper.getBlockState(pump).getValue(PumpBlock.FACING);
+            if (facing != Direction.EAST) {
+                helper.fail("the pump must pull from the low tank, facing " + facing);
+            } else if (start[0] <= 0 || amount(helper, sink) >= 8000) {
+                helper.fail("the rig must start with a supply below the lip and a sink with room"
+                        + dump(helper, pump));
+            }
+        });
+
+        helper.runAfterDelay(200, () -> {
+            int held = amount(helper, source);
+            if (held < start[0]) {
+                helper.fail("the pump lifted " + (start[0] - held) + " mB out of a tank whose"
+                        + " surface sits below its opening — the settle must honor the draw lip"
+                        + dump(helper, pump));
+                return;
+            }
+            helper.succeed();
+        });
+    }
 }

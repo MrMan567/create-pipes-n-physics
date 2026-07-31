@@ -528,8 +528,7 @@ final class FluidPass {
      * pumpDrainAnyLevel.
      */
     private double openingLip(BlockPos opening, boolean pumpPulls) {
-        return pumpPulls ? SableCompat.getWorldY(level, opening) - 0.5
-                : PipeWindow.lipY(level, opening);
+        return PipeWindow.drawLipY(level, opening, pumpPulls);
     }
 
     /**

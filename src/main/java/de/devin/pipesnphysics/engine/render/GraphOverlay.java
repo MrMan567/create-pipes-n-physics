@@ -5,6 +5,8 @@ import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
 import com.mojang.blaze3d.vertex.VertexFormat;
 import de.devin.pipesnphysics.PipesNPhysics;
+import de.devin.pipesnphysics.client.Rgb;
+import de.devin.pipesnphysics.client.RodRender;
 import de.devin.pipesnphysics.engine.net.GraphOverlayPayload;
 import de.devin.pipesnphysics.engine.net.GraphOverlayRequest;
 import net.minecraft.client.Camera;
@@ -257,9 +259,6 @@ public final class GraphOverlay {
         return 1f - Math.min(1f, age / (float) lifetimeMs);
     }
 
-    /** One overlay color, 0–255 per channel. */
-    private record Rgb(int r, int g, int b) {}
-
     /** Cyan — the engine's computed reservoir surface, drawn distinct from every kind's box. */
     private static final Rgb SURFACE_COLOR = new Rgb(0, 230, 230);
 
@@ -407,33 +406,17 @@ public final class GraphOverlay {
     }
 
     /**
-     * Draws a thin square rod (a ~1px square extruded) from (x0,y0,z0) to (x1,y1,z1) as four side
-     * quads, vertex colors blended start→end. Emitted into the no-depth quad batch so it reads as a
-     * line threaded through the pipe regardless of the pipe's opacity.
+     * A hairline rod down the pipe centre, vertex colors blended start→end. Emitted into the
+     * no-depth quad batch so it reads as a line threaded through the pipe regardless of the pipe's
+     * opacity; the geometry is the shared {@link RodRender}, which the pump reach sleeve draws with
+     * too (at a half-extent that wraps the pipe instead of threading it).
      */
     private static void rodSegment(Matrix4f m, VertexConsumer buf,
                                    float x0, float y0, float z0,
                                    float x1, float y1, float z1,
                                    Rgb startColor, Rgb endColor, float alpha) {
-        float[][] offs = crossSection(x1 - x0, y1 - y0, z1 - z0);
-        if (offs == null) return;
-        int alphaByte = (int) (255 * Math.max(0.25f, alpha));
-        for (int i = 0; i < 4; i++) {
-            float[] o0 = offs[i];
-            float[] o1 = offs[(i + 1) % 4];
-            // One side face of the square prism, wound p0.o0 → p0.o1 → p1.o1 → p1.o0.
-            quadVertex(m, buf, x0, y0, z0, o0, startColor, alphaByte);
-            quadVertex(m, buf, x0, y0, z0, o1, startColor, alphaByte);
-            quadVertex(m, buf, x1, y1, z1, o1, endColor, alphaByte);
-            quadVertex(m, buf, x1, y1, z1, o0, endColor, alphaByte);
-        }
-    }
-
-    /** One rod vertex at a corner offset (scaled to {@link #ROD_HALF}); POSITION_COLOR, no normal. */
-    private static void quadVertex(Matrix4f m, VertexConsumer buf,
-                                   float cx, float cy, float cz, float[] off, Rgb color, int alphaByte) {
-        buf.addVertex(m, cx + off[0] * ROD_HALF, cy + off[1] * ROD_HALF, cz + off[2] * ROD_HALF)
-                .setColor(color.r(), color.g(), color.b(), alphaByte);
+        RodRender.segment(m, buf, x0, y0, z0, x1, y1, z1,
+                startColor, endColor, ROD_HALF, (int) (255 * Math.max(0.25f, alpha)));
     }
 
     private static void drawBox(Matrix4f m, VertexConsumer buf,
@@ -455,38 +438,6 @@ public final class GraphOverlay {
         line(m, buf, x1, y0, z0, x1, y1, z0, color, alpha);
         line(m, buf, x1, y0, z1, x1, y1, z1, color, alpha);
         line(m, buf, x0, y0, z1, x0, y1, z1, color, alpha);
-    }
-
-    /**
-     * The four corner directions of a square cross-section orthogonal to (dx,dy,dz), as unit
-     * offsets; null when the direction is degenerate.
-     */
-    private static float[][] crossSection(float dx, float dy, float dz) {
-        float len = (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
-        if (len < 1e-5f) return null;
-        dx /= len; dy /= len; dz /= len;
-
-        // Reference axis not parallel to the direction, so the cross-product is well-defined.
-        float refx, refy, refz;
-        if (Math.abs(dy) > 0.9f) { refx = 1; refy = 0; refz = 0; }
-        else { refx = 0; refy = 1; refz = 0; }
-
-        // u = dir x ref, then v = dir x u — orthonormal cross-section axes.
-        float ux = dy * refz - dz * refy;
-        float uy = dz * refx - dx * refz;
-        float uz = dx * refy - dy * refx;
-        float ul = (float) Math.sqrt(ux * ux + uy * uy + uz * uz);
-        ux /= ul; uy /= ul; uz /= ul;
-        float vx = dy * uz - dz * uy;
-        float vy = dz * ux - dx * uz;
-        float vz = dx * uy - dy * ux;
-
-        return new float[][] {
-                { ux + vx, uy + vy, uz + vz },
-                { ux - vx, uy - vy, uz - vz },
-                { -ux - vx, -uy - vy, -uz - vz },
-                { -ux + vx, -uy + vy, -uz + vz },
-        };
     }
 
     private static void line(Matrix4f m, VertexConsumer buf,

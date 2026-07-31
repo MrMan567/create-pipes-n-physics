@@ -52,7 +52,7 @@ public class PipesNPhysicsConfig {
 
     // Client
     public static final ModConfigSpec.BooleanValue SHOW_PIPE_GOGGLE_INFO;
-    public static final ModConfigSpec.BooleanValue SHOW_PUMP_RANGE_ARROWS;
+    public static final ModConfigSpec.BooleanValue SHOW_PUMP_REACH_OVERLAY;
     public static final ModConfigSpec.BooleanValue SHOW_VALVE_DIRECTION_ARROWS;
     public static final ModConfigSpec.BooleanValue PRESERVE_PUMP_RANGE;
     public static final ModConfigSpec.IntValue PUMP_RANGE_PRESERVE_SECONDS;
@@ -95,13 +95,15 @@ public class PipesNPhysicsConfig {
                         "pump-above-a-tank rig starts on its own. Unpowered siphons never self-prime either way.")
                 .define("enablePumpSelfPriming", false);
         ENABLE_OPEN_END_INTAKE = server
-                .comment("Let a VERTICAL open pipe end draw fluid IN from the world when the network is",
+                .comment("Let an open pipe end draw fluid IN from the world when the network is",
                         "under suction (its head sits below the pipe mouth): a self-regenerating source",
-                        "(a lake), a cauldron, or a finite/hand-placed source block. A HORIZONTAL mouth",
-                        "never draws in — it is a spill outlet only, or it would just reclaim its own",
-                        "spill. To keep a vertical mouth from sucking back what it spilled, a network",
-                        "that spilled from ANY open end recently will not pull a finite source",
-                        "(lakes/cauldrons are unaffected).")
+                        "(a lake), a cauldron, or a finite/hand-placed source block. Unpumped, this",
+                        "needs a VERTICAL mouth — a sideways one is a spill outlet only, or it would",
+                        "just reclaim its own spill — but a mouth a RUNNING PUMP pulls on drinks",
+                        "through any face (a pump cannot spill out of its own suction flank). To keep",
+                        "a mouth from sucking back what it spilled, a network that spilled from ANY",
+                        "open end recently will not pull a finite source (lakes/cauldrons are",
+                        "unaffected).")
                 .define("enableOpenEndIntake", true);
         OPEN_END_INTAKE_COOLDOWN_TICKS = server
                 .comment("After an open end on a network spills, how many ticks before that network",
@@ -330,11 +332,12 @@ public class PipesNPhysicsConfig {
                 .comment("Show engine stats (status, fluid, flow, pressure) when looking",
                         "at a pipe with Engineer's Goggles.")
                 .define("showPipeGoggleInfo", true);
-        SHOW_PUMP_RANGE_ARROWS = client
-                .comment("Show animated reach arrows along the pipes when looking at a",
-                        "pump with Engineer's Goggles: green where the pump can push,",
-                        "blue where it can pull, red where its head cannot reach.")
-                .define("showPumpRangeArrows", true);
+        SHOW_PUMP_REACH_OVERLAY = client
+                .comment("Colour the pipes around a pump while looking at it with Engineer's",
+                        "Goggles, by how much reach is left: green on the side it pushes,",
+                        "blue on the side it pulls, warming to amber as the last blocks of",
+                        "lift are spent and turning red past the elevation it cannot reach.")
+                .define("showPumpReachOverlay", true);
         SHOW_VALVE_DIRECTION_ARROWS = client
                 .comment("Show a sliding arrow through every ONE-WAY fluid valve (its allowed",
                         "flow direction) while wearing Engineer's Goggles or holding a wrench.")

@@ -4,11 +4,12 @@ import com.simibubi.create.content.fluids.FluidReactions;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.compat.SableCompat;
 import de.devin.pipesnphysics.engine.EngineTickHandler;
+import de.devin.pipesnphysics.engine.MouthConditions;
 import de.devin.pipesnphysics.engine.boundary.BoundaryColumn;
-import de.devin.pipesnphysics.engine.boundary.OpenEndPipes;
 import de.devin.pipesnphysics.engine.graph.Edge;
 import de.devin.pipesnphysics.engine.graph.Graph;
 import de.devin.pipesnphysics.engine.graph.Node;
+import de.devin.pipesnphysics.engine.graph.PipeGeometry;
 import de.devin.pipesnphysics.engine.store.PipeStore;
 import de.devin.pipesnphysics.engine.store.PipeWindow;
 import net.minecraft.core.BlockPos;
@@ -64,21 +65,13 @@ public final class FlowNetwork {
         this.level = level;
         this.graph = graph;
 
-        // If ANY open end on this network spilled recently, hold off finite-source intake
-        // everywhere on it — the network must not suck back what it just spat out.
-        int cooldown = PipesNPhysicsConfig.OPEN_END_INTAKE_COOLDOWN_TICKS.get();
-        boolean networkSpilled = false;
-        for (Node node : graph.nodes()) {
-            if (node.isOpenEnd() && OpenEndPipes.recentlySpilled(level, node.pos(), cooldown)) {
-                networkSpilled = true;
-                break;
-            }
-        }
+        // What this network's mouths may drink this tick — the same reading the solve took.
+        MouthConditions mouths = MouthConditions.of(level, graph);
         int maxFlow = PipesNPhysicsConfig.MAX_FLOW_PER_ENDPOINT.get();
         Map<BlockPos, Reservoir> reservoirByIdentity = new LinkedHashMap<>();
         for (Node node : graph.nodes()) {
             BoundaryColumn column = node.isHandler() ? BoundaryColumn.resolve(level, node)
-                    : node.isOpenEnd() ? BoundaryColumn.forOpenEnd(level, node, networkSpilled)
+                    : node.isOpenEnd() ? mouths.column(level, node)
                     : null;
             if (column == null) continue;
             Reservoir reservoir = reservoirByIdentity.computeIfAbsent(column.identity(),
@@ -138,6 +131,39 @@ public final class FlowNetwork {
     /** A cell's centre elevation in true world space (Sable-projected). */
     double cellCenterY(BlockPos pos) {
         return SableCompat.getWorldY(level, pos);
+    }
+
+    /**
+     * Give a pump the cosmetic flow stamp of a delivery it drove across a ZERO-CELL edge — a pump
+     * wedged flush against a tank or an open mouth. A pump owns no cell of the run (it stores
+     * nothing), so such a delivery leaves a stamp NOWHERE, and the client FX layer — which reads
+     * stamps — showed no pour at all ("pumps directly adjacent to a tank don't show the spill
+     * particles"). Sync-only and volume-free: the pump still holds not one mB, it just says which
+     * way it is pushing and how fast. An outlet run WITH cells needs none of this — its own cells
+     * carry the stamp — so the pump is cleared there.
+     */
+    public void stampPumps(FlowLedger ledger) {
+        for (Node pump : graph.pumps()) {
+            PipeStore.Store store = cellAt(pump.pos());
+            if (store == null) continue;
+            Edge outlet = outletEdge(pump);
+            int moved = outlet == null ? 0 : ledger.edgeMovedMb()[outlet.index()];
+            if (moved > 0 && outlet.pipes().isEmpty() && cellCapacity > 0) {
+                store.setFlow(pump.pumpFacing(), moved / (double) cellCapacity);
+            } else {
+                store.clearFlow();
+            }
+        }
+    }
+
+    /** The edge a pump pushes INTO (its FACING flank), or null while its facing is unresolved. */
+    private Edge outletEdge(Node pump) {
+        BlockPos push = pump.pushCell();
+        if (push == null) return null;
+        for (Edge edge : graph.edgesOf(pump.index())) {
+            if (push.equals(PipeGeometry.adjacentCell(graph, edge, pump.index()))) return edge;
+        }
+        return null;
     }
 
     /** Clear the scroll-animation stamps on an idle edge's cells. */

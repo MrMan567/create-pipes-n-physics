@@ -42,7 +42,9 @@ import de.devin.pipesnphysics.engine.graph.GraphBuilder;
 import de.devin.pipesnphysics.engine.FlowTrace;
 import de.devin.pipesnphysics.engine.graph.Node;
 import de.devin.pipesnphysics.engine.net.PipeStatusPayload;
+import de.devin.pipesnphysics.engine.net.PumpRangePayload;
 import de.devin.pipesnphysics.engine.probe.PipeProbe;
+import de.devin.pipesnphysics.engine.probe.PumpRangeProbe;
 import de.devin.pipesnphysics.engine.store.PipeStore;
 import de.devin.pipesnphysics.engine.valve.ValveCharacteristic;
 import de.devin.pipesnphysics.engine.valve.ValveThrottle;
@@ -518,6 +520,105 @@ public class GoggleProbeTests {
                 return;
             }
             helper.succeed();
+        });
+    }
+
+    /**
+     * The pump's reach sleeve and the pipe goggle's "Lift left" are the SAME quantity, so they
+     * must agree cell for cell: both are {@code nodeCeilings − cellY} off the engine's planning
+     * field. {@link PumpRangeProbe} used to re-derive its own ceiling as {@code pumpY + boost},
+     * which is only right when the pump sits AT its supply — a pump lifting out of a tank BELOW
+     * it then painted reach it did not have (reported live: a 16 RPM pump reading {@code
+     * ceil=60.59} off a source surface at 56.59 showed its sink at 62 as reachable while the
+     * run was really NO_HEAD).
+     *
+     * The rig ({@code physics/pump_lift_beyond_reach}) reproduces that geometry, and every part
+     * of it is load-bearing. The pump taps a tank three blocks BELOW it through a riser, so the
+     * supply surface and the pump's own elevation are far apart — the whole gap the bug lived in.
+     * The tank is tapped HORIZONTALLY, above the opening's draw lip, so a reservoir really can
+     * feed the run and the ceiling anchors on its surface (a lip-gated draw self-anchors the
+     * ceiling at the pump instead, where both formulas agree and the bug hides — which is why
+     * {@code pump_above_waterline} cannot catch this). And the sink sits beyond the pump's lift,
+     * so the push edge is NO_HEAD and the solve records no head at the pump — exactly what sent
+     * the old code down its {@code pump.worldY()} fallback. A pump that IS pumping has a node
+     * head near its supply, so the two formulas agree there too.
+     *
+     * Mutation check: seed the reach from {@code pump.worldY() + pumpHead} again and the sleeve
+     * reads ~3 blocks of lift left where the goggle reads it running out.
+     */
+    @GameTest(template = "physics/pump_lift_beyond_reach", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
+    public static void reachSleeveAgreesWithTheGoggleLiftLine(GameTestHelper helper) {
+        BlockPos pump = new BlockPos(2, 4, 0);
+
+        helper.succeedWhen(() -> {
+            var payload = PumpRangeProbe.probe(helper.getLevel(), helper.absolutePos(pump));
+            var push = payload.paths().stream().filter(p -> !p.pull()).findFirst().orElse(null);
+            if (push == null) {
+                helper.fail("the pump reported no push-side reach path" + dump(helper, pump));
+                return;
+            }
+            var cell = push.cells().stream().filter(PumpRangePayload.RangeCell::pipe)
+                    .findFirst().orElse(null);
+            if (cell == null) {
+                helper.fail("the push path carries no pipe cell to paint" + dump(helper, pump));
+                return;
+            }
+
+            BlockPos at = BlockPos.of(cell.pos());
+            var goggle = PipeProbe.probe(helper.getLevel(), at);
+            if (!goggle.hasHeadroom()) {
+                helper.fail("no goggle lift value at " + at + " to check the sleeve against"
+                        + dump(helper, pump));
+                return;
+            }
+            if (Math.abs(cell.margin() - goggle.headroomBlocks()) > 0.05f) {
+                helper.fail("the reach sleeve says " + cell.margin() + " blocks of lift left at "
+                        + at + " but the goggle says " + goggle.headroomBlocks()
+                        + " — the overlay is not reading the engine's ceiling" + dump(helper, pump));
+            }
+        });
+    }
+
+    /**
+     * A pump parked above the waterline with a DRY suction riser reaches NOTHING down it, however
+     * deep its nominal suction limit would allow: suction HOLDS a column, it never creates one, so
+     * the solve's crest gate refuses the branch outright until the supply itself rises to the
+     * crest cell's lip (§3, no self-priming). The sleeve has to say the same — it used to paint a
+     * full {@code SUCTION_LIMIT} of reach down a riser the pump could not draw through at all
+     * ("the visual overlay looks like the pump could suck in the fluid, but the pump itself tells
+     * a different story", reported 2026-07-31).
+     *
+     * This is why the pull limit goes through {@link FlowSolver#drawableFloor} rather than a local
+     * {@code pumpY − SUCTION_LIMIT}: the crest gate is the engine's real wall, and a second copy
+     * of the rule in the overlay is exactly how the two came to disagree.
+     *
+     * Mutation check: floor the pull side at {@code pumpY − SUCTION_LIMIT} again and the cell down
+     * at the tank reports blocks of reach to spare instead of being out of reach.
+     */
+    @GameTest(template = "physics/pump_lift_beyond_reach", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
+    public static void dryRiserPaintsNoSuctionReach(GameTestHelper helper) {
+        BlockPos pump = new BlockPos(2, 4, 0);
+
+        helper.succeedWhen(() -> {
+            var payload = PumpRangeProbe.probe(helper.getLevel(), helper.absolutePos(pump));
+            var pull = payload.paths().stream().filter(PumpRangePayload.RangePath::pull)
+                    .findFirst().orElse(null);
+            if (pull == null) {
+                helper.fail("the pump reported no suction reach path" + dump(helper, pump));
+                return;
+            }
+            // Walked outward from the pump, so the last pipe cell is the one down at the supply.
+            var deepest = pull.cells().stream().filter(PumpRangePayload.RangeCell::pipe)
+                    .reduce((first, second) -> second).orElse(null);
+            if (deepest == null) {
+                helper.fail("the suction path carries no pipe cell to paint" + dump(helper, pump));
+                return;
+            }
+            if (deepest.margin() >= 0) {
+                helper.fail("the sleeve claims " + deepest.margin() + " blocks of suction reach at "
+                        + BlockPos.of(deepest.pos()) + ", but the riser is dry so the pump cannot"
+                        + " draw through it at all" + dump(helper, pump));
+            }
         });
     }
 }

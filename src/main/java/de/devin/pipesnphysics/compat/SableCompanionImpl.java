@@ -1,6 +1,5 @@
 package de.devin.pipesnphysics.compat;
 
-import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import dev.ryanhcode.sable.companion.ClientSubLevelAccess;
 import dev.ryanhcode.sable.companion.SableCompanion;
 import dev.ryanhcode.sable.companion.SubLevelAccess;
@@ -10,22 +9,12 @@ import net.minecraft.core.Direction;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.phys.Vec3;
-import org.joml.Quaterniondc;
 import org.joml.Vector3d;
 
-import java.util.Map;
-import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BiFunction;
 
 class SableCompanionImpl implements SableCompatProvider {
     private static final double NORMALIZE_EPSILON = 0.001;
-    private final Map<UUID, float[]> lastOrientations = new ConcurrentHashMap<>();
-
-    @Override
-    public void clearCaches() {
-        lastOrientations.clear();
-    }
 
     @Override
     public <T> T atOverlappingContraptions(Level level, BlockPos origin, BiFunction<Level, BlockPos, T> reader) {
@@ -44,6 +33,11 @@ class SableCompanionImpl implements SableCompatProvider {
     public String getSubLevelId(Level level, BlockPos pos) {
         SubLevelAccess sub = SableCompanion.INSTANCE.getContaining(level, pos);
         return sub == null ? null : sub.getUniqueId().toString();
+    }
+
+    @Override
+    public boolean isOnSubLevel(Level level, BlockPos pos) {
+        return SableCompanion.INSTANCE.getContaining(level, pos) != null;
     }
 
     @Override
@@ -134,34 +128,6 @@ class SableCompanionImpl implements SableCompatProvider {
             }
         }
         return (float) Math.toDegrees(Math.asin(Math.abs(dir.getStepY())));
-    }
-
-    @Override
-    public boolean hasSubLevelRotated(Level level, BlockPos pos) {
-        SubLevelAccess sub = SableCompanion.INSTANCE.getContaining(level, pos);
-        if (sub == null) return false;
-
-        Pose3dc pose = sub.logicalPose();
-        if (pose == null) return false;
-
-        Quaterniondc q = pose.orientation();
-        UUID id = sub.getUniqueId();
-        float[] current = {(float) q.x(), (float) q.y(), (float) q.z(), (float) q.w()};
-        float[] last = lastOrientations.get(id);
-
-        if (last == null) {
-            lastOrientations.put(id, current);
-            return false;
-        }
-
-        float dot = last[0] * current[0] + last[1] * current[1] + last[2] * current[2] + last[3] * current[3];
-        float threshold = 0.999f;
-        if (Math.abs(dot) < threshold) {
-            lastOrientations.put(id, current);
-            return true;
-        }
-
-        return false;
     }
 
     @Override

@@ -33,9 +33,16 @@ public abstract class MetricDisplaySource extends SingleLineDisplaySource {
         return true;
     }
 
+    /**
+     * Create's own cadence. These readouts are live gauges and once refreshed ten times as often,
+     * but a refresh is not free — it renders through {@link de.devin.pipesnphysics.engine.probe.PipeProbe}
+     * (a SOLVE, on a network the engine may have settled and put to sleep), rewrites the target
+     * block entity and syncs it to every tracking player, and pulses and syncs the link itself. All
+     * of Create's own live sources (boiler, kinetic speed, fluid amount) sit at this default.
+     */
     @Override
     public int getPassiveRefreshTicks() {
-        return 10;
+        return 100;
     }
 
     @Override

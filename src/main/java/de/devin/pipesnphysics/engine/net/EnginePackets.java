@@ -50,7 +50,9 @@ public final class EnginePackets {
     }
 
     public static void register(RegisterPayloadHandlersEvent event) {
-        var registrar = event.registrar(PipesNPhysics.ID).versioned("2");
+        // "3" since the pump range answer carries per-cell reach margins instead of reachable flags;
+        // the bump turns a mixed old/new pair into a clean protocol rejection rather than a misparse.
+        var registrar = event.registrar(PipesNPhysics.ID).versioned("3");
         registrar.playToClient(
                 GraphOverlayPayload.TYPE,
                 GraphOverlayPayload.STREAM_CODEC,

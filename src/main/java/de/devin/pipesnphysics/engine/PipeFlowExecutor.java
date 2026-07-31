@@ -56,6 +56,9 @@ public final class PipeFlowExecutor {
             brigade.execute();
         }
         new SettlePass(network, ledger, solution).execute(flowed);
+        // A pump owns no cell, so a delivery straight across a zero-cell edge would leave the
+        // client no stamp to draw a pour from; give the pump one for what it actually moved.
+        network.stampPumps(ledger);
         network.flush();
         // Any cell where two fluids were driven together this tick reacts LAST — Create's
         // crossing-the-streams (pipe breaks, water+lava leaves cobblestone). Deferred past the

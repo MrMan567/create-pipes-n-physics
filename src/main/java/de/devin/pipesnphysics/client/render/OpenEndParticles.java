@@ -45,9 +45,12 @@ import net.neoforged.neoforge.fluids.FluidStack;
  * ever drains from above the waterline), and never through the tank's BOTTOM face (fluid
  * pushed up from below wells, it does not pour).
  *
- * Known gaps, all stamp-less by construction: a settle-phase pour (dregs draining out a
- * mouth with no solved flow), a zero-cell mouth edge (a junction flush against the mouth),
- * and a wire-remnant or junction-flush tank feed.
+ * A PUMP flush against a tank or a mouth delivers across a ZERO-CELL edge and owns no cell to
+ * carry a stamp, so the executor stamps the pump itself ({@code FlowNetwork.stampPumps}) — a
+ * sync-only direction+rate, no volume. It still stores no fluid, so what it pours is read off its
+ * upstream flank ({@link #arrivingFrom}). Remaining gaps, stamp-less by construction: a
+ * settle-phase pour (dregs draining out a mouth with no solved flow) and a zero-cell edge with no
+ * pump on it (a junction flush against the mouth/tank).
  *
  * Called from the heartbeat mixin's client branch each pipe tick. Deliberately free of
  * client-only imports (the {@code ValveArrowClient} pattern), so the common mixin may call it
@@ -71,9 +74,12 @@ public final class OpenEndParticles {
         if (!(pipe instanceof PipeFluidCell cell)) return;
         Direction dir = PipeStore.flowDirection(cell.pipesnphysics$flowData());
         if (dir == null) return;
-        FluidStack content = cell.pipesnphysics$content();
-        if (content.isEmpty()) return;
         BlockPos pos = pipe.blockEntity.getBlockPos();
+        FluidStack content = cell.pipesnphysics$content();
+        // A stamped cell holding NOTHING is a pump (it stores no fluid): what it pours is whatever
+        // stands behind it, so the stream still draws in the right liquid.
+        if (content.isEmpty()) content = arrivingFrom(level, pos, dir);
+        if (content.isEmpty()) return;
         if (!playerNearby(level, pos)) return;
         BlockState state = pipe.blockEntity.getBlockState();
         if (mouthOn(level, state, pipe, pos, dir)) {
@@ -141,6 +147,27 @@ public final class OpenEndParticles {
         int height = ((FluidTankAccessor) (Object) controller).pipesnphysics$getHeight();
         return controller.getBlockPos().getY() + BoundaryColumn.TANK_RENDER_FLOOR
                 + fill.getValue() * (height - BoundaryColumn.TANK_RENDER_LOSS);
+    }
+
+    /**
+     * The fluid arriving at a stamped cell that stores none of its own — a PUMP, which owns no
+     * cell volume yet drives a delivery straight across a zero-cell edge into the tank or mouth it
+     * sits against. Read what stands on its upstream flank: the pipe cell feeding it, or the tank
+     * it lifts from. EMPTY when neither can say, and the pour is then skipped rather than guessed.
+     */
+    private static FluidStack arrivingFrom(Level level, BlockPos pos, Direction dir) {
+        BlockPos behind = pos.relative(dir.getOpposite());
+        if (FluidPropagator.getPipe(level, behind) instanceof PipeFluidCell feed) {
+            return feed.pipesnphysics$content();
+        }
+        if (level.getBlockEntity(behind) instanceof FluidTankBlockEntity tank) {
+            FluidTankBlockEntity controller = tank.getControllerBE();
+            if (controller != null) {
+                return ((FluidTankAccessor) (Object) controller).pipesnphysics$getTankInventory()
+                        .getFluid();
+            }
+        }
+        return FluidStack.EMPTY;
     }
 
     /** Whether this cell's {@code face} opens into a mouth — Create's own open-end test. */

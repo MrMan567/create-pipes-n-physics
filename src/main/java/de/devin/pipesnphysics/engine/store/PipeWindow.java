@@ -38,6 +38,16 @@ public final class PipeWindow {
         return fillsFullBlock(level, pos) ? cellBottom : cellBottom + LIP_BOTTOM;
     }
 
+    /**
+     * The elevation a reservoir's RENDERED surface must clear to give through an opening — the ONE
+     * datum every draw gate reads, so the solve's wall and the executor's can never drift apart. A
+     * pump actively PULLING keeps the opening cell's BLOCK floor instead of the aperture lip: its
+     * suction takes the puddle under the pipe too.
+     */
+    public static double drawLipY(Level level, BlockPos opening, boolean pumpPulls) {
+        return pumpPulls ? SableCompat.getWorldY(level, opening) - 0.5 : lipY(level, opening);
+    }
+
     /** Whether this cell is a VERTICAL straight pipe — its fluid fills the full block height. */
     public static boolean fillsFullBlock(Level level, BlockPos pos) {
         BlockState state = level.getBlockState(pos);

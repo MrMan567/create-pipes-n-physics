@@ -48,7 +48,6 @@ public class SableCompat {
     }
 
     public static void clearCaches() {
-        PROVIDER.clearCaches();
         SublevelSpinProbe.clear();
         CentrifugeField.clear();
         MomentumField.clear();
@@ -69,6 +68,15 @@ public class SableCompat {
      */
     public static String getSubLevelId(Level level, BlockPos pos) {
         return PROVIDER.getSubLevelId(level, pos);
+    }
+
+    /**
+     * Whether this cell sits on a physics sub-level at all — the cheap (no-allocation) form of
+     * {@link #getSubLevelId}. A cell off one rides no rigid body: it cannot move, so anything
+     * sourced from its motion is inert by construction and need not be measured or remembered.
+     */
+    public static boolean isOnSubLevel(Level level, BlockPos pos) {
+        return PROVIDER.isOnSubLevel(level, pos);
     }
 
     /**
@@ -129,10 +137,6 @@ public class SableCompat {
         return PROVIDER.getTiltAngleClient(be);
     }
 
-    public static boolean hasSubLevelRotated(Level level, BlockPos pos) {
-        return PROVIDER.hasSubLevelRotated(level, pos);
-    }
-
     public static boolean isOnSubLevelClient(BlockPos pos) {
         return PROVIDER.isOnSubLevelClient(pos);
     }
@@ -158,10 +162,6 @@ public class SableCompat {
 
     private static class NoOpProvider implements SableCompatProvider {
         @Override
-        public void clearCaches() {
-        }
-
-        @Override
         public <T> T atOverlappingContraptions(Level level, BlockPos origin, BiFunction<Level, BlockPos, T> reader) {
             return null; // no sub-levels without Sable: nothing overlaps
         }
@@ -169,6 +169,11 @@ public class SableCompat {
         @Override
         public String getSubLevelId(Level level, BlockPos pos) {
             return null; // no sub-levels without Sable: every cell is main-level
+        }
+
+        @Override
+        public boolean isOnSubLevel(Level level, BlockPos pos) {
+            return false;
         }
 
         @Override
@@ -215,11 +220,6 @@ public class SableCompat {
         @Override
         public float getPipeElevation(Level level, BlockPos pos, Direction dir) {
             return (float) Math.toDegrees(Math.asin(Math.abs(dir.getStepY())));
-        }
-
-        @Override
-        public boolean hasSubLevelRotated(Level level, BlockPos pos) {
-            return false;
         }
 
         @Override

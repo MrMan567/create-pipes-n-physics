@@ -14,6 +14,7 @@ import de.devin.pipesnphysics.engine.EdgeFlow;
 import de.devin.pipesnphysics.engine.FlowSolver;
 import de.devin.pipesnphysics.engine.FlowTrace;
 import de.devin.pipesnphysics.engine.FluidEngine;
+import de.devin.pipesnphysics.engine.MouthConditions;
 import de.devin.pipesnphysics.engine.Solution;
 import de.devin.pipesnphysics.engine.boundary.BoundaryColumn;
 import de.devin.pipesnphysics.engine.boundary.FluidCaps;
@@ -365,6 +366,7 @@ public final class PipeGraphCommand {
 
     /** One chat line per node (position, kind, heads, RPM) plus its fluid/pulley/probe/dock detail lines. */
     private static void printNodes(Report report, ServerLevel level, Graph g, Solution s, BlockPos target) {
+        MouthConditions mouths = MouthConditions.of(level, g);
         FluidStack probeFluid = firstPresentFluid(level, g);
         for (Node n : g.nodes()) {
             Double head = s.nodeHeads().get(n.index());
@@ -379,7 +381,7 @@ public final class PipeGraphCommand {
                     n.isPump() ? String.format(" §7rpm=§f%.0f", pumpSpeed(level, n)) : "",
                     n.isOneWayGate() ? " §done-way §f" + n.gateFlow() : "",
                     n.pos().equals(target) ? " §6← flagged" : ""));
-            BoundaryColumn column = columnOf(level, n);
+            BoundaryColumn column = columnOf(level, mouths, n);
             if (column != null && !column.contents().isEmpty() && column.contentMb() > 0) {
                 report.line("      §7" + (n.isOpenEnd()
                         ? "draws §f" + column.contents().getHoverName().getString()
@@ -555,9 +557,10 @@ public final class PipeGraphCommand {
     }
 
     private static GraphOverlayPayload buildPayload(ServerLevel level, Graph g, Solution s, BlockPos seed) {
+        MouthConditions mouths = MouthConditions.of(level, g);
         List<GraphOverlayPayload.NodeEntry> nodes = new ArrayList<>(g.nodes().size());
         for (Node n : g.nodes()) {
-            nodes.add(nodeEntry(level, s, n));
+            nodes.add(nodeEntry(level, mouths, s, n));
         }
         List<GraphOverlayPayload.EdgeEntry> edges = new ArrayList<>(g.edges().size());
         for (Edge e : g.edges()) {
@@ -567,7 +570,8 @@ public final class PipeGraphCommand {
     }
 
     /** One node's overlay entry: position, box kind, and its two-line floating label. */
-    private static GraphOverlayPayload.NodeEntry nodeEntry(ServerLevel level, Solution s, Node n) {
+    private static GraphOverlayPayload.NodeEntry nodeEntry(ServerLevel level, MouthConditions mouths,
+                                                           Solution s, Node n) {
         byte kind = switch (n.kind()) {
             case HANDLER -> GraphOverlayPayload.NodeEntry.KIND_HANDLER;
             case PUMP -> GraphOverlayPayload.NodeEntry.KIND_PUMP;
@@ -576,8 +580,8 @@ public final class PipeGraphCommand {
         };
         return new GraphOverlayPayload.NodeEntry(
                 n.pos().getX(), n.pos().getY(), n.pos().getZ(), kind,
-                surfaceHeight(level, n),
-                nodeLabel(level, n, s.nodeHeads().get(n.index())));
+                surfaceHeight(level, mouths, n),
+                nodeLabel(level, mouths, n, s.nodeHeads().get(n.index())));
     }
 
     /**
@@ -587,8 +591,8 @@ public final class PipeGraphCommand {
      * so it can be compared against Create's own rendered tank fluid, which may sit at a different
      * height ("the surface level inside the tanks is bumped from Create's model").
      */
-    private static float surfaceHeight(ServerLevel level, Node n) {
-        BoundaryColumn column = columnOf(level, n);
+    private static float surfaceHeight(ServerLevel level, MouthConditions mouths, Node n) {
+        BoundaryColumn column = columnOf(level, mouths, n);
         if (column == null || !column.isFiniteReservoir() || column.contentMb() <= 0) return Float.NaN;
         if (column.contents().getFluid().getFluidType().isLighterThanAir()) return Float.NaN;
         return (float) column.renderedSurface();
@@ -792,8 +796,9 @@ public final class PipeGraphCommand {
 
     /** The first non-empty fluid found on any column of the network, used to probe what sinks will take. */
     private static FluidStack firstPresentFluid(ServerLevel level, Graph g) {
+        MouthConditions mouths = MouthConditions.of(level, g);
         for (Node n : g.nodes()) {
-            BoundaryColumn column = columnOf(level, n);
+            BoundaryColumn column = columnOf(level, mouths, n);
             if (column != null && !column.contents().isEmpty() && column.contentMb() > 0) {
                 return column.contents();
             }
@@ -806,9 +811,9 @@ public final class PipeGraphCommand {
      * handlers that no longer expose a capability. Open ends report the fluid their
      * mouth would draw in (empty for a plain spill outlet).
      */
-    private static BoundaryColumn columnOf(ServerLevel level, Node n) {
+    private static BoundaryColumn columnOf(ServerLevel level, MouthConditions mouths, Node n) {
         if (n.isHandler()) return BoundaryColumn.resolve(level, n);
-        if (n.isOpenEnd()) return BoundaryColumn.forOpenEnd(level, n, false);
+        if (n.isOpenEnd()) return mouths.column(level, n);
         return null;
     }
 
@@ -828,16 +833,16 @@ public final class PipeGraphCommand {
      * /pipegraph prints in chat, shown in-world so you can SEE where it sits. Lines are
      * {@code \n}-separated for the client.
      */
-    private static String nodeLabel(ServerLevel level, Node n, Double head) {
+    private static String nodeLabel(ServerLevel level, MouthConditions mouths, Node n, Double head) {
         String info = switch (n.kind()) {
             case HANDLER -> {
-                BoundaryColumn column = columnOf(level, n);
+                BoundaryColumn column = columnOf(level, mouths, n);
                 yield column != null && !column.contents().isEmpty() && column.contentMb() > 0
                         ? String.format("%d mB %s", column.contentMb(), column.contents().getHoverName().getString())
                         : "empty";
             }
             case OPEN_END -> {
-                BoundaryColumn column = columnOf(level, n);
+                BoundaryColumn column = columnOf(level, mouths, n);
                 yield column != null && !column.contents().isEmpty()
                         ? "draws " + column.contents().getHoverName().getString()
                         : "open end";
@@ -871,9 +876,10 @@ public final class PipeGraphCommand {
      * fluid, which inverts the gravity model.
      */
     private static void sendFluidStats(Report report, ServerLevel level, Graph g) {
+        MouthConditions mouths = MouthConditions.of(level, g);
         List<FluidStack> totals = new ArrayList<>();
         for (Node n : g.nodes()) {
-            BoundaryColumn column = columnOf(level, n);
+            BoundaryColumn column = columnOf(level, mouths, n);
             if (column == null || column.contents().isEmpty() || column.contentMb() <= 0) continue;
             FluidStack running = null;
             for (FluidStack present : totals) {

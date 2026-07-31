@@ -988,4 +988,51 @@ public class FlowBrigadeTests {
             helper.succeed();
         });
     }
+
+    /**
+     * A MANIFOLD must serve every branch, not just whichever ticks first. One junction slot holds a
+     * single cell, and a run's flow depth clamps to a FULL cell at any rate past a quarter cell per
+     * tick — so two branches off one junction each demand the whole slot. Reading the slot's LIVE
+     * level, the first consumer dropped it below depth and every sibling's gate failed; consumer
+     * order is stable, so the same branch won every tick and the other stayed bone dry forever
+     * while the trunk ran at a fraction of its solved rate (the reported "flow to edge E is 0",
+     * whose dump showed the starved branch's junction-end cell at 0 and its own tail stranded
+     * below depth). {@link BrigadePass#snapshotSlots} gates on ARRIVAL instead.
+     *
+     * Mutation check: gate on {@code slot.amount()} again and one sink here finishes at 0.
+     *
+     * The DIVISION past the open gate is first-come, and that is fine: a run's demand is bounded by
+     * its head cell's room ({@code FlowingRun.intake}), so a branch that just took the slot must
+     * deliver downstream before it can ask again and its sibling gets the turn. The manifold
+     * round-robins on its own — hence the tight balance asserted below, which a proportional share
+     * was built for and could not improve on.
+     */
+    @GameTest(template = "physics/manifold_split", templateNamespace = PipesNPhysics.ID, timeoutTicks = 300)
+    public static void manifoldSlotServesEveryBranch(GameTestHelper helper) {
+        BlockPos source = new BlockPos(0, 1, 1);
+        BlockPos junction = new BlockPos(3, 1, 1);
+        BlockPos northSink = new BlockPos(5, 1, 0);
+        BlockPos southSink = new BlockPos(5, 1, 2);
+        fill(helper, source, 8000);
+
+        helper.runAfterDelay(120, () -> {
+            int north = amount(helper, northSink);
+            int south = amount(helper, southSink);
+            String graph = dump(helper, junction);
+
+            if (north <= 0 || south <= 0) {
+                helper.fail("the junction starved a branch: north " + north + ", south " + south
+                        + " — one slot must serve every consumer that pulls on it" + graph);
+                return;
+            }
+            // Equal-length, equal-elevation branches solve at the same rate, so their SHARES of the
+            // slot are equal and the sinks must track each other — not merely both be non-zero.
+            if (Math.abs(north - south) * 10 > Math.max(north, south)) {
+                helper.fail("branches served unevenly: north " + north + ", south " + south
+                        + " — equal solved rates must take equal shares of the slot" + graph);
+                return;
+            }
+            helper.succeed();
+        });
+    }
 }

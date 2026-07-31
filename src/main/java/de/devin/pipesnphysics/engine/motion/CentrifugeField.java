@@ -27,7 +27,9 @@ import java.util.Map;
  * creeping contraption does nothing.
  *
  * Main-thread only (called from the solve); one measurement per cell, cached per tick so repeated
- * same-tick lookups agree and do not corrupt the delta.
+ * same-tick lookups agree and do not corrupt the delta. Only cells ON a sub-level are measured or
+ * remembered at all — nothing else can move — and the cache is swept of cells that stopped being
+ * solved, so a disassembled contraption leaves nothing behind.
  */
 public final class CentrifugeField {
     /** Real gravity, converting the ½v² potential (m²/s²) into blocks of head (m). */
@@ -38,6 +40,8 @@ public final class CentrifugeField {
     private static final double MAX_OFFSET = 64.0;
     /** Below this displacement (blocks/tick) the direction is too small to read a reliable spin angle from. */
     private static final double MIN_DISPLACEMENT = 1e-4;
+    /** Drop a cell's measurement once nothing has solved it for this long (disassembled/gone). */
+    private static final int STALE_TICKS = 1200;
 
     private static final Map<String, Cell> LAST_MEASUREMENTS = new HashMap<>();
 
@@ -47,6 +51,9 @@ public final class CentrifugeField {
     private record Cell(double worldX, double worldY, double worldZ,
                         double displacementX, double displacementY, double displacementZ,
                         long tick, double orbitalSpeed, double angularSpeed) {}
+
+    /** A cell that cannot move: no displacement, no speeds, and nothing worth remembering. */
+    private static final Cell STILL = new Cell(0, 0, 0, 0, 0, 0, 0, 0, 0);
 
     /** Blocks to SUBTRACT from a cell's elevation for the centrifugal pull, 0 when not spinning fast enough. */
     public static double headOffset(Level level, BlockPos pos, long gameTime) {
@@ -70,6 +77,13 @@ public final class CentrifugeField {
     }
 
     private static Cell measure(Level level, BlockPos pos, long gameTime) {
+        // A cell off a sub-level rides no rigid body, so it cannot orbit anything — the same
+        // by-construction inertness MomentumField gets from its per-sub-level frame key. Bailing
+        // BEFORE the cache is what keeps this map to the cells that actually move: measuring every
+        // main-level tank on the server stored a permanent zero apiece, for a solve-time projection
+        // whose answer is always "it did not move".
+        if (!SableCompat.isOnSubLevel(level, pos)) return STILL;
+
         String key = level.dimension().location() + ":" + pos.asLong();
         Cell last = LAST_MEASUREMENTS.get(key);
         if (last != null && last.tick() == gameTime) return last; // already measured this tick
@@ -99,6 +113,17 @@ public final class CentrifugeField {
                 gameTime, orbital, angular);
         LAST_MEASUREMENTS.put(key, cell);
         return cell;
+    }
+
+    /**
+     * Reclaim the measurements of cells nothing solves any more — a disassembled contraption fires
+     * no block event, so its cells are simply never asked again and would hold their entry for the
+     * session. Runs on the same slow server-tick cadence as the momentum-frame sweep. The threshold
+     * sits far above the idle heartbeat, so a sleeping contraption keeps its delta; a dropped cell
+     * just re-seeds (one tick reading zero motion) the next time it is measured.
+     */
+    public static void sweep(long now) {
+        LAST_MEASUREMENTS.values().removeIf(cell -> now - cell.tick() > STALE_TICKS);
     }
 
     /** Drops every cached per-cell measurement; called on server stop so a new world never reads a stale delta. */

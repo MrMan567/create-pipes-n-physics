@@ -7,6 +7,7 @@ import de.devin.pipesnphysics.engine.graph.Edge;
 import de.devin.pipesnphysics.engine.graph.Node;
 import de.devin.pipesnphysics.engine.graph.PipeGeometry;
 import de.devin.pipesnphysics.engine.store.PipeStore;
+import de.devin.pipesnphysics.engine.store.PipeWindow;
 import net.minecraft.core.BlockPos;
 import net.neoforged.neoforge.fluids.FluidStack;
 
@@ -72,6 +73,8 @@ final class SettlingRun {
      * the anti-flap deadband.
      */
     static final double SURFACE_EPS = 0.05;
+    /** The target profile of a zero-cell wire: it has no cells, so there is nothing to aim at. */
+    private static final int[] NO_TARGETS = new int[0];
 
     private final FlowNetwork network;
     private final FlowLedger ledger;
@@ -98,8 +101,6 @@ final class SettlingRun {
 
     /** One settle step; returns whether anything moved (the network then stays awake). */
     boolean settle() {
-        if (cells.isEmpty()) return false;
-
         // Crossing the streams with NO flow: a tank joined to the run holds a fluid the mouth
         // cell's resting fluid is incompatible with — the two meet at the boundary exactly as
         // Create pulls a tank's fluid into a pipe already carrying another. The brigade never
@@ -114,6 +115,12 @@ final class SettlingRun {
         // CEILING field, which mixes heads with elevations the mirror cannot read.
         mirrored = lighterThanAir(settleMedium());
         if (mirrored && fillOnly) return false;
+
+        // A ZERO-CELL edge is a wire: it holds no column, so there is no profile to settle toward.
+        // The one thing that still has to happen across it is a running pump wedged flush against
+        // its sink delivering on through ({@link #primeFromPumps} degenerates to a bare
+        // {@link #deliverThroughPump} — no line to pack, so it pushes straight out).
+        if (cells.isEmpty()) return primeFromPumps(NO_TARGETS);
 
         // A sealed primed column holds: with every cell FULL and both end reservoirs still
         // reaching their openings, no air can enter the run, so an idle siphon keeps its prime
@@ -614,22 +621,27 @@ final class SettlingRun {
         // quantities the gas frame cannot, and the flow passes already move powered gas.
         if (mirrored) return false;
         // Non-short-circuit `|`: BOTH ends must attempt priming, not just the first that moves.
-        return pumpPrime(cells.getFirst(), target[0], edge.a())
-                | pumpPrime(cells.getLast(), target[target.length - 1], edge.b());
+        return pumpPrime(target, edge.a()) | pumpPrime(target, edge.b());
     }
 
-    private boolean pumpPrime(BlockPos endCell, int targetMb, int nodeIndex) {
+    private boolean pumpPrime(int[] target, int nodeIndex) {
         Node pump = network.graph.node(nodeIndex);
         if (!pump.isPump() || !FlowSolver.isPumpRunning(network.level, pump)) return false;
         BlockPos toward = PipeGeometry.adjacentCell(network.graph, edge, nodeIndex);
         if (toward == null || !toward.equals(pump.pushCell())) return false;
+        // A wire outlet has no column of its own: nothing to pack, so the pump delivers straight
+        // across it, carrying whatever its suction side offers.
+        if (cells.isEmpty()) return deliverThroughPump(pump, FluidStack.EMPTY);
+
+        boolean atA = nodeIndex == edge.a();
+        BlockPos endCell = atA ? cells.getFirst() : cells.getLast();
         PipeStore.Store cell = network.cellAt(endCell);
         if (cell == null) return false;
-        int want = Math.min(targetMb - cell.amount(), rate);
+        int want = Math.min((atA ? target[0] : target[target.length - 1]) - cell.amount(), rate);
         // Packed to the waterline already: the pump can put nothing more IN the pipe, so it
         // delivers on through into the sink instead. Priming first and delivering second is the
         // physical order — a pump fills its outlet line before it pushes anything out of it.
-        if (want <= 0) return deliverThroughPump(pump, cell);
+        if (want <= 0) return cell.amount() > 0 && deliverThroughPump(pump, cell.fluid());
 
         for (Edge supply : network.graph.edgesOf(nodeIndex)) {
             if (supply.index() == edge.index()) continue;
@@ -637,7 +649,7 @@ final class SettlingRun {
             FluidStack fluid;
             if (supply.pipes().isEmpty()) {
                 Reservoir source = network.reservoirAt(supply.other(nodeIndex));
-                if (source == null) continue;
+                if (source == null || !pumpMayDraw(source, supply, nodeIndex)) continue;
                 fluid = cell.amount() > 0 ? cell.fluid() : source.contents();
                 if (fluid.isEmpty() || cell.room(fluid) <= 0) continue;
                 got = source.drain(fluid, want);
@@ -657,6 +669,7 @@ final class SettlingRun {
                     // pump drain its own suction line forward.
                     Reservoir behind = network.reservoirAt(supply.other(nodeIndex));
                     if (behind != null && behind.isFiniteReservoir() && behind.holdsFluid()
+                            && pumpMayDraw(behind, supply, nodeIndex)
                             && FluidStack.isSameFluidSameComponents(behind.contents(), fluid)) {
                         got = behind.drain(fluid, want);
                     }
@@ -689,20 +702,29 @@ final class SettlingRun {
      * {@code FlowingRun.deliverThroughWire}, which this mirrors two-phase refund and all). Drawing
      * from the suction side rather than the run's own sink-end cell is what keeps it from
      * circling: that cell would just be topped back up out of the same tank next tick.
+     *
+     * {@code column} is the outlet run's own fluid — what physically stands between the pump and
+     * the sink — or EMPTY across a zero-cell WIRE outlet (a pump flush against its tank), which
+     * has no column and so carries whatever the suction side holds. Without the wire case a pump
+     * with no pipe on its push side could never deliver at all: {@link #pumpPrime} needs an outlet
+     * cell to pack, and a zero-cell edge has none ("why does this pump not drain the pipe behind
+     * it empty" — a full suction line, a sink with room, and a spinning pump between them).
      */
-    private boolean deliverThroughPump(Node pump, PipeStore.Store outlet) {
+    private boolean deliverThroughPump(Node pump, FluidStack column) {
         Reservoir sink = network.reservoirAt(edge.other(pump.index()));
-        if (sink == null || outlet.amount() <= 0) return false;
-        FluidStack fluid = outlet.fluid();
-        int want = sink.probeFill(fluid, FlowSolver.pumpFlowCapMb(network.level, pump));
-        if (want <= 0) return false;
+        if (sink == null) return false;
+        int cap = FlowSolver.pumpFlowCapMb(network.level, pump);
 
         for (Edge supply : network.graph.edgesOf(pump.index())) {
             if (supply.index() == edge.index()) continue;
             Reservoir source = supply.pipes().isEmpty()
                     ? network.reservoirAt(supply.other(pump.index())) : null;
-            PipeStore.Store feed = source != null ? null
-                    : network.cellAt(PipeGeometry.adjacentCell(network.graph, supply, pump.index()));
+            if (source != null && !pumpMayDraw(source, supply, pump.index())) continue;
+            PipeStore.Store feed = source != null ? null : feedCell(supply, pump.index());
+            FluidStack fluid = column.isEmpty() ? offeredBy(source, feed) : column;
+            if (fluid.isEmpty()) continue;
+            int want = sink.probeFill(fluid, cap);
+            if (want <= 0) return false;
             int got;
             if (source != null) {
                 got = source.drain(fluid, want);
@@ -725,6 +747,49 @@ final class SettlingRun {
             return true;
         }
         return false;
+    }
+
+    /**
+     * The cell a pump lifts from on one supply run: the first one still holding fluid, walking in
+     * from the pump. Reading only the ADJACENT cell left the run's last dregs stranded one cell
+     * behind it — the pump empties the cell at its flank every tick, and the anti-slosh gate then
+     * refuses to hand the remainder across ("why does this pump not drain the pipe behind it
+     * empty" ended at 4 mB in the far cell). The walk is {@link #firstWetCell}'s: it crosses
+     * emptied cells but never a dry rise.
+     */
+    private PipeStore.Store feedCell(Edge supply, int pumpIndex) {
+        List<BlockPos> pipes = supply.pipes();
+        BlockPos wet = firstWetCell(pumpIndex == supply.a() ? pipes : pipes.reversed());
+        return wet == null ? null : network.cellAt(wet);
+    }
+
+    /**
+     * Whether a pump may lift out of a supply RESERVOIR at all: the draw-lip wall the solve applies
+     * ({@code FluidPass.canDrawFrom}), which these settle paths bypassed entirely — they drain the
+     * handler straight, and no lip cap is installed on a tick that solved no flow. A pump therefore
+     * packed its outlet run and delivered on out of a tank whose visible surface stood more than a
+     * block BELOW its own opening ("why does this pump pipe? the surface of the fluid does not reach
+     * the pump yet"), with the solve's own wall — the reason nothing solved — sitting right there.
+     *
+     * A pump PULLING keeps the opening cell's BLOCK floor rather than the aperture lip (its suction
+     * takes the puddle under the pipe too, the shared {@link PipeWindow#drawLipY} datum), and
+     * {@code PUMP_DRAIN_ANY_LEVEL} removes the wall outright — a dip tube lifts from any level. A
+     * mouth or bottomless source is exempt, exactly as in the solve: its opening is submerged by
+     * construction.
+     */
+    private boolean pumpMayDraw(Reservoir source, Edge supply, int pumpIndex) {
+        if (source.isOpenMouth() || source.isInfiniteSource()) return true;
+        if (PipesNPhysicsConfig.PUMP_DRAIN_ANY_LEVEL.get()) return true;
+        BlockPos opening = PipeGeometry.adjacentCell(
+                network.graph, supply, supply.other(pumpIndex));
+        return opening != null
+                && source.surface() > PipeWindow.drawLipY(network.level, opening, true);
+    }
+
+    /** What one supply side of a pump has to offer: its reservoir's contents, or its feed cell's. */
+    private static FluidStack offeredBy(Reservoir source, PipeStore.Store feed) {
+        if (source != null) return source.contents();
+        return feed != null && feed.amount() > 0 ? feed.fluid() : FluidStack.EMPTY;
     }
 
     /**
@@ -849,22 +914,32 @@ final class SettlingRun {
     }
 
     /**
-     * Index of the first cell holding fluid, walking in from the given end across empty cells —
-     * or -1 with nothing to find. The walk never climbs: an empty cell whose floor sits above the
-     * wet cell it leads to is a dry rise the fluid cannot cross (an air gap, not a channel).
+     * Index of the first cell of THIS run holding fluid, walking in from the given end — or -1
+     * with nothing to find.
      */
     private int firstWetCellFrom(boolean fromB) {
+        BlockPos wet = firstWetCell(fromB ? cells.reversed() : cells);
+        return wet == null ? -1 : cells.indexOf(wet);
+    }
+
+    /**
+     * The first cell holding fluid along {@code path}, or null. Empty cells are CROSSED: the
+     * anti-slosh gate in {@link #spreadLevel} refuses to hand the last {@code DREGS_MB} across a
+     * level pair, so anything reading only the cell at its own end strands a film one cell short
+     * of itself forever. The walk never climbs, though — an empty cell whose floor sits above the
+     * wet cell it leads to is a dry rise the fluid cannot cross (an air gap, not a channel).
+     */
+    private BlockPos firstWetCell(List<BlockPos> path) {
         double pathFloor = Double.NEGATIVE_INFINITY;
-        for (int step = 0; step < cells.size(); step++) {
-            int i = fromB ? cells.size() - 1 - step : step;
-            PipeStore.Store cell = network.cellAt(cells.get(i));
-            if (cell == null) return -1;
+        for (BlockPos pos : path) {
+            PipeStore.Store cell = network.cellAt(pos);
+            if (cell == null) return null;
             if (cell.amount() > 0) {
-                return pathFloor > windowLow(cells.get(i)) + SURFACE_EPS ? -1 : i;
+                return pathFloor > windowLow(pos) + SURFACE_EPS ? null : pos;
             }
-            pathFloor = Math.max(pathFloor, windowLow(cells.get(i)));
+            pathFloor = Math.max(pathFloor, windowLow(pos));
         }
-        return -1;
+        return null;
     }
 
     private boolean moveBetween(PipeStore.Store from, PipeStore.Store to, int amount) {

@@ -57,6 +57,11 @@ final class FlowingRun {
         return flowsAToB ? edge.a() : edge.b();
     }
 
+    /** The plug depth every gate on this run requires, in mB. */
+    int flowDepth() {
+        return flowDepthMb;
+    }
+
     int downstreamNode() {
         return flowsAToB ? edge.b() : edge.a();
     }
@@ -135,7 +140,7 @@ final class FlowingRun {
         Reservoir source = network.reservoirAt(upstreamNode());
         int got = source != null
                 ? source.drain(fluid, want)
-                : pass.pullArrivingAt(upstreamNode(), fluid, want, flowDepthMb, pass.freshVisitSet());
+                : pass.pullArrivingAt(this, fluid, want, pass.freshVisitSet());
         if (got <= 0) return;
         slot.insert(fluid, got);
         exitBudget -= got;
@@ -162,7 +167,7 @@ final class FlowingRun {
         Reservoir source = network.reservoirAt(upstreamNode());
         int got = source != null
                 ? source.drain(fluid, want)
-                : pass.pullArrivingAt(upstreamNode(), fluid, want, flowDepthMb, pass.freshVisitSet());
+                : pass.pullArrivingAt(this, fluid, want, pass.freshVisitSet());
         if (got > 0) {
             head.insert(fluid, got);
             pass.ledger().moved(edge, got);
@@ -203,7 +208,7 @@ final class FlowingRun {
         Reservoir source = network.reservoirAt(upstreamNode());
         int got = source != null
                 ? source.drain(fluid, want)
-                : pass.pullArrivingAt(upstreamNode(), fluid, want, flowDepthMb, pass.freshVisitSet());
+                : pass.pullArrivingAt(this, fluid, want, pass.freshVisitSet());
         if (got <= 0) return;
         int filled = sink.fill(fluid, got);
         if (filled < got) reinsertLeftover(got - filled);
@@ -221,7 +226,7 @@ final class FlowingRun {
         if (budget <= 0) return 0;
         int got;
         if (cells.isEmpty()) {
-            got = pass.pullArrivingAt(upstreamNode(), wanted, budget, flowDepthMb, visited);
+            got = pass.pullArrivingAt(this, wanted, budget, visited);
         } else {
             PipeStore.Store tail = network.cellAt(cells.getLast());
             if (tail == null) return 0;

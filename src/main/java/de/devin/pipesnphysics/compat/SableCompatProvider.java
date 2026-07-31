@@ -9,9 +9,9 @@ import net.minecraft.world.phys.Vec3;
 import java.util.function.BiFunction;
 
 interface SableCompatProvider {
-    void clearCaches();
     <T> T atOverlappingContraptions(Level level, BlockPos origin, BiFunction<Level, BlockPos, T> reader);
     String getSubLevelId(Level level, BlockPos pos);
+    boolean isOnSubLevel(Level level, BlockPos pos);
     boolean isSubLevelReady(Level level, BlockPos pos);
     double getWorldY(Level level, BlockPos pos);
     Vec3 getWorldPos(Level level, BlockPos pos);
@@ -22,7 +22,6 @@ interface SableCompatProvider {
     float getTiltAngle(Level level, BlockPos pos);
     float getTiltAngleClient(BlockEntity be);
     float getPipeElevation(Level level, BlockPos pos, Direction dir);
-    boolean hasSubLevelRotated(Level level, BlockPos pos);
     boolean isOnSubLevelClient(BlockPos pos);
     float getClientPipeElevation(BlockPos pos, Direction dir);
     boolean canFluidReachPipe(Level level, BlockPos tankPos, BlockPos pipePos, double fillFraction);

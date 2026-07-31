@@ -564,12 +564,14 @@ public class OpenEndTests {
     }
 
     /**
-     * A HORIZONTAL open mouth must NEVER draw fluid IN — it is a spill outlet only. A sideways mouth
-     * sits at the elevation of whatever it spills, so intake would just reclaim its own spilled block,
-     * tick after tick (the "why can a horizontal pipe suck in water?" oscillation). Only a vertical
-     * mouth may drink (a riser dipping into a body, or opening up beneath one). Face a flat mouth at a
-     * hand-placed water source with an emptied tank pulling a hard vacuum below it: the vertical rig
-     * ({@link #openEndDrinksHandPlacedSource}) drinks here, this one must plan NOTHING.
+     * An UNPUMPED horizontal open mouth must NEVER draw fluid IN — it is a spill outlet only. A
+     * sideways mouth sits at the elevation of whatever it spills, so intake would just reclaim its own
+     * spilled block, tick after tick (the "why can a horizontal pipe suck in water?" oscillation).
+     * Unpowered intake is a vertical act: a riser dipping into a body, or opening up beneath one. Face
+     * a flat mouth at a hand-placed water source with an emptied tank pulling a hard vacuum below it:
+     * the vertical rig ({@link #openEndDrinksHandPlacedSource}) drinks here, this one must plan
+     * NOTHING. A hard vacuum is NOT suction — only a running pump is, and this rig has none
+     * ({@link #sideMouthDrinksUnderPumpSuction} is the pumped twin).
      */
     @GameTest(template = "physics/horizontal_mouth", templateNamespace = PipesNPhysics.ID, timeoutTicks = 100)
     public static void horizontalMouthDoesNotSuckInWater(GameTestHelper helper) {
@@ -588,6 +590,42 @@ public class OpenEndTests {
                     .anyMatch(t -> t.from().equals(helper.absolutePos(source)));
             if (intake) helper.fail("horizontal open mouth sucked in a water source — it must be spill-only");
             else helper.succeed();
+        });
+    }
+
+    /**
+     * ...but a horizontal mouth a running PUMP pulls on DOES drink (owner rule 2026-07-31). The
+     * vertical rule is a stand-in for "nothing is sucking here": it exists purely to stop an
+     * unpowered sideways mouth reclaiming its own spilled block, and a pump cannot spill out of its
+     * own suction flank — the mouth it evacuates is never the mouth it feeds — so the oscillation is
+     * structurally impossible under suction. This is the reported rig: a pump pushing into a tank
+     * with its bare suction flank open sideways at the water, which used to solve to nothing at all.
+     *
+     * Mutation check: drop the {@code || underSuction} term in {@code BoundaryColumn.forOpenEnd} and
+     * the tank here stays empty (while {@link #horizontalMouthDoesNotSuckInWater}, whose rig has no
+     * pump, keeps passing either way — that pair is the whole discriminator).
+     */
+    @GameTest(template = "physics/pump_side_intake", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
+    public static void sideMouthDrinksUnderPumpSuction(GameTestHelper helper) {
+        BlockPos tank = new BlockPos(0, 1, 0);
+        BlockPos pump = new BlockPos(2, 1, 0);
+        BlockPos mouth = new BlockPos(3, 1, 0); // the space the pump's EAST flank opens into
+
+        helper.runAfterDelay(8, () -> {
+            Direction facing = helper.getBlockState(pump).getValue(PumpBlock.FACING);
+            if (facing != Direction.WEST) {
+                helper.fail("the pump must push toward the tank, facing " + facing);
+                return;
+            }
+            helper.setBlock(mouth, Blocks.WATER.defaultBlockState()); // a lone, hand-placed source
+        });
+
+        helper.succeedWhen(() -> {
+            int held = amount(helper, tank);
+            if (held <= 0) {
+                helper.fail("a pumped side mouth drew nothing — suction lifts the vertical-mouth rule"
+                        + dump(helper, pump));
+            }
         });
     }
 

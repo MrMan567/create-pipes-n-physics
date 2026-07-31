@@ -4,7 +4,6 @@ import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.compat.SableCompat;
 import de.devin.pipesnphysics.engine.boundary.BoundaryColumn;
-import de.devin.pipesnphysics.engine.boundary.OpenEndPipes;
 import de.devin.pipesnphysics.engine.boundary.RelayDetector;
 import de.devin.pipesnphysics.engine.graph.Edge;
 import de.devin.pipesnphysics.engine.graph.Graph;
@@ -172,17 +171,10 @@ public final class FlowSolver {
 
         static Columns collect(Level level, Graph graph) {
             Columns columns = new Columns();
-            // If ANY open end on this network spilled recently, hold off finite-source
-            // intake everywhere on it — the network must not suck back a block it (or a
-            // sibling mouth, after the spill flows over) just spat out.
-            int cooldown = PipesNPhysicsConfig.OPEN_END_INTAKE_COOLDOWN_TICKS.get();
-            boolean networkSpilled = false;
-            for (Node node : graph.nodes()) {
-                if (node.isOpenEnd() && OpenEndPipes.recentlySpilled(level, node.pos(), cooldown)) {
-                    networkSpilled = true;
-                    break;
-                }
-            }
+            // What this network's mouths may drink this tick: the spill latch and the pumps
+            // actually sucking on them, resolved once so every mouth reads the same way here
+            // and in the executor.
+            MouthConditions mouths = MouthConditions.of(level, graph);
             Map<BlockPos, BoundaryColumn> byIdentity = new LinkedHashMap<>();
             for (Node node : graph.nodes()) {
                 BoundaryColumn resolved;
@@ -204,7 +196,7 @@ public final class FlowSolver {
                                 resolved.contents().getFluid(), resolved.contentMb());
                     }
                 } else if (node.isOpenEnd()) {
-                    resolved = BoundaryColumn.forOpenEnd(level, node, networkSpilled);
+                    resolved = mouths.column(level, node);
                 } else {
                     continue;
                 }
@@ -355,31 +347,62 @@ public final class FlowSolver {
     private static Map<Integer, EdgeStatics> computeEdgeStatics(Level level, Graph graph) {
         Map<Integer, EdgeStatics> statics = new HashMap<>(graph.edges().size() * 2);
         for (Edge edge : graph.edges()) {
-            double crestHeight = Double.NaN;
-            double crestPos = 0;
-            BlockPos crestCell = null;
-            for (int i = 0; i < edge.pipes().size(); i++) {
-                double cellY = SableCompat.getWorldY(level, edge.pipes().get(i));
-                if (Double.isNaN(crestHeight) || cellY > crestHeight) {
-                    crestHeight = cellY;
-                    crestPos = (i + 1.0) / (edge.length() + 1);
-                    crestCell = edge.pipes().get(i);
-                }
-            }
-            // The crest cell's LIP (its outer shell bottom, the draw-lip datum) is the WEIR
-            // threshold: a supply reaching it pours into the cell and over by plain gravity, so
-            // a dry crest only gates below it. Same datum as the draw lip, so a tank resting AT
-            // its lip sits exactly at the gate boundary, never walled a hair above it.
-            double crestFloor = crestCell != null ? PipeWindow.lipY(level, crestCell) : Double.NaN;
-            boolean crestWet = true;
-            if (crestCell != null && PipeStore.capacityMb() > 0) {
-                PipeStore.Store cell = PipeStore.at(level, crestCell);
-                crestWet = cell != null && cell.amount() > 0;
-            }
-            statics.put(edge.index(), new EdgeStatics(
-                    runThrottle(level, graph, edge), crestHeight, crestFloor, crestPos, crestWet));
+            statics.put(edge.index(), edgeStatics(level, graph, edge));
         }
         return statics;
+    }
+
+    /**
+     * The DEEPEST elevation a supply may sit at and still be drawn through {@code edge}. This is
+     * the pull-side limit the pump reach overlay paints toward, and it lives here so it is the
+     * SAME rule the solve's crest gate applies ({@code NetworkSolver.crestFactor}) rather than a
+     * second copy of it drifting apart from it.
+     *
+     * A PRIMED column may hang the suction limit below the run's crest. A DRY one cannot be
+     * CREATED at all — suction holds a column, it never makes one — so nothing is drawable until
+     * the supply itself rises to the crest cell's lip, unless the pack opted into pump
+     * self-priming, which grants the same limit for establishing. That difference is the whole
+     * reason a pump parked above the waterline with a dry riser reaches nothing, however deep its
+     * nominal suction limit would allow. An edge with no cells has no crest and answers
+     * {@code fallback}.
+     *
+     * Multi-edge suction paths are approximated per edge: the binding crest is really the highest
+     * cell along the whole path, which for the single-run case (the common one) is the same thing.
+     */
+    public static double drawableFloor(Level level, Graph graph, Edge edge, double fallback) {
+        EdgeStatics statics = edgeStatics(level, graph, edge);
+        if (Double.isNaN(statics.crestHeight())) return fallback;
+        double suction = PipesNPhysicsConfig.SUCTION_LIMIT.get();
+        if (statics.crestWet()) return statics.crestHeight() - suction;
+        return statics.crestFloor()
+                - (PipesNPhysicsConfig.ENABLE_PUMP_SELF_PRIMING.get() ? suction : 0);
+    }
+
+    /** One edge's fluid-independent statics: its valve throttle and its crest geometry. */
+    static EdgeStatics edgeStatics(Level level, Graph graph, Edge edge) {
+        double crestHeight = Double.NaN;
+        double crestPos = 0;
+        BlockPos crestCell = null;
+        for (int i = 0; i < edge.pipes().size(); i++) {
+            double cellY = SableCompat.getWorldY(level, edge.pipes().get(i));
+            if (Double.isNaN(crestHeight) || cellY > crestHeight) {
+                crestHeight = cellY;
+                crestPos = (i + 1.0) / (edge.length() + 1);
+                crestCell = edge.pipes().get(i);
+            }
+        }
+        // The crest cell's LIP (its outer shell bottom, the draw-lip datum) is the WEIR
+        // threshold: a supply reaching it pours into the cell and over by plain gravity, so
+        // a dry crest only gates below it. Same datum as the draw lip, so a tank resting AT
+        // its lip sits exactly at the gate boundary, never walled a hair above it.
+        double crestFloor = crestCell != null ? PipeWindow.lipY(level, crestCell) : Double.NaN;
+        boolean crestWet = true;
+        if (crestCell != null && PipeStore.capacityMb() > 0) {
+            PipeStore.Store cell = PipeStore.at(level, crestCell);
+            crestWet = cell != null && cell.amount() > 0;
+        }
+        return new EdgeStatics(
+                runThrottle(level, graph, edge), crestHeight, crestFloor, crestPos, crestWet);
     }
 
     /**

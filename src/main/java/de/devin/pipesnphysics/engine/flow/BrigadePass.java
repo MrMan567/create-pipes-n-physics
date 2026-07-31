@@ -35,6 +35,11 @@ public final class BrigadePass {
     private final Map<Integer, FlowingRun> runs = new HashMap<>();
     /** The runs flowing INTO each pass-through node — the feeders a consumer may pull from. */
     private final Map<Integer, List<FlowingRun>> feedersInto = new HashMap<>();
+    /**
+     * Each junction/gate slot's contents as this pass FOUND them, before any run drew on it — the
+     * quantity the depth gate in {@link #pullArrivingAt} asks about. See {@link #snapshotSlots}.
+     */
+    private final Map<Integer, Integer> slotArrival = new HashMap<>();
 
     public BrigadePass(FlowNetwork network, FlowLedger ledger, Solution.FlowPass pass) {
         this.network = network;
@@ -66,31 +71,63 @@ public final class BrigadePass {
     public void execute() {
         if (runs.isEmpty()) return;
         installLipCaps();
+        snapshotSlots();
         for (FlowingRun run : consumersFirst()) {
             run.tick();
         }
     }
 
     /**
+     * Record every junction/gate slot's contents BEFORE any run draws on it, because the depth gate
+     * asks whether the column has ARRIVED at that junction — a state earlier ticks established, not
+     * a live level that the first consumer of this tick can revoke for its siblings.
+     *
+     * Reading the live slot starved every branch of a MANIFOLD but one. A slot holds exactly one
+     * cell, and a run's flow depth clamps to a full cell at any rate past a quarter cell per tick,
+     * so two branches off one junction each demanded the WHOLE slot: whichever ticked first dropped
+     * it below depth and every sibling's gate then failed — the same branch winning every tick
+     * (consumer order is stable), the others permanently dry with the trunk stuck at a fraction of
+     * its solved rate. Gating on arrival makes the split supply-limited instead of order-limited.
+     * A slot that never reached depth still passes nothing, so plug flow is unchanged.
+     *
+     * The DIVISION past the open gate stays first-come, deliberately. A proportional share of the
+     * solved rates was built and reverted: it could not be shown to change any outcome, because
+     * {@link FlowingRun#intake} bounds a run's demand by its head cell's ROOM — a branch that just
+     * took from the slot must deliver downstream before it can ask again, which costs it a tick and
+     * hands its sibling the turn. The manifold round-robins on its own; measured on the
+     * {@code manifold_split} rig, greedy split 2604/2587.
+     */
+    private void snapshotSlots() {
+        for (Node node : network.graph.nodes()) {
+            PipeStore.Store slot = network.slotAt(node.index());
+            if (slot != null) slotArrival.put(node.index(), slot.amount());
+        }
+    }
+
+    /**
      * Fluid arriving at a node this tick, for a consumer pulling through it: a reservoir drains
      * on demand; a junction/gate node yields its SLOT — plug flow: the slot passes fluid on only
-     * once it pools the pulling run's flow depth ({@code depthMb}), so the junction cell visibly
-     * fills before anything continues past it (feeders top it up in their own ticks); a slot-less
-     * pass-through (a pump) pulls straight from its feeders' tails, recursing through wires. The
-     * visited set breaks pull cycles.
+     * once it has pooled the pulling run's flow depth ({@code depthMb}), so the junction cell
+     * visibly fills before anything continues past it (feeders top it up in their own ticks); a
+     * slot-less pass-through (a pump) pulls straight from its feeders' tails, recursing through
+     * wires. The visited set breaks pull cycles.
+     *
+     * A junction/gate slot answers on the ARRIVAL snapshot, never its live level, so a manifold
+     * serves every branch instead of only whichever ticks first. See {@link #snapshotSlots}.
      */
-    int pullArrivingAt(int nodeIndex, FluidStack wanted, int amount, int depthMb, Set<Integer> visited) {
+    int pullArrivingAt(FlowingRun puller, FluidStack wanted, int amount, Set<Integer> visited) {
+        int nodeIndex = puller.upstreamNode();
         if (amount <= 0 || !visited.add(nodeIndex)) return 0;
         Reservoir reservoir = network.reservoirAt(nodeIndex);
         if (reservoir != null) return reservoir.drain(wanted, amount);
 
         PipeStore.Store slot = network.slotAt(nodeIndex);
         if (slot != null) {
-            if (slot.amount() >= depthMb
-                    && FluidStack.isSameFluidSameComponents(slot.fluid(), wanted)) {
-                return slot.extract(amount).getAmount();
+            if (slotArrival.getOrDefault(nodeIndex, 0) < puller.flowDepth()
+                    || !FluidStack.isSameFluidSameComponents(slot.fluid(), wanted)) {
+                return 0;
             }
-            return 0;
+            return slot.extract(amount).getAmount();
         }
         int got = 0;
         for (FlowingRun feeder : feedersInto.getOrDefault(nodeIndex, List.of())) {

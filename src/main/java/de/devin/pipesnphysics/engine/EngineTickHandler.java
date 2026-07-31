@@ -8,6 +8,7 @@ import de.devin.pipesnphysics.engine.graph.Graph;
 import de.devin.pipesnphysics.engine.graph.GraphBuilder;
 import de.devin.pipesnphysics.engine.graph.GraphCache;
 import de.devin.pipesnphysics.engine.graph.Node;
+import de.devin.pipesnphysics.engine.motion.CentrifugeField;
 import de.devin.pipesnphysics.engine.motion.CentrifugeProcessor;
 import de.devin.pipesnphysics.engine.motion.MomentumField;
 import de.devin.pipesnphysics.engine.probe.SublevelSpinProbe;
@@ -159,12 +160,15 @@ public final class EngineTickHandler {
             // contraptions, exploded runs) — nothing ever seeds them again, so only this sweeps.
             if (sweep) GraphCache.sweep(level, level.getGameTime());
         }
-        // Momentum frames are keyed per sub-level (cross-dimension), so sweep once — reclaims the
-        // frames of disassembled contraptions no cell ever looks up again. Same for relay-detector
-        // samples of handlers that left the network with no break event.
+        // Momentum frames are keyed per sub-level and centrifuge measurements per cell, both across
+        // dimensions, so sweep once — reclaims what a disassembled contraption leaves behind, which
+        // nothing ever looks up again. Same for relay-detector samples of handlers that left the
+        // network with no break event.
         if (sweep) {
-            MomentumField.sweep(event.getServer().overworld().getGameTime());
-            RelayDetector.sweep(event.getServer().overworld().getGameTime());
+            long swept = event.getServer().overworld().getGameTime();
+            MomentumField.sweep(swept);
+            CentrifugeField.sweep(swept);
+            RelayDetector.sweep(swept);
         }
         if (PipesNPhysicsConfig.DEBUG_SUBLEVEL_SPIN.get()) {
             SublevelSpinProbe.tick(event.getServer());

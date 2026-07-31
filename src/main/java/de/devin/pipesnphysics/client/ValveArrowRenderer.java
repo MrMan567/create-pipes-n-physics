@@ -46,7 +46,7 @@ public final class ValveArrowRenderer {
 
     @SubscribeEvent
     public static void onRenderLevel(RenderLevelStageEvent event) {
-        // AFTER_PARTICLES like the pump range arrows: draw over the in-pipe fluid, not behind it.
+        // AFTER_PARTICLES like the pump reach sleeve: draw over the in-pipe fluid, not behind it.
         if (event.getStage() != RenderLevelStageEvent.Stage.AFTER_PARTICLES) return;
 
         Minecraft mc = Minecraft.getInstance();

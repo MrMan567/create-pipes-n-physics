@@ -340,19 +340,23 @@ public final class BoundaryColumn {
      *
      * By default an open end is an EMPTY, receive-only outlet — it spills but never
      * reclaims. When {@link #intakeFluid intake} is enabled, the mouth faces a drinkable
-     * body, AND the mouth is VERTICAL, it becomes a ONE-WAY intake {@link #isInfiniteSource
-     * source} instead: it supplies that fluid whenever the network sits below the mouth (a
-     * "vacuum"), exactly like a hose pulley but fixed at the mouth. {@code networkSpilled}
+     * body, AND the mouth may {@link #drawsInThrough draw in} at all, it becomes a ONE-WAY
+     * intake {@link #isInfiniteSource source} instead: it supplies that fluid whenever the
+     * network sits below the mouth (a "vacuum"), exactly like a hose pulley but fixed at
+     * the mouth. {@code networkSpilled}
      * = some open end on this network spilled within the cooldown; while true, a FINITE
      * source is not pulled (so the network cannot suck a block it just spat out, including
      * one that flowed to a sibling mouth) — lakes/cauldrons are unaffected.
      *
-     * A HORIZONTAL mouth NEVER draws in ({@link #drawsInThrough}) — it is a spill outlet
-     * only. A sideways mouth sits at the elevation of whatever it spills, so drinking would
-     * just reclaim its own spilled block, tick after tick (the "why can a horizontal pipe
-     * suck in water?" oscillation). Suction intake is a vertical act: a riser dipping DOWN
-     * into a body, or opening UP beneath one. The cooldown gate below is the finer,
-     * finite-source guard on the vertical mouths that DO intake.
+     * An UNPUMPED horizontal mouth never draws in — it is a spill outlet only. A sideways
+     * mouth sits at the elevation of whatever it spills, so drinking would just reclaim its
+     * own spilled block, tick after tick (the "why can a horizontal pipe suck in water?"
+     * oscillation). Unpowered intake is therefore a vertical act: a riser dipping DOWN into
+     * a body, or opening UP beneath one. {@code underSuction} — a running pump PULLS on this
+     * mouth ({@code MouthConditions}) — lifts that: a pump cannot spill out of its own
+     * suction flank, so a mouth it evacuates is not a mouth it feeds, and the oscillation the
+     * vertical rule guards against is structurally impossible there. The cooldown gate below
+     * is the finer, finite-source guard on the mouths that DO intake.
      *
      * One-wayness plus the consume-safe check are what keep the v1 oscillation dead.
      * Modelling a source as a two-way brimming reservoir made the engine drain its own
@@ -361,11 +365,12 @@ public final class BoundaryColumn {
      * network just spilled (draining it would convert it to flowing, inviting a re-spill)
      * — only genuine bodies that survive a drain are pulled.
      */
-    public static BoundaryColumn forOpenEnd(Level level, Node openEndNode, boolean networkSpilled) {
+    public static BoundaryColumn forOpenEnd(Level level, Node openEndNode, boolean networkSpilled,
+                                            boolean underSuction) {
         BlockPos space = openEndNode.pos();
         double bottom = SableCompat.getWorldY(level, space) - 0.5;
         FluidStack intake = intakeFluid(level, space, networkSpilled,
-                drawsInThrough(openEndNode.openFace()));
+                drawsInThrough(openEndNode.openFace()) || underSuction);
         boolean canIntake = !intake.isEmpty();
         // Capacity (and so capacitance) is the atmospheric stand-in — a stiff boundary at
         // the mouth — but contentMb carries the HONEST per-tick yield ({@code intake}'s
@@ -378,8 +383,9 @@ public final class BoundaryColumn {
     }
 
     /**
-     * Only a VERTICAL mouth may draw a fluid BLOCK in — a horizontal one is a pure spill outlet
-     * (see {@link #forOpenEnd}). Non-spillable targets are exempt: see {@link #drinkableSource}.
+     * Only a VERTICAL mouth may draw a fluid BLOCK in UNPUMPED — a horizontal one is a spill
+     * outlet until a pump sucks on it (see {@link #forOpenEnd}). Non-spillable targets are
+     * exempt entirely: see {@link #drinkableSource}.
      */
     private static boolean drawsInThrough(Direction openFace) {
         return openFace != null && openFace.getAxis().isVertical();

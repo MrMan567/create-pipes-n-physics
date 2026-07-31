@@ -19,7 +19,7 @@ import java.util.Objects;
 /**
  * Clears the client-side render/holder caches when the player leaves a world or crosses into another
  * dimension. Those holders key data by BlockPos and time it against the world's game-time, so without
- * this a rejoin or a nether portal would render ghost pump-range arrows, /pipegraph overlays, goggle
+ * this a rejoin or a nether portal would render a ghost pump reach sleeve, /pipegraph overlays, goggle
  * throttles, or waterline fades from the previous world — the old coordinates and a non-monotonic
  * clock leaking through. One hook clears every holder, so a new holder only needs a {@code clear()}.
  */

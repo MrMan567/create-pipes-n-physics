@@ -312,7 +312,8 @@ public final class PipeProbe {
         return (float) (ceiling - base);
     }
 
-    private static boolean isGas(FluidStack fluid) {
+    /** Package-private: {@code PumpRangeProbe} suppresses its reach sleeve on the same grounds. */
+    static boolean isGas(FluidStack fluid) {
         return !fluid.isEmpty() && fluid.getFluid().getFluidType().isLighterThanAir();
     }
 
