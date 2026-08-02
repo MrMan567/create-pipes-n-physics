@@ -39,16 +39,14 @@ public final class Reservoir {
 
     /**
      * Draw up to {@code amount} of {@code fluid} out of this reservoir, returning what really
-     * came out. An open end gives only its own precomputed per-tick yield (Create's drain would
-     * return the REQUESTED amount even when the body holds less — fluid from nothing) and only
-     * its own fluid (a foreign-fluid probe corrupts the mouth buffer).
+     * came out. A one-way SINK gives nothing. An open end gives only its own precomputed per-tick
+     * yield (Create's drain would return the REQUESTED amount even when the body holds less —
+     * fluid from nothing) and only its own fluid (a foreign-fluid probe corrupts the mouth buffer).
      */
     int drain(FluidStack fluid, int amount) {
+        if (column.isBottomlessSink()) return 0;
         if (column.isOpenEnd()) {
-            if (!column.isInfiniteSource()
-                    || !FluidStack.isSameFluidSameComponents(column.contents(), fluid)) {
-                return 0;
-            }
+            if (!FluidStack.isSameFluidSameComponents(column.contents(), fluid)) return 0;
             amount = Math.min(amount, column.contentMb());
         }
         int budget = (int) Math.min(amount, Math.min(giveRemaining, drawLipCapMb));
@@ -70,10 +68,11 @@ public final class Reservoir {
 
     /**
      * Pour up to {@code amount} of {@code fluid} into this reservoir, returning what it really
-     * accepted. A delivery into an open end is a spill (latches the anti-reclaim cooldown); one
-     * into a hose pulley pins it as a one-way output sink.
+     * accepted. A one-way SOURCE takes nothing. A delivery into an open end is a spill (latches
+     * the anti-reclaim cooldown); one into a hose pulley pins it as a one-way output sink.
      */
     int fill(FluidStack fluid, int amount) {
+        if (column.isInfiniteSource()) return 0;
         amount = Math.min(amount, takeRemaining);
         if (amount <= 0) return 0;
         IFluidHandler handler = column.handler(level);
@@ -105,7 +104,7 @@ public final class Reservoir {
      */
     int probeSupply(FluidStack fluid, int amount) {
         if (column.isInfiniteSource()) return amount;
-        if (column.isOpenEnd()) return 0;
+        if (column.isBottomlessSink()) return 0;
         IFluidHandler handler = column.handler(level);
         if (handler == null) return 0;
         int supply = BoundaryColumn.drainMatching(handler,
@@ -117,6 +116,7 @@ public final class Reservoir {
 
     /** How much the sink side would still accept this tick (probe, no fluid moves). */
     int probeFill(FluidStack fluid, int amount) {
+        if (column.isInfiniteSource()) return 0; // one-way: never a sink (kept in step with fill)
         amount = Math.min(amount, takeRemaining);
         if (amount <= 0) return 0;
         IFluidHandler handler = column.handler(level);

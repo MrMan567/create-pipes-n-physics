@@ -1,18 +1,22 @@
 package de.devin.pipesnphysics.gametest.blocks;
 
 import com.simibubi.create.content.fluids.transfer.FluidDrainingBehaviour;
+import com.simibubi.create.content.fluids.pump.PumpBlock;
 import com.simibubi.create.foundation.blockEntity.behaviour.BlockEntityBehaviour;
 import de.devin.pipesnphysics.PipesNPhysics;
+import de.devin.pipesnphysics.engine.boundary.FluidCaps;
 import de.devin.pipesnphysics.engine.boundary.OpenEndPipes;
 import de.devin.pipesnphysics.engine.boundary.RelayDetector;
 import de.devin.pipesnphysics.engine.store.PipeStore;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.gametest.framework.GameTest;
 import net.minecraft.gametest.framework.GameTestHelper;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.material.Fluids;
 import net.neoforged.neoforge.fluids.FluidStack;
+import net.neoforged.neoforge.fluids.capability.IFluidHandler;
 import net.neoforged.neoforge.gametest.GameTestHolder;
 import net.neoforged.neoforge.gametest.PrefixGameTestTemplate;
 
@@ -38,6 +42,9 @@ public class HosePulleyTests {
             new BlockPos(3, 5, 2), new BlockPos(4, 5, 2), new BlockPos(4, 4, 2)};
     /** The 3x3 pond, in test-relative coordinates. */
     private static final int POND_Y = 2;
+    /** common/pump_into_pulley only: the pump replacing the pulley-side pipe, and its supply tank. */
+    private static final BlockPos PUMP = new BlockPos(3, 5, 2);
+    private static final BlockPos SUPPLY = new BlockPos(4, 5, 2);
 
     /**
      * A pulley that is simply DOING ITS JOB must never be learned as a relay. Its column is a
@@ -179,6 +186,56 @@ public class HosePulleyTests {
                 return;
             }
             helper.succeed();
+        });
+    }
+
+    /**
+     * A pulley resolved as a bottomless SUPPLY must not double as a bottomless DUMP. The solve pins
+     * an {@code isInfiniteSource} branch to flow OUT of it ({@code FluidPass.assembleBranch}), but
+     * {@code SettlingRun.deliverThroughPump} — the settle-phase delivery that exists precisely to
+     * move fluid when the solve assembles nothing — reached the boundary with no such wall. A pump
+     * pointed at an intake pulley therefore lifted its supply and handed it to Create's
+     * {@code HosePulleyFluidHandler.fill}, which accepts into its internal tank whatever its role
+     * and deposits into the world at 1000 mB; {@code Reservoir.fill} then pinned the STICKY output
+     * latch, so the player's supply pulley was permanently demoted to a drain. One-wayness now lives
+     * where fluid actually crosses the boundary ({@code Reservoir}), not in each caller.
+     *
+     * Rig {@code common/pump_into_pulley}: the intake rig with the pipe beside the pulley swapped
+     * for a motor-driven pump PUSHING at it, and the tank below repurposed as the pump's supply.
+     */
+    @GameTest(template = "common/pump_into_pulley", templateNamespace = PipesNPhysics.ID, timeoutTicks = 300)
+    public static void pumpMayNotDumpIntoASupplyPulley(GameTestHelper helper) {
+        BlockPos pulley = helper.absolutePos(PULLEY);
+        Direction facing = helper.getBlockState(PUMP).getValue(PumpBlock.FACING);
+        if (facing != Direction.WEST) {
+            helper.fail("rig broken: the pump must push toward the pulley (west), but faces " + facing);
+            return;
+        }
+        // Let the body search settle FIRST: only once the pulley advertises a drainable fluid does
+        // the engine resolve it as the bottomless SUPPLY this test is about. (A pulley still
+        // searching has no decided role and resolves as a sink — a separate, narrower race.)
+        helper.runAfterDelay(60, () -> {
+            IFluidHandler cap = FluidCaps.at(helper.getLevel(), pulley, null);
+            if (cap == null || cap.getFluidInTank(0).isEmpty()) {
+                helper.fail("rig broken: the pulley never found its body, so it never became a supply");
+                return;
+            }
+            fill(helper, SUPPLY, 8000);
+
+            helper.runAfterDelay(80, () -> {
+                if (OpenEndPipes.isPulleyOutput(helper.getLevel(), pulley)) {
+                    helper.fail("a pump pushing at a supply pulley latched it into OUTPUT mode — "
+                            + "its bottomless supply role also made it a bottomless dump");
+                    return;
+                }
+                int left = amount(helper, SUPPLY);
+                if (left < 8000) {
+                    helper.fail("the pump dumped " + (8000 - left) + " mB into a pulley that only ever "
+                            + "supplies; a one-way source must accept nothing");
+                    return;
+                }
+                helper.succeed();
+            });
         });
     }
 

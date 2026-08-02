@@ -537,6 +537,14 @@ public final class BoundaryColumn {
      */
     public boolean isInfiniteSource() { return infiniteSource; }
 
+    /**
+     * The DUAL of {@link #isInfiniteSource}: a boundary that receives fluid one-way without ever
+     * supplying it — a hose pulley/relay in its bottomless SINK role, or a receive-only outlet
+     * mouth. Every boundary is one of the two (a bottomless column is either brimming or empty);
+     * only a {@link #isFiniteReservoir finite reservoir} goes both ways.
+     */
+    public boolean isBottomlessSink() { return !finiteReservoir && !infiniteSource; }
+
     /** Attach a graph node to this column; called only while the solve collects its columns. */
     public void addMemberNode(int graphNodeIndex) {
         memberNodes.add(graphNodeIndex);

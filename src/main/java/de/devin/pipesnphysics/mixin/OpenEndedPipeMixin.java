@@ -64,6 +64,13 @@ public class OpenEndedPipeMixin {
                                                    CallbackInfoReturnable<Boolean> cir) {
         BlockPos worldBlockPos = pipesnphysics$getWorldOutputPos();
 
+        // A CLOSED mouth spills nothing, wherever its fluid would land. Asked FIRST, and before
+        // force-output, because a closed mouth is closed regardless of config.
+        if (worldBlockPos != null && pipesnphysics$mouthClosedOnOwnLevel()) {
+            cir.setReturnValue(false);
+            return;
+        }
+
         // Force-output: keep draining OUT even when the mouth already faces a fluid SOURCE block (its
         // own earlier spill, or a natural pool). Create normally returns false there and the network
         // backs up; when enabled we accept and DISCARD the fluid (the space is already full, so nothing
@@ -213,6 +220,31 @@ public class OpenEndedPipeMixin {
                 && flowing.create$getNewLiquid(world, pos, drainedState).equals(fluidState);
         if (!regenerates) world.setBlock(pos, drainedState, Block.UPDATE_ALL);
         return stack;
+    }
+
+    /**
+     * Whether the block the mouth actually FACES — on its OWN level, i.e. the raw plot coords a
+     * contraption's blocks live at — closes it. This is Create's own gate ({@code !waterlog &&
+     * !state.canBeReplaced()}), asked at {@code outputPos} instead of at the projected world block.
+     *
+     * We spill to the WORLD on a sub-level, so the destination's rules are read there — but WHETHER
+     * the mouth is open at all is decided by the block in front of it, which on a contraption is a
+     * sub-level block the projection never sees. The load-bearing case is a VANILLA FLUID TARGET: an
+     * empty cauldron (or a drained beehive) is still an open end to {@code FluidPropagator.isOpenEnd}
+     * yet is not replaceable, so on the main level Create refuses the spill and the network backs up
+     * — while on a sub-level the projection landed on the air below the contraption and rained the
+     * fluid into the world instead (a lava-generation cauldron emptied by the same pipe that then
+     * spilled its lava). Mirrors the intake side, which likewise reads the own level first
+     * ({@code BoundaryColumn.intakeFluid}).
+     *
+     * A waterloggable block does NOT close the mouth (fluid passes it, exactly as Create's gate
+     * allows); the destination's own fluid state is still judged at the projected world block.
+     */
+    @Unique
+    private boolean pipesnphysics$mouthClosedOnOwnLevel() {
+        if (!world.isLoaded(outputPos)) return true; // unreadable: refuse rather than leak
+        BlockState state = world.getBlockState(outputPos);
+        return !state.canBeReplaced() && !state.hasProperty(BlockStateProperties.WATERLOGGED);
     }
 
     /**

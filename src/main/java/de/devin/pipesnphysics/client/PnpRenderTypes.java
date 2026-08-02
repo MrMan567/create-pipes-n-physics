@@ -31,11 +31,16 @@ public final class PnpRenderTypes extends RenderStateShard {
                     .createCompositeState(true));
 
     /**
-     * The pump reach tint — each reachable pipe's OWN baked model re-drawn a hair larger and
-     * colored, so the pipe itself reads as painted (elbows, connection stubs and encasing all
-     * follow, which no hand-built shell can). Textured like the block sheet it samples, and
-     * DEPTH-TESTED (writing no depth) so terrain in front still occludes it; the swell is what
-     * keeps it off the pipe's own faces instead of z-fighting them.
+     * The pump reach tint — each reachable pipe's OWN baked model re-drawn colored, so the pipe
+     * itself reads as painted (elbows, connection stubs and encasing all follow, which no
+     * hand-built shell can). Textured like the block sheet it samples, and DEPTH-TESTED (writing
+     * no depth) so terrain in front still occludes it.
+     *
+     * It is drawn at the pipe's EXACT size and kept off its own faces by a POLYGON OFFSET — the
+     * decal technique vanilla uses for block-breaking overlays. Swelling the model instead
+     * (scaling it a couple of percent) made every connection stub poke into its neighbour, so
+     * adjacent pipes double-blended at each joint and the tint sat in a faint halo around the
+     * silhouette: "the colors of the pipe slightly overlap, making it look weird".
      */
     public static final RenderType REACH_TINT = RenderType.create(
             "pipesnphysics:reach_tint",
@@ -45,6 +50,7 @@ public final class PnpRenderTypes extends RenderStateShard {
                     .setTextureState(BLOCK_SHEET_MIPPED)
                     .setTransparencyState(TRANSLUCENT_TRANSPARENCY)
                     .setLightmapState(LIGHTMAP)
+                    .setLayeringState(POLYGON_OFFSET_LAYERING)
                     .setWriteMaskState(COLOR_WRITE)
                     .createCompositeState(true));
 

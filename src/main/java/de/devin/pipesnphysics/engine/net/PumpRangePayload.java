@@ -49,15 +49,22 @@ public record PumpRangePayload(BlockPos pumpPos, List<RangePath> paths)
      * elevation. A continuous quantity, not a reachable/starved flip, so the client can paint
      * how much margin is being spent rather than only where it runs out.
      *
-     * {@code pipe} marks a cell the reach sleeve may paint: the pump itself and a tank or open
-     * end at the far end of a run are graph nodes, not pipes, and would put a colored bar
-     * inside the block.
+     * {@code aboveSupply} is how far the cell stands above the SUPPLY SURFACE — the head the
+     * pump is actually paying for there (§6: consumed = lift above the anchor). Negative below
+     * it, where gravity does the work and none of the pump's reach is being spent, which is what
+     * bounds the paint from underneath: without it every flat run at or below the waterline lit
+     * up along its whole length, since horizontal distance costs no head at all.
+     *
+     * {@code pipe} marks a cell the overlay may paint: the pump itself and a tank or open
+     * end at the far end of a run are graph nodes, not pipes, and would color a block that is
+     * not part of the run.
      */
-    public record RangeCell(long pos, float margin, boolean pipe) {
+    public record RangeCell(long pos, float margin, float aboveSupply, boolean pipe) {
         public static final StreamCodec<RegistryFriendlyByteBuf, RangeCell> CODEC =
                 StreamCodec.composite(
                         ByteBufCodecs.VAR_LONG, RangeCell::pos,
                         ByteBufCodecs.FLOAT, RangeCell::margin,
+                        ByteBufCodecs.FLOAT, RangeCell::aboveSupply,
                         ByteBufCodecs.BOOL, RangeCell::pipe,
                         RangeCell::new);
     }

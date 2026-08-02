@@ -91,7 +91,7 @@ public final class PumpRangeProbe {
         Double known = solution.nodeHeads().get(pump.index());
         double supplyHead = known != null ? known : pump.worldY();
         Reach fallback = new Reach(
-                pump.worldY(), supplyHead + pumpHead, pump.worldY() - suction);
+                pump.worldY(), supplyHead, supplyHead + pumpHead, pump.worldY() - suction);
 
         Walker walker = new Walker(level, graph, solution, fallback, suction);
         for (Edge edge : graph.edgesOf(pump.index())) {
@@ -103,7 +103,8 @@ public final class PumpRangeProbe {
             Reach seedReach = walker.reachOn(edge);
             List<PumpRangePayload.RangeCell> seedPath = new ArrayList<>();
             seedPath.add(new PumpRangePayload.RangeCell(pumpPos.asLong(),
-                    seedReach.marginAt(pump.worldY(), pull), false));
+                    seedReach.marginAt(pump.worldY(), pull),
+                    seedReach.aboveSupplyAt(pump.worldY()), false));
             walker.walk(edge, pump.index(), seedPath, pull);
         }
         return new PumpRangePayload(pumpPos, walker.paths);
@@ -127,13 +128,22 @@ public final class PumpRangeProbe {
      * {@code pullFloor} — the deepest a supply may sit and still be drawn ({@link
      * FlowSolver#drawableFloor}, which is the solve's own crest gate, not a second copy of it).
      */
-    private record Reach(double pumpY, double pushCeiling, double pullFloor) {
+    private record Reach(double pumpY, double anchor, double pushCeiling, double pullFloor) {
         /**
          * Blocks of reach left at elevation {@code y}: how far under the push ceiling climbing,
          * or how far above the pull floor descending. Negative past the limit.
          */
         float marginAt(double y, boolean pull) {
             return (float) (pull ? y - pullFloor : pushCeiling - y);
+        }
+
+        /**
+         * How far {@code y} stands ABOVE the supply surface — the head the pump is actually
+         * paying for there (§6: consumed = lift above the anchor). Negative below it, where
+         * gravity moves the fluid and the pump's reach is not being spent at all.
+         */
+        float aboveSupplyAt(double y) {
+            return (float) (y - anchor);
         }
     }
 
@@ -167,10 +177,13 @@ public final class PumpRangeProbe {
             Double a = solution.nodeCeilings().get(edge.a());
             Double b = solution.nodeCeilings().get(edge.b());
             if (a == null && b == null) {
-                return new Reach(fallback.pumpY(), fallback.pushCeiling(), pullFloor);
+                return new Reach(fallback.pumpY(), fallback.anchor(),
+                        fallback.pushCeiling(), pullFloor);
             }
             int winner = b != null && (a == null || b > a) ? edge.b() : edge.a();
-            return new Reach(fallback.pumpY(), solution.nodeCeilings().get(winner), pullFloor);
+            Double supply = solution.nodeAnchors().get(winner);
+            return new Reach(fallback.pumpY(), supply != null ? supply : fallback.anchor(),
+                    solution.nodeCeilings().get(winner), pullFloor);
         }
 
         void walk(Edge edge, int fromNode, List<PumpRangePayload.RangeCell> path, boolean pull) {
@@ -183,9 +196,10 @@ public final class PumpRangeProbe {
                     emit(path, pull);
                     return;
                 }
-                float margin = reach.marginAt(SableCompat.getWorldY(level, cell), pull);
+                double cellY = SableCompat.getWorldY(level, cell);
+                float margin = reach.marginAt(cellY, pull);
                 path.add(new PumpRangePayload.RangeCell(
-                        cell.asLong(), margin, true));
+                        cell.asLong(), margin, reach.aboveSupplyAt(cellY), true));
                 if (beyondAllowance(margin, pull)) {
                     emit(path, pull);
                     return;
@@ -197,7 +211,7 @@ public final class PumpRangeProbe {
             float farMargin = reach.marginAt(far.worldY(), pull);
             // A junction or a shut valve IS a pipe cell and paints; a tank, pump, or open end is not.
             path.add(new PumpRangePayload.RangeCell(far.pos().asLong(), farMargin,
-                    far.isJunction() || far.isClosedGate()));
+                    reach.aboveSupplyAt(far.worldY()), far.isJunction() || far.isClosedGate()));
 
             if (far.isJunction() && !beyondAllowance(farMargin, pull) && visited.add(farIndex)) {
                 boolean branched = false;
