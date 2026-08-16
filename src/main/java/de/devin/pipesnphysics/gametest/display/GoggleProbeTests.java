@@ -460,22 +460,40 @@ public class GoggleProbeTests {
      * this pipe's opening" detail; the discriminator is the missing RISE, so a real siphon crest
      * keeps the air-break wording. (A BASIN never stalls this way — an open bowl's surface reads
      * at its top, see {@code basinGivesFromAnyFillLevel}.)
+     *
+     * PINNED at {@code pumpPullHeadFraction = 0}, in its own batch (a config held across ticks is
+     * shared by every test running beside it). This wall lives in a window ONE PIXEL wide: below
+     * the opening cell's BLOCK floor the pumped draw lip walls the branch before it assembles, and
+     * above the 6/16 aperture lip the supply simply reaches — so only a surface between 5/16 and
+     * 6/16 reads this way at all. Any real pull allowance (§3) covers that pixel, which is the
+     * point of the feature and is asserted next door by {@link
+     * de.devin.pipesnphysics.gametest.physics.GravitySiphonTests#pumpPullAllowanceClearsASupplyUnderTheOpening};
+     * the wording still serves a pack that dials the fraction to 0, and the probe's split is live
+     * code either way.
      */
-    @GameTest(template = "common/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 100)
+    @GameTest(template = "common/single_pump", templateNamespace = PipesNPhysics.ID,
+            timeoutTicks = 100, batch = "pumpPullOff")
     public static void levelRunBelowApertureReadsSupplyLowNotCrest(GameTestHelper helper) {
         BlockPos source = new BlockPos(0, 1, 1);
         BlockPos probeCell = new BlockPos(1, 1, 1); // the suction pipe between tank and pump
         BlockPos sink = new BlockPos(4, 1, 1);
+        double pullFraction = PipesNPhysicsConfig.PUMP_PULL_HEAD_FRACTION.get();
+        PipesNPhysicsConfig.PUMP_PULL_HEAD_FRACTION.set(0.0);
         fill(helper, source, 500); // rendered surface ~0.34 up the block — under the 0.375 lip, film-banded
         drain(helper, sink); // the sink must accept, so the pump really attempts the draw
         helper.runAfterDelay(25, () -> {
-            PipeStatusPayload probe = PipeProbe.probe(helper.getLevel(), helper.absolutePos(probeCell));
-            if (probe.statusDetail() != PipeStatusPayload.DETAIL_BELOW_OPENING) {
-                helper.fail("a level run below the aperture should read DETAIL_BELOW_OPENING,"
-                        + " got status=" + probe.status() + " detail=" + probe.statusDetail());
-                return;
+            try {
+                PipeStatusPayload probe =
+                        PipeProbe.probe(helper.getLevel(), helper.absolutePos(probeCell));
+                if (probe.statusDetail() != PipeStatusPayload.DETAIL_BELOW_OPENING) {
+                    helper.fail("a level run below the aperture should read DETAIL_BELOW_OPENING,"
+                            + " got status=" + probe.status() + " detail=" + probe.statusDetail());
+                    return;
+                }
+                helper.succeed();
+            } finally {
+                PipesNPhysicsConfig.PUMP_PULL_HEAD_FRACTION.set(pullFraction);
             }
-            helper.succeed();
         });
     }
 

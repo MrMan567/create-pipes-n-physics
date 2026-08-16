@@ -727,4 +727,42 @@ public class GravitySiphonTests {
             helper.succeed();
         });
     }
+
+    /**
+     * A running pump SUCKS, at a tenth of what it pushes ({@code pumpPullHeadFraction}, §3): it may
+     * establish through its own dry suction line by that much head, so a supply standing a little
+     * BELOW the pipe's aperture is still drawn instead of stalling there.
+     *
+     * The rig is the wall's own edge case: 500 of 8000 mB renders 0.34 up the block, under the 6/16
+     * lip, which used to gate the run outright — a dead-flat line reading "the supply sits below
+     * this pipe's opening" ({@link
+     * de.devin.pipesnphysics.gametest.display.GoggleProbeTests#levelRunBelowApertureReadsSupplyLowNotCrest},
+     * which pins the fraction to 0 to keep that wall). At the default a 0.4-block allowance clears
+     * that pixel easily and the tank empties into the sink, which is the point of the feature.
+     *
+     * Mutation check: set the fraction to 0 (or hand the branch a 0 allowance in {@code
+     * FluidPass.assembleBranch}) and the source keeps its 500 mB — the crest gate never opens.
+     */
+    @GameTest(template = "common/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
+    public static void pumpPullAllowanceClearsASupplyUnderTheOpening(GameTestHelper helper) {
+        BlockPos source = new BlockPos(0, 1, 1);
+        BlockPos sink = new BlockPos(4, 1, 1);
+        int supplied = 500;
+        fill(helper, source, supplied);
+        drain(helper, sink);
+
+        helper.succeedWhen(() -> {
+            int left = amount(helper, source);
+            int delivered = amount(helper, sink);
+            if (left > supplied / 10) {
+                helper.fail("the pump left " + left + " mB standing under the pipe's opening —"
+                        + " its pull allowance should draw a supply this close to the lip"
+                        + dump(helper, source));
+            }
+            if (delivered <= 0) {
+                helper.fail("nothing reached the sink, so nothing was actually drawn"
+                        + dump(helper, source));
+            }
+        });
+    }
 }
