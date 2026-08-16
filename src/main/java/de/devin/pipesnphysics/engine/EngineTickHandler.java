@@ -12,6 +12,7 @@ import de.devin.pipesnphysics.engine.motion.CentrifugeField;
 import de.devin.pipesnphysics.engine.motion.CentrifugeProcessor;
 import de.devin.pipesnphysics.engine.motion.MomentumField;
 import de.devin.pipesnphysics.engine.probe.SublevelSpinProbe;
+import de.devin.pipesnphysics.engine.turbine.TurbineDrive;
 import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.level.ServerLevel;
@@ -222,6 +223,8 @@ public final class EngineTickHandler {
         // awake until its contents come to rest.
         PipeFlowExecutor.Actuals actuals = FluidEngine.apply(level, graph, solution);
         CentrifugeProcessor.process(level, graph, now);
+        // Turbines read what actually moved, so this runs AFTER the executor filled the actuals.
+        TurbineDrive.drive(level, graph, solution);
 
         boolean busy = solution.active() || actuals.movedAny() || actuals.settling();
         boolean armed = hasRunningPump(level, graph);

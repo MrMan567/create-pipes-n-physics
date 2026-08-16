@@ -5,8 +5,11 @@ import com.simibubi.create.content.fluids.hosePulley.HosePulleyFluidHandler;
 import com.simibubi.create.content.fluids.transfer.FluidDrainingBehaviour;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.engine.EngineTickHandler;
+import de.devin.pipesnphysics.engine.boundary.PulleyOutputMode;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.core.HolderLookup;
+import net.minecraft.nbt.CompoundTag;
 import net.minecraft.world.level.Level;
 import net.neoforged.neoforge.fluids.capability.IFluidHandler.FluidAction;
 import org.spongepowered.asm.mixin.Mixin;
@@ -39,15 +42,48 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  *
  * Readiness is read side-effect-free via {@link FluidDrainingBehaviourAccessor}. No-op when the engine
  * is disabled, so vanilla pulley behaviour is untouched.
+ *
+ * <p>It also STORES the pulley's output role ({@link PulleyOutputMode}) — see
+ * {@code OpenEndPipes.markPulleyOutput} for what that role is and why it has to be saved rather
+ * than held in memory.
  */
 @Mixin(value = HosePulleyBlockEntity.class, remap = false)
-public class HosePulleyBlockEntityMixin {
+public class HosePulleyBlockEntityMixin implements PulleyOutputMode {
+    /** NBT key of the persisted output role; absent means "may still drain". */
+    @Unique
+    private static final String OUTPUT_KEY = "PnpPulleyOutput";
     @Shadow boolean isMoving;
     @Shadow private FluidDrainingBehaviour drainer;
     @Shadow private HosePulleyFluidHandler handler;
 
     @Unique
     private boolean pipesnphysics$wasReady = false;
+    @Unique
+    private boolean pipesnphysics$output = false;
+
+    @Override
+    public boolean pipesnphysics$isOutput() {
+        return pipesnphysics$output;
+    }
+
+    @Override
+    public void pipesnphysics$setOutput(boolean output) {
+        if (pipesnphysics$output == output) return;
+        pipesnphysics$output = output;
+        ((HosePulleyBlockEntity) (Object) this).setChanged(); // the role is saved state, not a cache
+    }
+
+    @Inject(method = "write", at = @At("TAIL"))
+    private void pipesnphysics$writeOutputRole(CompoundTag tag, HolderLookup.Provider registries,
+                                               boolean clientPacket, CallbackInfo ci) {
+        if (pipesnphysics$output) tag.putBoolean(OUTPUT_KEY, true);
+    }
+
+    @Inject(method = "read", at = @At("TAIL"))
+    private void pipesnphysics$readOutputRole(CompoundTag tag, HolderLookup.Provider registries,
+                                              boolean clientPacket, CallbackInfo ci) {
+        pipesnphysics$output = tag.getBoolean(OUTPUT_KEY);
+    }
 
     @Inject(method = "tick", at = @At("TAIL"))
     private void pipesnphysics$driveAndArm(CallbackInfo ci) {

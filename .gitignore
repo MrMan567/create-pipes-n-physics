@@ -15,6 +15,7 @@ build/
 
 # Run directories
 run/
+run-data/
 runs/
 
 # Generated resources cache

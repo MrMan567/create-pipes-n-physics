@@ -58,6 +58,7 @@ final class FluidPass {
     private final FluidStack sample;
     private final boolean gas;
     private final double conductancePerTile;
+    private final double fittingLength;
     private final Set<BlockPos> claimedEmpties;
     private final FlowSolver.GroupResults results;
 
@@ -105,6 +106,7 @@ final class FluidPass {
         this.gas = type.isLighterThanAir();
         double viscosityScale = 1000.0 / FlowSolver.effectiveViscosity(level, sample);
         this.conductancePerTile = PipesNPhysicsConfig.PIPE_CONDUCTANCE.get() * viscosityScale;
+        this.fittingLength = PipesNPhysicsConfig.PIPE_FITTING_LENGTH.get();
         this.solverIndex = new int[graph.nodes().size()];
         Arrays.fill(solverIndex, -1);
     }
@@ -274,7 +276,16 @@ final class FluidPass {
             return;
         }
 
-        double conductance = conductancePerTile / (edge.length() + 1);
+        // A run's resistance is its length PLUS its fittings, counted as the equivalent length of
+        // straight pipe they cost (the tee it branches off, its elbows, entry and exit). This is
+        // what decides how a junction splits: with fittings free, flow divides as 1/length, so a
+        // 2-block branch beat an 8-block one 3:1 — but real pipe flow is turbulent, its loss goes
+        // as the SQUARE of the rate, and equal-drop parallel branches then divide as 1/sqrt(length)
+        // (67/33 for that pair), which at Minecraft scale the fittings even out further still. The
+        // engine's loss law is linear (a laminar resistor, which is what keeps one implicit Euler
+        // step per tick), so the equivalent length is how that turbulent split is reproduced —
+        // charging real fittings tracks it closely over the whole practical range of run lengths.
+        double conductance = conductancePerTile / (edge.length() + fittingLength);
         double emf = 0;
         int allowedSign = 0;
         int gateSign = 0;
@@ -285,6 +296,9 @@ final class FluidPass {
         // out of that tank regardless of level when pumpDrainAnyLevel is on (see the lip check).
         boolean pumpPullsA = false;
         boolean pumpPullsB = false;
+        // The strongest DRIVING pump pulling across this run, whose head pays for establishing
+        // through a dry crest (the prime allowance below).
+        double pullHead = 0;
 
         for (int side = 0; side < 2; side++) {
             int nodeIndex = side == 0 ? edge.a() : edge.b();
@@ -320,17 +334,27 @@ final class FluidPass {
             BlockPos toward = PipeGeometry.adjacentCell(graph, edge, nodeIndex);
 
             if (toward.equals(pumpNode.pos().relative(pump.pushSide()))) {
+                // A TURBINE arrives here with a NEGATIVE head: same flank, same one-way sign, but
+                // it fights the flow instead of driving it, so the run carries nothing until the
+                // fall exceeds its rating. Its throughput cap is its swallowing capacity.
                 emf += outSign * pump.head();
                 allowedSign = combineSign(allowedSign, outSign);
                 conductance = Math.min(conductance, pump.internalConductance());
                 // The pump driving this run; a second pump pushing into the same
                 // edge makes the load attribution ambiguous, so flag it off.
-                driveNode = driveNode < 0 ? nodeIndex : -2;
-                driveHead = pump.head();
-                driveInternalConductance = pump.internalConductance();
+                if (pump.driving()) {
+                    driveNode = driveNode < 0 ? nodeIndex : -2;
+                    driveHead = pump.head();
+                    driveInternalConductance = pump.internalConductance();
+                }
             } else if (toward.equals(pumpNode.pos().relative(pump.pushSide().getOpposite()))) {
                 allowedSign = combineSign(allowedSign, -outSign);
-                if (side == 0) pumpPullsB = true; else pumpPullsA = true;
+                // Only a DRIVEN pump sucks: a turbine is gravity-fed, so the tank feeding it keeps
+                // its ordinary draw lip rather than being drained from under the opening.
+                if (pump.driving()) {
+                    if (side == 0) pumpPullsB = true; else pumpPullsA = true;
+                    pullHead = Math.max(pullHead, pump.head());
+                }
             } else {
                 results.blockedEdges.add(edge.index());
                 return;
@@ -453,13 +477,12 @@ final class FluidPass {
         // a real pump). Instead the throttle is a THROUGHPUT GOVERNOR applied by {@code governedSolve}:
         // it caps the run's flow to {@code throttle × fully-open flow}, so 50% always means half,
         // wherever the valve sits. The angle is carried on the meta for that loop.
-        // The pack may opt pumps into SELF-PRIMING: a running pump pulling across this edge gets
-        // the suction allowance for establishing through its own dry riser (default off — a dry
-        // pump above the waterline churns air until primed once; owner-confirmed realism).
-        boolean selfPriming = (pumpPullsA || pumpPullsB)
-                && PipesNPhysicsConfig.ENABLE_PUMP_SELF_PRIMING.get();
+        // A pump SUCKS far more weakly than it pushes: a running pump pulling across this edge may
+        // establish through its own dry riser on a fraction of its head (§3), and no further — a
+        // supply deeper than that still has to be primed once by hand. Unpumped runs get nothing.
+        double primeAllowance = FlowSolver.pumpPrimeAllowance(pullHead);
         branches.add(new BranchSpec(solverA, solverB, conductance, emf, allowedSign,
-                crestHeight, crestFloor, crestPos, crestWet, selfPriming));
+                crestHeight, crestFloor, crestPos, crestWet, primeAllowance));
         meta.add(new BranchMeta(edge.index(), columnA, columnB, lipA, lipB,
                 driveNode, driveHead, driveInternalConductance, throttle, gateSign));
         // Whether this is a held FEED candidate (a pump driving out toward a shut gate) is decided
@@ -625,7 +648,7 @@ final class FluidPass {
             scaled.add(scale[b] == 1 ? spec
                     : new BranchSpec(spec.a(), spec.b(), spec.conductance() * scale[b], spec.emf(),
                             spec.allowedSign(), spec.crestHeight(), spec.crestFloor(),
-                            spec.crestPos(), spec.crestWet(), spec.selfPriming()));
+                            spec.crestPos(), spec.crestWet(), spec.primeAllowance()));
         }
         return scaled;
     }

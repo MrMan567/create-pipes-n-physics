@@ -41,14 +41,15 @@ import java.util.List;
 /**
  * Gives Create's fluid valve a fine-grained throttle: a 0-90 degree opening the valve passes
  * proportionally (90 = fully open). It is opened/closed THREE ways, all landing on the same angle:
- * raw SHAFT ROTATION cranks it (positive speed opens, negative closes, idle holds — Create's own
- * "spin to open", integrated onto the 0-90 scale so a motor or gearshift drives it like any other
- * kinetic block); a Valve Handle adds its precise set angle ({@link ValveHandleBlockEntityMixin}
- * via {@code adjustThrottle} — the handle's kinetic burst is a fixed chunk, NOT its set angle, so
- * we apply its INTENT and briefly suppress the shaft integration so the crank is not counted
- * twice); and a scroll-value box on the side faces sets it directly. The handle visual tracks the
- * angle, the solver reads it through {@link ValveThrottle} to scale the run's conductance, and the
- * goggle shows the throughput. Inert when the engine or the throttle feature is off in config.
+ * raw SHAFT ROTATION cranks it (Create's own "spin to open", integrated onto the 0-90 scale so a
+ * motor or gearshift drives it like any other kinetic block); a Valve Handle adds its precise set
+ * angle ({@link ValveHandleBlockEntityMixin} via {@code adjustThrottle} — the handle's kinetic
+ * burst is a fixed chunk, NOT its set angle, so we apply its INTENT and briefly suppress the shaft
+ * integration so the crank is not counted twice); and a scroll-value box on the side faces sets it
+ * directly. WHICH WAY is open comes from {@link #pipesnphysics$openingSign()} for every one of
+ * them, so the inputs cannot disagree. The handle visual tracks the angle, the solver reads it
+ * through {@link ValveThrottle} to scale the run's conductance, and the goggle shows the
+ * throughput. Inert when the engine or the throttle feature is off in config.
  */
 @Mixin(value = FluidValveBlockEntity.class, remap = false)
 public abstract class FluidValveBlockEntityMixin extends KineticBlockEntity implements ValveThrottle {
@@ -71,6 +72,9 @@ public abstract class FluidValveBlockEntityMixin extends KineticBlockEntity impl
     /** Countdown of the post-handle suppression window ({@link #HANDLE_CRANK_COOLDOWN_TICKS}). */
     @Unique
     private int pipesnphysics$handleCrankCooldown;
+    /** Whether the handle has been placed at the opening once; until then it SNAPS, never chases. */
+    @Unique
+    private boolean pipesnphysics$pointerAimed;
     @Shadow
     LerpedFloat pointer;
 
@@ -159,16 +163,42 @@ public abstract class FluidValveBlockEntityMixin extends KineticBlockEntity impl
     }
 
     /**
+     * Which way this valve is being turned, read off ITS OWN rotation. That is exactly what Create's
+     * valve does ({@code FluidValveBlockEntity.tick}: {@code pointer.chase(speed > 0 ? 1 : 0, …)}),
+     * so everything the drivetrain does to the rotation reaching this block is honored: a gearshift
+     * flipping, a gearbox output, a crank turned the other way all reverse which way it opens, and a
+     * valve nothing is turning holds its position.
+     *
+     * A previous version read the sign at the network's dominant SOURCE instead, to make "this way
+     * opens" one fact per drivetrain regardless of how each valve was placed. That is a real
+     * property, but it costs the one thing players actually reach for: gearshifts and gearboxes
+     * stopped affecting valves at all, which is not how any other kinetic block behaves. Create's
+     * own rule wins (owner decision 2026-08-10). The known consequence is the one Create already
+     * has: a valve's shaft AXIS decides its sign, so two valves on opposed gearbox outputs crank
+     * opposite ways — which is now visibly true of the drivetrain rather than a hidden quirk.
+     */
+    @Override
+    public int pipesnphysics$openingSign() {
+        return (int) Math.signum(getSpeed());
+    }
+
+    /**
      * Crank the throttle from raw shaft rotation each server tick — Create's fluid valve is opened by
      * spinning its shaft, which the throttle rewrite had disconnected (only the handle/scroll moved it).
-     * Positive speed opens, negative closes, and a stopped shaft holds the angle (no live-speed gate, so
-     * an idle valve never snaps shut). The rate mirrors Create's own pointer chase ({@code |speed|/16/20}
+     * The direction comes from {@link #pipesnphysics$openingSign()}, i.e. the way this valve's own
+     * shaft turns; a stopped shaft holds the angle (no live-speed gate, so an idle valve never
+     * snaps shut). The rate mirrors Create's own pointer chase ({@code |speed|/16/20}
      * of full travel per tick) mapped onto 0-90 degrees, with a fractional carry so a slow shaft still
      * advances. Skipped for {@link #HANDLE_CRANK_COOLDOWN_TICKS} after a handle crank (that burst is
      * already applied as intent), and inert with the feature off (Create's native shaft behaviour runs).
      */
     @Inject(method = "tick", at = @At("HEAD"))
     private void pipesnphysics$crankFromShaft(CallbackInfo ci) {
+        // BOTH sides, every tick: the handle a player looks at must track the opening the solver
+        // flows at. Create only re-aims its pointer when the SPEED changes, which is enough for a
+        // binary valve but leaves ours lying whenever the angle moves on its own — most visibly on
+        // a freshly placed valve, which comes up fully open while its needle still reads shut.
+        pipesnphysics$trackPointer();
         if (pipesnphysics$throttle == null || level == null || level.isClientSide()) return;
         if (!PipesNPhysicsConfig.ENABLE_VALVE_THROTTLE.get()) return;
         if (pipesnphysics$handleCrankCooldown > 0) {
@@ -176,12 +206,13 @@ public abstract class FluidValveBlockEntityMixin extends KineticBlockEntity impl
             return;
         }
         float speed = getSpeed();
-        if (speed == 0) {
+        int opening = pipesnphysics$openingSign();
+        if (speed == 0 || opening == 0) {
             pipesnphysics$shaftCarry = 0;
             return;
         }
         double rate = Mth.clamp(Math.abs(speed) / 16.0 / 20.0, 0, 1) * FULL_OPEN_DEGREES;
-        pipesnphysics$shaftCarry += Math.signum(speed) * rate;
+        pipesnphysics$shaftCarry += opening * rate;
         int whole = (int) pipesnphysics$shaftCarry;
         if (whole == 0) return;
         pipesnphysics$shaftCarry -= whole;
@@ -196,15 +227,34 @@ public abstract class FluidValveBlockEntityMixin extends KineticBlockEntity impl
         if (level != null && !level.isClientSide()) EngineTickHandler.markChanged(level, worldPosition);
     }
 
-    /** Aim the handle at the current opening: the pointer chases the throttle fraction, so the
-     *  valve's handle sits at exactly however far it has been cranked. Inert when the feature is off. */
+    /** Aim the handle at the current opening and tell the client, for a change that just happened. */
     @Unique
     private void pipesnphysics$aimPointer() {
+        pipesnphysics$trackPointer();
+        if (level != null && !level.isClientSide()) sendData();
+    }
+
+    /**
+     * Point the handle at the current opening: the pointer chases the throttle fraction, so the
+     * valve's needle sits at exactly however far it has been cranked. Called every tick on both
+     * sides, so it carries NO {@code sendData} of its own.
+     *
+     * The FIRST call snaps instead of chasing. A valve comes into the world already open (90
+     * degrees), while Create's pointer starts at 0 and is only ever re-aimed on a speed change, so
+     * a freshly placed valve read shut on its face while passing everything. Snapping also covers
+     * a valve loaded from a save, and the client, which never runs the scroll callback that
+     * re-aims after a crank (the value arrives through NBT, which sets the field directly).
+     */
+    @Unique
+    private void pipesnphysics$trackPointer() {
         if (pipesnphysics$throttle == null || !PipesNPhysicsConfig.ENABLE_VALVE_THROTTLE.get()) return;
         float target = pipesnphysics$throttle.getValue() / (float) FULL_OPEN_DEGREES;
+        if (!pipesnphysics$pointerAimed) {
+            pipesnphysics$pointerAimed = true;
+            pointer.startWithValue(target);
+        }
         float chaseSpeed = Math.max(0.05f, Mth.clamp(Math.abs(getSpeed()) / 16f / 20f, 0f, 1f));
         pointer.chase(target, chaseSpeed, LerpedFloat.Chaser.LINEAR);
-        if (level != null && !level.isClientSide()) sendData();
     }
 
     @Inject(method = "onSpeedChanged", at = @At("TAIL"))

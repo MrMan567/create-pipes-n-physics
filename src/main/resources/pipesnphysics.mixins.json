@@ -8,6 +8,7 @@
     "PumpBlockEntityMixin",
     "PumpTransferTickMixin",
     "FluidValveBlockEntityMixin",
+    "FluidValveAccessor",
     "ValveHandleBlockEntityMixin",
     "GravityFlowMixin",
     "PipeContentCarryMixin",

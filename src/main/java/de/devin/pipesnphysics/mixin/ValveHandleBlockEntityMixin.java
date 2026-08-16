@@ -13,19 +13,19 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 /**
- * Lets a Create Valve Handle crank our fluid-valve throttle DIRECTLY: each successful turn adds
- * the handle's set angle to every fluid valve on its kinetic network (the crank direction —
- * which sneak flips — chooses open vs close). The handle spins the shaft at a fixed 32 RPM for a
- * couple of ticks, so a small set angle overshoots by ~one tick of spin (a 1° handle turns the
- * shaft ~17°); applying the handle's INTENT instead of reading that rotation keeps it exact.
+ * Lets a Create Valve Handle crank our fluid-valve throttle DIRECTLY: each successful turn winds
+ * every fluid valve on its kinetic network by the handle's set angle. The handle spins the shaft at
+ * a fixed 32 RPM for a couple of ticks, so a small set angle overshoots by ~one tick of spin (a 1°
+ * handle turns the shaft ~17°); applying the handle's INTENT instead of reading that rotation keeps
+ * the AMOUNT exact. The DIRECTION is not ours to decide: each valve resolves it through
+ * {@link ValveThrottle#pipesnphysics$openingSign()}, the way its OWN shaft turns, which is the same
+ * rule raw shaft rotation obeys. So a crank and a motor turning the same shaft the same way can
+ * never disagree, and a gearshift between the handle and a valve reverses that valve as expected.
  */
 @Mixin(value = ValveHandleBlockEntity.class, remap = false)
 public abstract class ValveHandleBlockEntityMixin extends KineticBlockEntity {
     @Shadow
     public ScrollValueBehaviour angleInput;
-
-    @Shadow
-    protected abstract boolean clockwise();
 
     private ValveHandleBlockEntityMixin() { super(null, null, null); }
 
@@ -35,11 +35,14 @@ public abstract class ValveHandleBlockEntityMixin extends KineticBlockEntity {
         if (!PipesNPhysicsConfig.ENABLE_VALVE_THROTTLE.get()) return;
         int step = Math.abs(angleInput.getValue());
         if (step == 0) return;
-        int delta = clockwise() ? -step : step;
         KineticNetwork network = getOrCreateNetwork();
         if (network == null) return;
+        // The crank has already spun up (activate set inUse and propagated), so each valve can read
+        // the direction off the drivetrain; a zero sign still suppresses its shaft integration.
         for (KineticBlockEntity member : network.members.keySet()) {
-            if (member instanceof ValveThrottle valve) valve.pipesnphysics$adjustThrottle(delta);
+            if (member instanceof ValveThrottle valve) {
+                valve.pipesnphysics$adjustThrottle(valve.pipesnphysics$openingSign() * step);
+            }
         }
     }
 }

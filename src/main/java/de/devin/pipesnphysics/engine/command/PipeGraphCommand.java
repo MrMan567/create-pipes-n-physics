@@ -31,6 +31,7 @@ import de.devin.pipesnphysics.engine.net.PipeStatusPayload;
 import de.devin.pipesnphysics.engine.probe.PipeProbe;
 import de.devin.pipesnphysics.engine.store.PipeStore;
 import de.devin.pipesnphysics.engine.store.PipeWindow;
+import de.devin.pipesnphysics.engine.turbine.HydroTurbine;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.core.BlockPos;
@@ -379,6 +380,8 @@ public final class PipeGraphCommand {
                     ceiling != null ? String.format(" §7ceil=§b%.2f", ceiling) : " §8ceil=∅",
                     n.pumpFacing() != null ? " §7face=§f" + n.pumpFacing() : "",
                     n.isPump() ? String.format(" §7rpm=§f%.0f", pumpSpeed(level, n)) : "",
+                    n.isPump() && FlowSolver.isTurbine(level, n)
+                            ? String.format(" §aturbine §7su=§f%.0f", turbineStress(level, n)) : "",
                     n.isOneWayGate() ? " §done-way §f" + n.gateFlow() : "",
                     n.pos().equals(target) ? " §6← flagged" : ""));
             BoundaryColumn column = columnOf(level, mouths, n);
@@ -671,6 +674,11 @@ public final class PipeGraphCommand {
     /** A pump node's current rotation speed (RPM), 0 if it is not a kinetic block. */
     private static float pumpSpeed(ServerLevel level, Node n) {
         return level.getBlockEntity(n.pos()) instanceof KineticBlockEntity k ? k.getSpeed() : 0;
+    }
+
+    /** What a turbine node is currently producing, so a dialed-but-idle one is distinguishable. */
+    private static double turbineStress(ServerLevel level, Node n) {
+        return level.getBlockEntity(n.pos()) instanceof HydroTurbine t ? t.pipesnphysics$turbineStress() : 0;
     }
 
     /**

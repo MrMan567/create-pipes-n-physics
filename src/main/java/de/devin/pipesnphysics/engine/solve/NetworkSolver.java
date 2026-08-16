@@ -125,21 +125,21 @@ public final class NetworkSolver {
      * @param crestWet     whether the crest cell actually HOLDS fluid. Suction can hold an
      *                     existing column, never create one: a DRY crest whose floor sits above
      *                     the reachable potential gates the branch instead of letting it self-prime.
-     * @param selfPriming  a RUNNING pump pulls across this branch AND the pack opted into
-     *                     self-priming pumps ({@code enablePumpSelfPriming}): the dry-crest gate
-     *                     grants the SUCTION allowance for establishment — the pump may evacuate
-     *                     its own dry suction line up to the suction limit above the supply, like
-     *                     a real self-priming pump. Default off: a dry pump above the waterline
-     *                     churns air until primed once (owner-confirmed realism).
+     * @param primeAllowance blocks of dry-crest ESTABLISHMENT a running pump pulling across this
+     *                     branch may spend — its own share of head for sucking, a fraction of what
+     *                     it pushes with ({@code pumpPullHeadFraction}). A pump sucks far more
+     *                     weakly than it pushes, so this is small: it lets the pump evacuate a
+     *                     little of its own dry suction line, and never reaches past the suction
+     *                     limit that afterwards SUSTAINS the column (clamped below). 0 on every
+     *                     branch no pump pulls across — an unpowered siphon never self-primes.
      */
     public record BranchSpec(int a, int b, double conductance, double emf, int allowedSign,
                              double crestHeight, double crestFloor, double crestPos,
-                             boolean crestWet, boolean selfPriming) {
-        /** Strict convenience (selfPriming = false) — every rig without the opt-in. */
+                             boolean crestWet, double primeAllowance) {
+        /** Unpumped convenience (no establishment allowance) — every branch no pump pulls across. */
         public BranchSpec(int a, int b, double conductance, double emf, int allowedSign,
                           double crestHeight, double crestFloor, double crestPos, boolean crestWet) {
-            this(a, b, conductance, emf, allowedSign, crestHeight, crestFloor, crestPos, crestWet,
-                    false);
+            this(a, b, conductance, emf, allowedSign, crestHeight, crestFloor, crestPos, crestWet, 0);
         }
 
         /** No-weir-band convenience (crestFloor = crestHeight) — what the solver tests model. */
@@ -415,9 +415,10 @@ public final class NetworkSolver {
         if (!br.crestWet()) {
             double supplyHead = flow >= 0 ? headA + Math.max(0, br.emf())
                     : headB + Math.max(0, -br.emf());
-            // A self-priming pump may establish through its own dry suction line, bounded by the
-            // same limit that afterwards sustains the column (opt-in; see BranchSpec.selfPriming).
-            double primeAllowance = br.selfPriming() ? suctionLimit : 0;
+            // A running pump may establish through a little of its own dry suction line, on the
+            // share of head it can spend sucking (see BranchSpec.primeAllowance) — never past the
+            // limit that afterwards sustains the column, which is the invariant clamped here.
+            double primeAllowance = Math.min(br.primeAllowance(), suctionLimit);
             if (supplyHead + primeAllowance < br.crestFloor()) return 0;
         }
         double taperBand = Math.max(0.5, suctionLimit * CREST_TAPER_FRACTION);

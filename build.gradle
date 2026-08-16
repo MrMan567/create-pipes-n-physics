@@ -64,6 +64,7 @@ neoForge {
 
         data {
             data()
+            gameDirectory = file('run-data')
             programArguments.addAll '--mod', project.mod_id, '--server', '--output', file('src/generated/resources/').getAbsolutePath(), '--existing', file('src/main/resources/').getAbsolutePath()
         }
 

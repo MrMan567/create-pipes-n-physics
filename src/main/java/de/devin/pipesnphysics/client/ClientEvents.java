@@ -10,6 +10,7 @@ import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.fml.event.lifecycle.FMLClientSetupEvent;
 import net.neoforged.neoforge.client.event.ModelEvent;
+import net.neoforged.neoforge.common.NeoForge;
 
 /**
  * Mod bus client events — registers additional models that aren't attached to items/blocks.
@@ -28,6 +29,10 @@ public final class ClientEvents {
 
     @SubscribeEvent
     public static void onClientSetup(FMLClientSetupEvent event) {
-        event.enqueueWork(() -> PonderIndex.addPlugin(new PnpPonderPlugin()));
+        event.enqueueWork(() -> {
+            PonderIndex.addPlugin(new PnpPonderPlugin());
+            // Item tooltips are a GAME bus event; registered here so the bus is unambiguous.
+            NeoForge.EVENT_BUS.register(PumpTooltip.class);
+        });
     }
 }

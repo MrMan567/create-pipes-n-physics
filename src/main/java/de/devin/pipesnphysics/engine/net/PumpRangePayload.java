@@ -52,8 +52,9 @@ public record PumpRangePayload(BlockPos pumpPos, List<RangePath> paths)
      * {@code aboveSupply} is how far the cell stands above the SUPPLY SURFACE — the head the
      * pump is actually paying for there (§6: consumed = lift above the anchor). Negative below
      * it, where gravity does the work and none of the pump's reach is being spent, which is what
-     * bounds the paint from underneath: without it every flat run at or below the waterline lit
-     * up along its whole length, since horizontal distance costs no head at all.
+     * keeps a run under the waterline bare: without it every flat run at or below the waterline
+     * lit up along its whole length, since horizontal distance costs no head at all. The client
+     * reads it as a whole-cell test (paint this cell at all?), not as a second cut plane.
      *
      * {@code pipe} marks a cell the overlay may paint: the pump itself and a tank or open
      * end at the far end of a run are graph nodes, not pipes, and would color a block that is

@@ -250,7 +250,21 @@ public final class PipeProbe {
                 && solution.heldEdges().contains(edge.index())) {
             detail = PipeStatusPayload.DETAIL_HELD;
         }
+        // NO_HEAD on a turbine's run is the OPPOSITE story from a pump's: nothing is being asked
+        // to lift, the fall is simply short of what the turbine's rating demands.
+        if (status == PipeStatusPayload.STATUS_NO_HEAD && touchesTurbine(level, graph, edge)) {
+            detail = PipeStatusPayload.DETAIL_TURBINE_FALL;
+        }
         return detail;
+    }
+
+    /** Whether either end of this run is a pump dialed to run backwards as a turbine. */
+    private static boolean touchesTurbine(ServerLevel level, Graph graph, Edge edge) {
+        for (int end : new int[] {edge.a(), edge.b()}) {
+            Node node = graph.node(end);
+            if (node.isPump() && FlowSolver.isTurbine(level, node)) return true;
+        }
+        return false;
     }
 
     /**

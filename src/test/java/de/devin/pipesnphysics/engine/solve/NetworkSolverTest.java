@@ -176,6 +176,42 @@ class NetworkSolverTest {
         assertFalse(result.active()[1], "overpowered pump branch is deactivated");
     }
 
+    /**
+     * A turbine is a pump with the sign flipped: it takes its rated head OUT of the line. So a fall
+     * shorter than the rating turns nothing (and reads as backflow-blocked, which the probe words
+     * as "the fall is too small"), a longer one flows at what is left over, and the flank check
+     * valve keeps it one-way exactly as a pump's does.
+     */
+    @Test
+    void turbineOnlyTurnsOnceTheFallExceedsItsRating() {
+        double ratedHead = 2;
+        double conductance = 32;
+
+        List<NodeSpec> shortFall = List.of(
+                new NodeSpec(TANK_CAPACITANCE, 6),
+                new NodeSpec(TANK_CAPACITANCE, 5));
+        List<BranchSpec> branches = List.of(
+                new BranchSpec(0, 1, conductance, -ratedHead, +1, Double.NaN, 0));
+
+        Result blocked = step(shortFall, branches);
+        assertEquals(0, blocked.flows()[0], 1e-9, "a 1-block fall cannot turn a turbine rated for 2");
+        assertTrue(blocked.backflowBlocked()[0], "the short fall reads as backflow-blocked, not settled");
+
+        List<NodeSpec> realFall = List.of(
+                new NodeSpec(TANK_CAPACITANCE, 10),
+                new NodeSpec(TANK_CAPACITANCE, 5));
+        Result flowing = step(realFall, branches);
+        // Tolerance covers the implicit step's own shrink: the tanks move during the tick, so the
+        // solved flow sits just under the instantaneous conductance x head.
+        assertEquals(conductance * (5 - ratedHead), flowing.flows()[0], 1.0,
+                "the turbine passes what the fall leaves after its own rated head");
+
+        List<NodeSpec> uphill = List.of(
+                new NodeSpec(TANK_CAPACITANCE, 5),
+                new NodeSpec(TANK_CAPACITANCE, 10));
+        assertEquals(0, step(uphill, branches).flows()[0], 1e-9, "a turbine never flows backwards");
+    }
+
     @Test
     void threeTankStarEqualizesThroughJunction() {
         List<NodeSpec> nodes = List.of(
@@ -264,31 +300,39 @@ class NetworkSolverTest {
     }
 
     /**
-     * The SUCTION-side dual is config-gated: the pump's boost only exists on its push flank, so a
-     * pump above a low tank never self-primes its own dry riser (owner-confirmed realism) — unless
-     * the pack opts in ({@code enablePumpSelfPriming}). A self-priming branch (a running pump
-     * pulling across it) gets the SUCTION allowance for establishment, bounded by the same limit
-     * that afterwards sustains the column — never past it.
+     * The SUCTION-side dual is GRADED by the pump's own strength: its boost exists only on the
+     * push flank, so a pump above a low tank establishes through its dry riser on nothing but the
+     * share of head it can spend sucking ({@code pumpPullHeadFraction} — a tenth of its lift by
+     * default, so a 16 RPM pump gets 0.4 blocks). Deeper than that the line stays an air break
+     * until it is primed once, and the allowance can never reach past the suction limit that
+     * afterwards SUSTAINS the column.
      */
     @Test
-    void drySuctionCrestPrimesOnlyWithTheSelfPrimingGrant() {
+    void drySuctionCrestPrimesOnlyWithinThePumpsPullAllowance() {
         List<NodeSpec> tanks = List.of(
                 new NodeSpec(TANK_CAPACITANCE, 60),
                 new NodeSpec(TANK_CAPACITANCE, 50));
 
         // A suction flank carries NO emf; the riser's floor sits one block above the supply, dry.
-        BranchSpec strict = new BranchSpec(0, 1, 40, 0, 0, 61.5, 61, 0.5, false);
-        Result gated = step(tanks, List.of(strict));
-        assertEquals(0, gated.flows()[0], 1e-9, "a dry suction riser never self-primes by default");
+        BranchSpec unpumped = new BranchSpec(0, 1, 40, 0, 0, 61.5, 61, 0.5, false);
+        Result gated = step(tanks, List.of(unpumped));
+        assertEquals(0, gated.flows()[0], 1e-9, "an unpumped dry riser never self-primes");
         assertTrue(gated.crestBlocked()[0], "the strict gate reports the air break");
 
-        BranchSpec granted = new BranchSpec(0, 1, 40, 0, 0, 61.5, 61, 0.5, false, true);
-        assertTrue(step(tanks, List.of(granted)).flows()[0] > 0,
-                "the self-priming grant establishes through the dry riser");
+        // 16 RPM at the stock 0.25 blocks/RPM and a tenth of it for pulling: 0.4 blocks, well
+        // short of the block it would have to evacuate here.
+        BranchSpec tooWeak = new BranchSpec(0, 1, 40, 0, 0, 61.5, 61, 0.5, false, 0.4);
+        Result short0 = step(tanks, List.of(tooWeak));
+        assertEquals(0, short0.flows()[0], 1e-9, "a pull allowance short of the crest floor gates");
+        assertTrue(short0.crestBlocked()[0], "and it still reads as an air break");
 
-        BranchSpec beyondTheLimit = new BranchSpec(0, 1, 40, 0, 0, 70.5, 70, 0.5, false, true);
+        BranchSpec strongEnough = new BranchSpec(0, 1, 40, 0, 0, 61.5, 61, 0.5, false, 1.2);
+        assertTrue(step(tanks, List.of(strongEnough)).flows()[0] > 0,
+                "an allowance reaching the crest floor establishes through the dry riser");
+
+        BranchSpec beyondTheLimit = new BranchSpec(0, 1, 40, 0, 0, 70.5, 70, 0.5, false, 20);
         assertEquals(0, step(tanks, List.of(beyondTheLimit)).flows()[0], 1e-9,
-                "self-priming cannot establish past the suction limit");
+                "no allowance establishes past the suction limit");
     }
 
     /**

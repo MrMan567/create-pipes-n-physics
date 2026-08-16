@@ -3,12 +3,17 @@ package de.devin.pipesnphysics.gametest.blocks;
 import com.simibubi.create.content.fluids.transfer.FluidDrainingBehaviour;
 import com.simibubi.create.content.fluids.pump.PumpBlock;
 import com.simibubi.create.foundation.blockEntity.behaviour.BlockEntityBehaviour;
+import com.simibubi.create.foundation.blockEntity.behaviour.scrollValue.ScrollValueBehaviour;
 import de.devin.pipesnphysics.PipesNPhysics;
 import de.devin.pipesnphysics.engine.boundary.FluidCaps;
 import de.devin.pipesnphysics.engine.boundary.OpenEndPipes;
+import de.devin.pipesnphysics.engine.boundary.PulleyOutputMode;
 import de.devin.pipesnphysics.engine.boundary.RelayDetector;
 import de.devin.pipesnphysics.engine.store.PipeStore;
 import net.minecraft.core.BlockPos;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.core.Direction;
 import net.minecraft.gametest.framework.GameTest;
 import net.minecraft.gametest.framework.GameTestHelper;
@@ -45,6 +50,7 @@ public class HosePulleyTests {
     /** common/pump_into_pulley only: the pump replacing the pulley-side pipe, and its supply tank. */
     private static final BlockPos PUMP = new BlockPos(3, 5, 2);
     private static final BlockPos SUPPLY = new BlockPos(4, 5, 2);
+    private static final BlockPos MOTOR = new BlockPos(4, 5, 1);
 
     /**
      * A pulley that is simply DOING ITS JOB must never be learned as a relay. Its column is a
@@ -237,6 +243,87 @@ public class HosePulleyTests {
                 helper.succeed();
             });
         });
+    }
+
+    /**
+     * An output pulley must still be an output pulley after the world reloads. Its role was held in
+     * an in-memory set, so every reload dropped it — and drain-priority then read the pulley over the
+     * very water it had just deposited as a drainable body, resolving it as a one-way bottomless
+     * SOURCE. {@code Reservoir.fill} refuses to fill a one-way source, so nothing could ever be
+     * pushed out again: the line backed up and the pulley never placed another block, permanently
+     * (issue #58, "will not place fluid blocks after reversing flow multiple times" — reversing is
+     * incidental, it just gets water under the pulley; the reload is what loses the role, which is
+     * also why it sometimes struck on the very first try, and why the reporter could still pull the
+     * deposited water BACK: a source is exactly what an unlatched pulley over water becomes).
+     *
+     * The role now lives in the pulley's own NBT. Note what a red herring the sticky latch looked
+     * like: while fluid is actually flowing the pulley works fine forever, because every successful
+     * {@code tryDeposit} calls {@code drainer.counterpartActed()} and keeps the drainer from ever
+     * advertising a body — even a long supply pause recovers. Only the reload breaks it.
+     *
+     * Rig {@code common/pump_into_pulley} with the pond CLEARED: with nothing to drain the pulley
+     * resolves as the bottomless sink, and the pump pushes the supply tank out into the empty pit.
+     */
+    @GameTest(template = "common/pump_into_pulley", templateNamespace = PipesNPhysics.ID, timeoutTicks = 1200)
+    public static void outputPulleyKeepsItsRoleAcrossAReload(GameTestHelper helper) {
+        setPond(helper, Blocks.AIR); // nothing to drain — an OUTPUT pulley over an empty pit
+        fill(helper, SUPPLY, 4000);
+
+        helper.runAfterDelay(150, () -> {
+            BlockPos pulley = helper.absolutePos(PULLEY);
+            if (!OpenEndPipes.isPulleyOutput(helper.getLevel(), pulley)) {
+                helper.fail("rig broken: the pulley never deposited, so it never entered output mode "
+                        + "(supply holds " + amount(helper, SUPPLY) + " mB)");
+                return;
+            }
+            int beforeReload = pondWater(helper);
+            if (beforeReload == 0) {
+                helper.fail("rig broken: output mode latched but no fluid block was ever placed");
+                return;
+            }
+            reload(helper, PULLEY);
+            if (!OpenEndPipes.isPulleyOutput(helper.getLevel(), pulley)) {
+                helper.fail("the pulley lost its output role across a reload; standing over the water "
+                        + "it just placed it now reads as a one-way SOURCE and can never be filled again");
+                return;
+            }
+            fill(helper, SUPPLY, 4000);
+
+            helper.runAfterDelay(400, () -> {
+                int placed = pondWater(helper);
+                if (placed < beforeReload + 3) {
+                    helper.fail("the pulley stopped placing fluid blocks after the reload: the pit went "
+                            + "from " + beforeReload + " to " + placed + " blocks and the supply still "
+                            + "holds " + amount(helper, SUPPLY) + " mB");
+                    return;
+                }
+                helper.succeed();
+            });
+        });
+    }
+
+    /**
+     * Round-trip a block entity through its saved NBT, wiping the live copy in between — what
+     * quitting to the menu and loading back in does to it.
+     */
+    private static void reload(GameTestHelper helper, BlockPos rel) {
+        ServerLevel level = helper.getLevel();
+        BlockEntity be = level.getBlockEntity(helper.absolutePos(rel));
+        if (be == null) return;
+        CompoundTag saved = be.saveWithFullMetadata(level.registryAccess());
+        if (be instanceof PulleyOutputMode pulley) pulley.pipesnphysics$setOutput(false);
+        be.loadWithComponents(saved, level.registryAccess());
+    }
+
+    /** Source blocks standing in the 3x3 pit the pulley deposits into. */
+    private static int pondWater(GameTestHelper helper) {
+        int found = 0;
+        for (int x = 1; x <= 3; x++) {
+            for (int z = 1; z <= 3; z++) {
+                if (helper.getBlockState(new BlockPos(x, POND_Y, z)).is(Blocks.WATER)) found++;
+            }
+        }
+        return found;
     }
 
     /** Fill the whole 3x3 pond with one block — the user's "placing blocks in the body" edit. */

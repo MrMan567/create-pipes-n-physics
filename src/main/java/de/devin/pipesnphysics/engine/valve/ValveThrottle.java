@@ -19,6 +19,14 @@ public interface ValveThrottle {
     void pipesnphysics$adjustThrottle(int delta);
 
     /**
+     * Which way this valve's own shaft is turning right now: +1 opening, -1 closing, 0 while
+     * nothing turns it. Both inputs (raw shaft rotation and a Valve Handle's intent) take their
+     * direction from here, so the two can never disagree, and every reversal in the drivetrain
+     * (a gearshift, a gearbox output) reverses the valve exactly as it does any other kinetic block.
+     */
+    int pipesnphysics$openingSign();
+
+    /**
      * The single world direction this valve lets fluid flow, or null when it passes BOTH ways
      * (the default, and always null with the one-way feature off). A non-null direction makes
      * the valve a CHECK VALVE: {@code GraphBuilder} forces its cell to a graph node and the

@@ -62,6 +62,8 @@ public record PipeStatusPayload(
     public static final byte DETAIL_BELOW_OPENING = 9;
     /** A run stopped by a ONE-WAY valve: the pressure wants to flow against its direction. */
     public static final byte DETAIL_CHECK_VALVE = 10;
+    /** A run into a TURBINE whose fall is short of the turbine's rating — nothing turns it. */
+    public static final byte DETAIL_TURBINE_FALL = 11;
 
     public static final Type<PipeStatusPayload> TYPE =
             new Type<>(PipesNPhysics.asResource("pipe_status"));

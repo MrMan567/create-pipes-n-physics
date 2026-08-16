@@ -1035,4 +1035,78 @@ public class FlowBrigadeTests {
             helper.succeed();
         });
     }
+
+    /**
+     * Branches of DIFFERENT length off one junction split by their fittings as well as their
+     * length. A run's resistance is {@code length + PIPE_FITTING_LENGTH} — the tee it branches
+     * off, its elbows, and its two ends counted as the straight pipe they cost — so a 2-cell
+     * branch beside a 6-cell one takes 11/7 of it, not the 7/3 that raw length alone would say.
+     *
+     * That is the physical answer, not a fairness knob: real pipe flow is turbulent, its loss goes
+     * as the SQUARE of the rate, and parallel branches sharing one junction pressure then divide
+     * as 1/sqrt(length) — 6-against-2 splits 63/37 in reality, where a linear 1/length model says
+     * 70/30 and drifts further apart the more the lengths differ. The engine's loss law has to
+     * stay linear (that is what keeps one implicit Euler solve per tick), so charging the fittings
+     * is how the turbulent ratio is reproduced; it tracks it within a couple of points over the
+     * whole practical range of runs.
+     *
+     * Rig: a CREATIVE supply tank (an infinite reservoir at a fixed surface) pumped into a
+     * junction that feeds a 2-cell and a 6-cell branch. Both sinks are emptied every tick, so
+     * neither builds a head of its own — otherwise the branch that wins fills its tank first,
+     * backs its own flow off, and the measured split evens out on its way to being wrong. What
+     * is measured is what each sink actually RECEIVES over a window after both branches prime.
+     *
+     * Mutation check: divide by {@code edge.length() + 1} again and the split reads ~2.33.
+     */
+    // Own batch: pins PIPE_FITTING_LENGTH across the whole run, and batches are the only
+    // isolation gametests have (see manifoldSlotServesAllFeeders).
+    @GameTest(template = "physics/manifold_uneven", templateNamespace = PipesNPhysics.ID, timeoutTicks = 300, batch = "pinnedConfig")
+    public static void unevenBranchesSplitByFittingsNotLengthAlone(GameTestHelper helper) {
+        BlockPos shortSink = new BlockPos(5, 1, 0);
+        BlockPos longSink = new BlockPos(9, 1, 2);
+        int shortCells = 2;
+        int longCells = 6;
+        // The long branch holds 6 cells of pipe to prime at roughly 25 mB/t; measure well past that.
+        int windowStart = 100;
+        int windowEnd = 180;
+
+        double priorFittings = PipesNPhysicsConfig.PIPE_FITTING_LENGTH.get();
+        PipesNPhysicsConfig.PIPE_FITTING_LENGTH.set(5.0);
+        double fittings = PipesNPhysicsConfig.PIPE_FITTING_LENGTH.get();
+
+        int[] received = new int[2];
+        for (int tick = 1; tick <= windowEnd; tick++) {
+            boolean counts = tick > windowStart;
+            helper.runAtTickTime(tick, () -> {
+                if (counts) {
+                    received[0] += amount(helper, shortSink);
+                    received[1] += amount(helper, longSink);
+                }
+                drain(helper, shortSink);
+                drain(helper, longSink);
+            });
+        }
+
+        helper.runAtTickTime(windowEnd + 1, () -> {
+            PipesNPhysicsConfig.PIPE_FITTING_LENGTH.set(priorFittings);
+            if (received[0] < 500 || received[1] < 500) {
+                helper.fail("a branch barely ran: short " + received[0] + " mB, long "
+                        + received[1] + " mB over " + (windowEnd - windowStart) + " ticks"
+                        + dump(helper, new BlockPos(3, 1, 1)));
+                return;
+            }
+            double predicted = (longCells + fittings) / (shortCells + fittings);
+            double measured = received[0] / (double) received[1];
+            if (Math.abs(measured - predicted) > 0.2 * predicted) {
+                helper.fail(String.format(
+                        "uneven branches split %.2f:1 (short %d mB, long %d mB) — their"
+                        + " conductances say %.2f:1 at %.0f blocks of fittings; raw length alone"
+                        + " would say %.2f:1", measured, received[0], received[1], predicted,
+                        fittings, (longCells + 1) / (double) (shortCells + 1))
+                        + dump(helper, new BlockPos(3, 1, 1)));
+                return;
+            }
+            helper.succeed();
+        });
+    }
 }

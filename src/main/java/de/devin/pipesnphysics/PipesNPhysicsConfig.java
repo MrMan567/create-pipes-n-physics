@@ -14,6 +14,7 @@ public class PipesNPhysicsConfig {
     // Server
     public static final ModConfigSpec.BooleanValue ENABLE_ENGINE;
     public static final ModConfigSpec.DoubleValue PIPE_CONDUCTANCE;
+    public static final ModConfigSpec.DoubleValue PIPE_FITTING_LENGTH;
     public static final ModConfigSpec.DoubleValue PUMP_HEAD_PER_RPM;
     public static final ModConfigSpec.DoubleValue PUMP_FLOW_PER_RPM;
     public static final ModConfigSpec.IntValue MAX_FLOW_PER_ENDPOINT;
@@ -21,11 +22,16 @@ public class PipesNPhysicsConfig {
     public static final ModConfigSpec.DoubleValue SUCTION_LIMIT;
     public static final ModConfigSpec.DoubleValue ULTRAWARM_VISCOSITY_THINNING;
     public static final ModConfigSpec.IntValue MOLTEN_TEMPERATURE_K;
+    public static final ModConfigSpec.DoubleValue PUMP_PULL_HEAD_FRACTION;
     public static final ModConfigSpec.BooleanValue PUMP_DRAIN_ANY_LEVEL;
-    public static final ModConfigSpec.BooleanValue ENABLE_PUMP_SELF_PRIMING;
     public static final ModConfigSpec.BooleanValue ENABLE_OPEN_END_INTAKE;
     public static final ModConfigSpec.IntValue OPEN_END_INTAKE_COOLDOWN_TICKS;
     public static final ModConfigSpec.BooleanValue FORCE_OPEN_END_OUTPUT;
+    public static final ModConfigSpec.BooleanValue ENABLE_HYDRO_TURBINE;
+    public static final ModConfigSpec.DoubleValue TURBINE_RPM;
+    public static final ModConfigSpec.DoubleValue TURBINE_HEAD_PER_RPM;
+    public static final ModConfigSpec.DoubleValue TURBINE_FLOW_PER_RPM;
+    public static final ModConfigSpec.DoubleValue TURBINE_SU_PER_POWER;
     public static final ModConfigSpec.BooleanValue ENABLE_VALVE_THROTTLE;
     public static final ModConfigSpec.EnumValue<ValveCharacteristic> VALVE_CHARACTERISTIC;
     public static final ModConfigSpec.BooleanValue ENABLE_VALVE_ONE_WAY;
@@ -86,14 +92,6 @@ public class PipesNPhysicsConfig {
                         "actively drawing from the tank; plain gravity flow still can't leave an opening above",
                         "the waterline. The suction limit still bounds how far the pump can lift.")
                 .define("pumpDrainAnyLevel", false);
-        ENABLE_PUMP_SELF_PRIMING = server
-                .comment("Let a RUNNING pump establish flow through its own DRY suction line (a self-priming",
-                        "pump). Off (realistic): a pump above the waterline churns air until the line is",
-                        "primed once — raise the supply past the first riser cell, then it sustains down to",
-                        "the suction limit and keeps its prime across pauses. On: a pump-pulled dry crest",
-                        "may establish within the suction limit above the supply's surface, so the classic",
-                        "pump-above-a-tank rig starts on its own. Unpowered siphons never self-prime either way.")
-                .define("enablePumpSelfPriming", false);
         ENABLE_OPEN_END_INTAKE = server
                 .comment("Let an open pipe end draw fluid IN from the world when the network is",
                         "under suction (its head sits below the pipe mouth): a self-regenerating source",
@@ -147,7 +145,17 @@ public class PipesNPhysicsConfig {
         PIPE_CONDUCTANCE = server
                 .comment("Flow in mB/tick that one pipe segment passes per block of head difference.",
                         "Higher values equalize tanks faster and raise throughput everywhere.")
-                .defineInRange("pipeConductance", 120.0, 0.1, 10000.0);
+                .defineInRange("pipeConductance", 240.0, 0.1, 10000.0);
+        PIPE_FITTING_LENGTH = server
+                .comment("How many blocks of straight pipe a run's FITTINGS are worth — the tee it",
+                        "branches off, its elbows, and the entry and exit at its ends. Real plumbing",
+                        "loses far more head to fittings than to a few blocks of pipe, so this is what",
+                        "keeps a short branch from beating a longer one by its length ratio: at a",
+                        "junction, two branches split their flow as 1/(length + this) each, which at",
+                        "the default tracks the square-root split of real turbulent pipe flow closely",
+                        "(2 blocks against 8 splits 65/35, where raw length alone would say 75/25).",
+                        "Raise it to make pipe length matter even less; 1 restores pure length.")
+                .defineInRange("pipeFittingLength", 5.0, 1.0, 64.0);
         PUMP_HEAD_PER_RPM = server
                 .comment("Blocks of head a pump adds per RPM.",
                         "At 0.25, a pump running at 64 RPM can lift fluid 16 blocks.")
@@ -157,6 +165,16 @@ public class PipesNPhysicsConfig {
                         "Together with pumpHeadPerRpm this defines the pump curve:",
                         "flow falls toward zero as the opposing head approaches the pump's head.")
                 .defineInRange("pumpFlowPerRpm", 1.0, 0.01, 100.0);
+        PUMP_PULL_HEAD_FRACTION = server
+                .comment("How deep a running pump can start pulling through its own DRY suction line,",
+                        "as a fraction of the head it pushes with. A pump SUCKS far more weakly than",
+                        "it pushes: at 0.1 a 16 RPM pump lifts 4 blocks but only draws a dry line down",
+                        "0.4 blocks below the pipe it opens into, so a supply well under the pump still",
+                        "has to be primed once by hand (or reached with more RPM). Only ESTABLISHING",
+                        "costs this; once the line holds fluid the column sustains down to the full",
+                        "suction limit, and unpowered siphons are governed by that limit alone.",
+                        "0 = never self-prime (a dry pump above the waterline churns air until primed).")
+                .defineInRange("pumpPullHeadFraction", 0.1, 0.0, 1.0);
         MAX_FLOW_PER_ENDPOINT = server
                 .comment("Hard cap on fluid moved into or out of a single tank or machine per tick, in mB.")
                 .defineInRange("maxFlowPerEndpoint", 256, 1, 8192);
@@ -183,6 +201,42 @@ public class PipesNPhysicsConfig {
                         "MOLTEN for the ultrawarm thinning above (lava is 1300, water 300 — modded",
                         "molten metals typically 1000+).")
                 .defineInRange("moltenTemperatureKelvin", 1000, 0, 100000);
+        server.pop();
+
+        // --------------------------------------------------------------- Turbine
+        server.comment("The Mechanical Pump run BACKWARDS: dial a pump to TURBINE and fluid",
+                        "falling through it turns it into a Create generator instead of a",
+                        "consumer. A turbine is the exact dual of a pump — it SUBTRACTS its rated",
+                        "head instead of adding it — so it needs a real drop before it passes",
+                        "anything, and it swallows at most its rated flow.",
+                        "Its RPM is a fixed tier ON PURPOSE and must never be derived from the",
+                        "flow: Create breaks a generator whose speed flickers or flips sign, and",
+                        "the fixed tier is also what caps the power a pump-fed loop can win back.")
+                .push("turbine");
+        ENABLE_HYDRO_TURBINE = server
+                .comment("Whether a Mechanical Pump can run backwards as a turbine at all.",
+                        "A pump placed from now on comes up AUTOMATIC: it pumps while a shaft",
+                        "drives it and turbines while nothing does. Pumps already built keep",
+                        "their old behaviour until you dial them.")
+                .define("enableHydroTurbine", true);
+        TURBINE_RPM = server
+                .comment("The fixed speed a generating turbine produces, in RPM (a water wheel is 8).")
+                .defineInRange("turbineRpm", 8.0, 1.0, 256.0);
+        TURBINE_HEAD_PER_RPM = server
+                .comment("Blocks of head a turbine takes out of the line per RPM of its rating.",
+                        "At 0.25 and 8 RPM a turbine needs a 2-block fall before it turns at all.")
+                .defineInRange("turbineHeadPerRpm", 0.25, 0.01, 100.0);
+        TURBINE_FLOW_PER_RPM = server
+                .comment("How much a turbine can swallow per RPM of its rating, in mB/tick.",
+                        "At 8.0 and 8 RPM it passes at most 64 mB/t; a stronger supply backs up.")
+                .defineInRange("turbineFlowPerRpm", 8.0, 0.01, 1000.0);
+        TURBINE_SU_PER_POWER = server
+                .comment("Stress units produced per block of rated fall per mB/tick passed.",
+                        "A bigger drop drives more water through and earns more; what bounds one",
+                        "turbine is the piping, not a cap. At 2.0 a pump feeding a turbine breaks",
+                        "even at every speed, which turns a closed loop into free power, so the",
+                        "default leaves a factor of two of loss.")
+                .defineInRange("turbineSuPerPower", 1.0, 0.0, 100.0);
         server.pop();
 
         // ---------------------------------------------------------------- Valves
@@ -333,10 +387,10 @@ public class PipesNPhysicsConfig {
                         "at a pipe with Engineer's Goggles.")
                 .define("showPipeGoggleInfo", true);
         SHOW_PUMP_REACH_OVERLAY = client
-                .comment("Colour the pipes around a pump while looking at it with Engineer's",
-                        "Goggles, by how much reach is left: green on the side it pushes,",
-                        "blue on the side it pulls, warming to amber as the last blocks of",
-                        "lift are spent and turning red past the elevation it cannot reach.")
+                .comment("Colour the pipes a pump can reach GREEN while looking at it with",
+                        "Engineer's Goggles: the run from its supply's surface up to the",
+                        "elevation it can still push to (or draw up from). Pipe past that",
+                        "limit is left alone, so where the green stops is how far it goes.")
                 .define("showPumpReachOverlay", true);
         SHOW_VALVE_DIRECTION_ARROWS = client
                 .comment("Show a sliding arrow through every ONE-WAY fluid valve (its allowed",

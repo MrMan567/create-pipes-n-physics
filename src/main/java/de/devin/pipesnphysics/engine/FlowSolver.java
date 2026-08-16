@@ -11,6 +11,8 @@ import de.devin.pipesnphysics.engine.graph.Node;
 import de.devin.pipesnphysics.engine.solve.NetworkSolver;
 import de.devin.pipesnphysics.engine.store.PipeStore;
 import de.devin.pipesnphysics.engine.store.PipeWindow;
+import de.devin.pipesnphysics.engine.turbine.HydroTurbine;
+import de.devin.pipesnphysics.engine.turbine.TurbineRating;
 import de.devin.pipesnphysics.engine.valve.ValveThrottle;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -263,22 +265,45 @@ public final class FlowSolver {
      * {@code |RPM| · flowPerRpm} mB/tick. Without that cap the solver would draw
      * enormous flows whose friction drawdown drags suction-side heads far below the
      * pipes and falsely trips the cavitation gate.
+     *
+     * A TURBINE is the same record with the head NEGATED: it takes its rated head back out of the
+     * line instead of adding it, keeps the identical one-way flanks (so it conducts only along
+     * FACING, which is what pins its rotation to one sign), and caps throughput at its own
+     * swallowing capacity. {@code driving} tells the two apart wherever the difference matters —
+     * a turbine is not the run's pump, however fast it happens to be turning.
      */
     record PumpState(boolean open, double head, Direction pushSide,
-                     double internalConductance) {}
+                     double internalConductance, boolean driving) {}
 
     private static Map<Integer, PumpState> collectPumps(Level level, Graph graph) {
         double headPerRpm = PipesNPhysicsConfig.PUMP_HEAD_PER_RPM.get();
         double flowPerRpm = PipesNPhysicsConfig.PUMP_FLOW_PER_RPM.get();
         Map<Integer, PumpState> pumps = new HashMap<>();
         for (Node pump : graph.pumps()) {
+            if (isTurbine(level, pump)) {
+                pumps.put(pump.index(), new PumpState(pump.pumpFacing() != null,
+                        -TurbineRating.ratedHead(), pump.pumpFacing(),
+                        TurbineRating.internalConductance(), false));
+                continue;
+            }
             float speed = level.getBlockEntity(pump.pos()) instanceof KineticBlockEntity kinetic
                     ? kinetic.getSpeed() : 0;
             double head = Math.abs(speed) * headPerRpm;
             pumps.put(pump.index(), new PumpState(isPumpRunning(level, pump), head, pump.pumpFacing(),
-                    flowPerRpm / headPerRpm));
+                    flowPerRpm / headPerRpm, true));
         }
         return pumps;
+    }
+
+    /**
+     * Whether this pump is dialed to run backwards as a turbine. Such a pump is never "running"
+     * (below) however fast the falling water spins it: the fluid drives IT, not the other way
+     * round, so none of the pump-driven machinery — priming its outlet, delivering through it,
+     * lifting an open mouth into suction — applies.
+     */
+    public static boolean isTurbine(Level level, Node pump) {
+        return level.getBlockEntity(pump.pos()) instanceof HydroTurbine turbine
+                && turbine.pipesnphysics$isTurbine();
     }
 
     /**
@@ -291,6 +316,7 @@ public final class FlowSolver {
      */
     public static boolean isPumpRunning(Level level, Node pump) {
         if (pump.pumpFacing() == null) return false;
+        if (isTurbine(level, pump)) return false;
         return level.getBlockEntity(pump.pos()) instanceof KineticBlockEntity kinetic
                 && Math.abs(kinetic.getSpeed()) > MIN_PUMP_SPEED;
     }
@@ -359,23 +385,39 @@ public final class FlowSolver {
      * second copy of it drifting apart from it.
      *
      * A PRIMED column may hang the suction limit below the run's crest. A DRY one cannot be
-     * CREATED at all — suction holds a column, it never makes one — so nothing is drawable until
-     * the supply itself rises to the crest cell's lip, unless the pack opted into pump
-     * self-priming, which grants the same limit for establishing. That difference is the whole
-     * reason a pump parked above the waterline with a dry riser reaches nothing, however deep its
-     * nominal suction limit would allow. An edge with no cells has no crest and answers
-     * {@code fallback}.
+     * CREATED that way — suction holds a column, it never makes one — so nothing below the crest
+     * cell's lip is drawable except the little a running pump can evacuate on its own pulling
+     * share ({@code primeAllowance}, from {@link #pumpPrimeAllowance}). That difference is the
+     * whole reason a pump parked well above the waterline with a dry riser reaches nothing,
+     * however deep its nominal suction limit would allow. An edge with no cells has no crest and
+     * answers {@code fallback}.
      *
      * Multi-edge suction paths are approximated per edge: the binding crest is really the highest
      * cell along the whole path, which for the single-run case (the common one) is the same thing.
      */
-    public static double drawableFloor(Level level, Graph graph, Edge edge, double fallback) {
+    public static double drawableFloor(Level level, Graph graph, Edge edge, double fallback,
+                                       double primeAllowance) {
         EdgeStatics statics = edgeStatics(level, graph, edge);
         if (Double.isNaN(statics.crestHeight())) return fallback;
         double suction = PipesNPhysicsConfig.SUCTION_LIMIT.get();
         if (statics.crestWet()) return statics.crestHeight() - suction;
-        return statics.crestFloor()
-                - (PipesNPhysicsConfig.ENABLE_PUMP_SELF_PRIMING.get() ? suction : 0);
+        return statics.crestFloor() - Math.min(primeAllowance, suction);
+    }
+
+    /**
+     * How far a pump developing {@code pumpHead} blocks of push may establish DOWN through its own
+     * dry suction line: a pump sucks far more weakly than it pushes, so it spends only
+     * {@code pumpPullHeadFraction} of its head doing it (0.1 by default — a 16 RPM pump lifts 4
+     * blocks and starts a dry line 0.4 below the pipe). Clamped to the suction limit, which is
+     * cavitation and belongs to the fluid rather than to the pump: no RPM buys a column past it.
+     *
+     * Establishment ONLY. Once the line holds fluid the crest is wet and the column sustains down
+     * to the full suction limit like any siphon — the fraction never shrinks a working line.
+     */
+    public static double pumpPrimeAllowance(double pumpHead) {
+        if (pumpHead <= 0) return 0;
+        return Math.min(pumpHead * PipesNPhysicsConfig.PUMP_PULL_HEAD_FRACTION.get(),
+                PipesNPhysicsConfig.SUCTION_LIMIT.get());
     }
 
     /** One edge's fluid-independent statics: its valve throttle and its crest geometry. */

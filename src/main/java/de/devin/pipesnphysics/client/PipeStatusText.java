@@ -15,7 +15,11 @@ public final class PipeStatusText {
     public static String reasonKey(PipeStatusPayload data) {
         return switch (data.status()) {
             case PipeStatusPayload.STATUS_NOT_CONNECTED -> "gui.goggles.not_connected";
-            case PipeStatusPayload.STATUS_NO_HEAD -> "gui.goggles.no_head";
+            // NO_HEAD on a turbine's run is the mirror image of a pump's: nothing is being asked to
+            // lift, the fall is short of what the turbine demands before it turns.
+            case PipeStatusPayload.STATUS_NO_HEAD ->
+                    data.statusDetail() == PipeStatusPayload.DETAIL_TURBINE_FALL
+                            ? "gui.goggles.detail.turbine_fall" : "gui.goggles.no_head";
             case PipeStatusPayload.STATUS_NO_FLOW -> noFlowKey(data);
             case PipeStatusPayload.STATUS_BLOCKED, PipeStatusPayload.STATUS_STALLED -> detailKey(data);
             default -> "gui.goggles.no_flow_dry";
@@ -49,7 +53,9 @@ public final class PipeStatusText {
                 && data.status() != PipeStatusPayload.STATUS_NO_FLOW
                 && data.statusDetail() != PipeStatusPayload.DETAIL_CREST
                 && data.statusDetail() != PipeStatusPayload.DETAIL_BELOW_OPENING
-                && data.statusDetail() != PipeStatusPayload.DETAIL_CHECK_VALVE;
+                && data.statusDetail() != PipeStatusPayload.DETAIL_CHECK_VALVE
+                // A turbine's stop is about the FALL it is given, not about lift left to spend.
+                && data.statusDetail() != PipeStatusPayload.DETAIL_TURBINE_FALL;
     }
 
     private static String noFlowKey(PipeStatusPayload data) {

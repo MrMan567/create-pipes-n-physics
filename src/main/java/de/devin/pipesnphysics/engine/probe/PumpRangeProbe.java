@@ -39,8 +39,9 @@ import java.util.Set;
  *   a ceiling of 60.59, not 64.5, so a sink at 62 is out of reach and really NO_HEAD).
  * - the PULL floor is {@link FlowSolver#drawableFloor}, the solve's crest gate. NOT
  *   {@code pumpY − SUCTION_LIMIT}, which ignores priming — a pump above the waterline
- *   with a DRY riser can draw nothing at all until the supply reaches the crest cell's
- *   lip, however deep the nominal limit would allow.
+ *   with a DRY riser reaches only as deep as the small share of head it can spend
+ *   sucking ({@link FlowSolver#pumpPrimeAllowance}, a tenth of its lift by default),
+ *   however deep the nominal limit would allow.
  *
  * The walk starts at the pump, branches through junctions, and stops at other pumps
  * and at endpoints. Each visited cell carries its reach MARGIN in blocks — how far
@@ -93,7 +94,8 @@ public final class PumpRangeProbe {
         Reach fallback = new Reach(
                 pump.worldY(), supplyHead, supplyHead + pumpHead, pump.worldY() - suction);
 
-        Walker walker = new Walker(level, graph, solution, fallback, suction);
+        Walker walker = new Walker(level, graph, solution, fallback, suction,
+                FlowSolver.pumpPrimeAllowance(pumpHead));
         for (Edge edge : graph.edgesOf(pump.index())) {
             BlockPos toward = PipeGeometry.adjacentCell(graph, edge, pump.index());
             boolean push = toward.equals(pumpPos.relative(pump.pumpFacing()));
@@ -154,17 +156,21 @@ public final class PumpRangeProbe {
         /** Used where the solve recorded no ceiling — the pump's own elevation is all there is. */
         final Reach fallback;
         final double suction;
+        /** This pump's share of head for sucking, spent establishing through a DRY suction line. */
+        final double primeAllowance;
         final Set<Integer> visited = new HashSet<>();
         final List<PumpRangePayload.RangePath> paths = new ArrayList<>();
         /** Visited-cell budget: once {@code MAX_CELLS} are consumed the walk emits what it has and stops. */
         int visitedCells;
 
-        Walker(ServerLevel level, Graph graph, Solution solution, Reach fallback, double suction) {
+        Walker(ServerLevel level, Graph graph, Solution solution, Reach fallback, double suction,
+               double primeAllowance) {
             this.level = level;
             this.graph = graph;
             this.solution = solution;
             this.fallback = fallback;
             this.suction = suction;
+            this.primeAllowance = primeAllowance;
         }
 
         /**
@@ -173,7 +179,8 @@ public final class PumpRangeProbe {
          * pull floor from the solve's own crest gate.
          */
         Reach reachOn(Edge edge) {
-            double pullFloor = FlowSolver.drawableFloor(level, graph, edge, fallback.pullFloor());
+            double pullFloor = FlowSolver.drawableFloor(level, graph, edge, fallback.pullFloor(),
+                    primeAllowance);
             Double a = solution.nodeCeilings().get(edge.a());
             Double b = solution.nodeCeilings().get(edge.b());
             if (a == null && b == null) {

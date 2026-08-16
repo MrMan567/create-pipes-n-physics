@@ -42,6 +42,7 @@ import de.devin.pipesnphysics.engine.valve.ValveDirectionBehaviour;
 import de.devin.pipesnphysics.engine.valve.ValveThrottle;
 import de.devin.pipesnphysics.handler.NetworkEditHandler;
 import de.devin.pipesnphysics.mixin.FluidTankAccessor;
+import de.devin.pipesnphysics.mixin.FluidValveAccessor;
 import de.devin.pipesnphysics.mixin.PipeConnectionAccessor;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -627,6 +628,53 @@ public class ValveTests {
     }
 
     /**
+     * The handle a player SEES must say what the valve actually passes. A valve comes into the
+     * world fully open (90 degrees), but Create only ever re-aims its pointer on a SPEED change,
+     * and starts it at 0 — so a freshly placed valve read shut on its face while flowing
+     * everything through ("the dial does not match the actual pass through rate"). The needle is
+     * now pointed at the opening every tick, snapping the first time rather than winding up from
+     * shut. The server ticks the chaser too, so the position is readable here.
+     */
+    @GameTest(template = "common/simple_fluid_leveling", templateNamespace = PipesNPhysics.ID, timeoutTicks = 100)
+    public static void freshValveHandleMatchesItsOpening(GameTestHelper helper) {
+        BlockPos valve = new BlockPos(0, 1, 0); // simple_fluid_leveling: the U-bottom-left pipe cell
+        helper.runAfterDelay(2, () -> helper.setBlock(valve, AllBlocks.FLUID_VALVE.get().defaultBlockState()
+                .setValue(FluidValveBlock.FACING, Direction.UP)));
+
+        // One tick is all it may take: the needle SNAPS on first sight, it does not wind open.
+        helper.runAfterDelay(4, () -> {
+            Level level = helper.getLevel();
+            BlockPos abs = helper.absolutePos(valve);
+            int angle = BlockEntityBehaviour.get(level, abs, ScrollValueBehaviour.TYPE).getValue();
+            if (angle != 90) {
+                helper.fail("a placed valve should come up fully open, got " + angle);
+                return;
+            }
+            if (!valveHandleReads(helper, abs, 1f)) return;
+
+            setThrottle(level, abs, 45);
+            helper.runAfterDelay(30, () -> { // no shaft, so it eases over at the idle chase speed
+                if (!valveHandleReads(helper, abs, 0.5f)) return;
+                helper.succeed();
+            });
+        });
+    }
+
+    /** Whether the valve's needle sits where its opening says it should. */
+    private static boolean valveHandleReads(GameTestHelper helper, BlockPos valveAbs, float expected) {
+        if (!(helper.getLevel().getBlockEntity(valveAbs) instanceof FluidValveAccessor valve)) {
+            helper.fail("no valve block entity at " + valveAbs);
+            return false;
+        }
+        float actual = valve.pipesnphysics$pointer().getValue();
+        if (Math.abs(actual - expected) > 0.01f) {
+            helper.fail("the valve's handle reads " + actual + " while its opening is " + expected);
+            return false;
+        }
+        return true;
+    }
+
+    /**
      * The valve-side of the crank: a Valve Handle adds its set angle to connected valves via
      * {@code adjustThrottle}, which must step the opening by that many degrees and clamp 0–90.
      * (The handle applies its INTENT directly because its actual shaft rotation overshoots a small
@@ -924,6 +972,76 @@ public class ValveTests {
         BlockState state = level.getBlockState(valveAbs);
         int value = ValveDirectionBehaviour.directionFor(state, 1) == direction ? 1 : 2;
         dial.setValue(value);
+    }
+
+    /**
+     * A valve follows the rotation REACHING IT, exactly as Create's own does
+     * ({@code pointer.chase(speed > 0 …)}). So anything in the drivetrain that reverses that
+     * rotation reverses the valve: a gearshift flipping, a gearbox output, a crank turned back.
+     *
+     * The rig is a creative motor into a gearbox with a valve on each of two outputs whose signs
+     * Create deliberately opposes: one EAST of the box on an X shaft, one SOUTH of it on a Z shaft.
+     * The opposition is asserted first, so the rig can never go vacuous. Both valves start half
+     * open, and the one being turned FORWARD must climb to fully open while the one being turned
+     * BACK must close, each read off its own speed rather than hardcoded. Taking the direction at
+     * the network's SOURCE instead (as an earlier version did) makes both climb together and leaves
+     * every gearshift in the drivetrain inert, which is what this pins against. The Valve Handle
+     * path multiplies the same sign but cannot be driven here, since {@code activate} refuses to
+     * crank a shaft the motor already turns.
+     */
+    @GameTest(template = "blocks/valve_crank_pair", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
+    public static void reversedDrivetrainCranksItsValveTheOtherWay(GameTestHelper helper) {
+        BlockPos eastValve = new BlockPos(3, 1, 0);  // on the gearbox's X output
+        BlockPos southValve = new BlockPos(2, 1, 1); // on its Z output, reversed by the gearbox
+
+        helper.runAfterDelay(5, () -> {
+            Level level = helper.getLevel();
+            BlockPos eastAbs = helper.absolutePos(eastValve);
+            BlockPos southAbs = helper.absolutePos(southValve);
+
+            if (!(level.getBlockEntity(eastAbs) instanceof KineticBlockEntity east)
+                    || !(level.getBlockEntity(southAbs) instanceof KineticBlockEntity south)) {
+                helper.fail("valve block entities missing"); return;
+            }
+            if (east.getSpeed() == 0 || south.getSpeed() == 0) {
+                helper.fail("the motor is not driving both valves: east=" + east.getSpeed()
+                        + " south=" + south.getSpeed());
+                return;
+            }
+            if (Math.signum(east.getSpeed()) == Math.signum(south.getSpeed())) {
+                helper.fail("rig is vacuous: the gearbox no longer opposes the two outputs, east="
+                        + east.getSpeed() + " south=" + south.getSpeed());
+                return;
+            }
+            if (((ValveThrottle) east).pipesnphysics$openingSign()
+                    == ((ValveThrottle) south).pipesnphysics$openingSign()) {
+                helper.fail("a reversed output must crank its valve the other way, but both read "
+                        + ((ValveThrottle) east).pipesnphysics$openingSign());
+                return;
+            }
+            setThrottle(level, eastAbs, 45);
+            setThrottle(level, southAbs, 45);
+        });
+
+        // 4.5 degrees of travel per tick at the motor's 16 RPM, so half open runs out in ten either way.
+        helper.runAfterDelay(40, () -> {
+            Level level = helper.getLevel();
+            assertCrankedTo(helper, level, eastValve, "east");
+            assertCrankedTo(helper, level, southValve, "south");
+            helper.succeed();
+        });
+    }
+
+    /** A valve turned forward must have reached fully open, one turned back must have shut. */
+    private static void assertCrankedTo(GameTestHelper helper, Level level, BlockPos valve, String name) {
+        BlockPos abs = helper.absolutePos(valve);
+        float speed = level.getBlockEntity(abs) instanceof KineticBlockEntity kinetic ? kinetic.getSpeed() : 0;
+        int expected = speed > 0 ? 90 : 0;
+        int actual = BlockEntityBehaviour.get(level, abs, ScrollValueBehaviour.TYPE).getValue();
+        if (actual != expected) {
+            helper.fail("the " + name + " valve turns at " + speed + " so it should have cranked to "
+                    + expected + ", got " + actual);
+        }
     }
 
     /**
